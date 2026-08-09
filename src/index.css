@@ -1,0 +1,222 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==========================================================================
+   Selsolve design tokens
+   A single accent ramp (indigo) with semantic money colours. Dark mode is a
+   deep navy rather than pure black so long accounting sessions stay readable.
+   ========================================================================== */
+
+@layer base {
+  :root {
+    --bg-main: #f6f7fb;
+    --bg-subtle: #eef1f7;
+    --surface: #ffffff;
+    --surface-raised: #ffffff;
+    --border: #e3e8f0;
+    --border-strong: #cdd5e3;
+    --text-primary: #0d1526;
+    --text-secondary: #5a6579;
+    --text-muted: #8a94a6;
+    --accent: #4f46e5;
+    --accent-soft: #eef2ff;
+    --positive: #059669;
+    --negative: #e11d48;
+    --shadow-sm: 0 1px 2px rgba(13, 21, 38, 0.06);
+    --shadow-md: 0 4px 16px -4px rgba(13, 21, 38, 0.1);
+    --shadow-lg: 0 24px 48px -20px rgba(13, 21, 38, 0.28);
+  }
+
+  .dark {
+    --bg-main: #070b16;
+    --bg-subtle: #0c1222;
+    --surface: #0f1729;
+    --surface-raised: #141d33;
+    --border: #1e2a44;
+    --border-strong: #2b3a5c;
+    --text-primary: #eef2f9;
+    --text-secondary: #97a3ba;
+    --text-muted: #6b7891;
+    --accent: #818cf8;
+    --accent-soft: #1c2445;
+    --positive: #34d399;
+    --negative: #fb7185;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 4px 20px -6px rgba(0, 0, 0, 0.6);
+    --shadow-lg: 0 28px 60px -24px rgba(0, 0, 0, 0.8);
+  }
+
+  body {
+    background-color: var(--bg-main);
+    color: var(--text-primary);
+    @apply font-sans antialiased min-h-screen transition-colors duration-200;
+    font-feature-settings: 'cv02', 'cv03', 'cv04';
+  }
+
+  /* Money and quantities must line up column-to-column. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum';
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .surface {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .surface-raised {
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-md);
+  }
+
+  /* Legacy aliases kept so existing screens continue to render correctly. */
+  .panel-light,
+  .glass-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .field-input {
+    @apply w-full rounded-xl px-3 py-2 text-[13px] font-medium transition-colors;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+  }
+
+  .field-input::placeholder {
+    color: var(--text-muted);
+  }
+
+  .field-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    background: var(--surface);
+  }
+
+  .field-input:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  .label-eyebrow {
+    @apply text-[10px] font-bold uppercase tracking-[0.09em];
+    color: var(--text-muted);
+  }
+
+  .ledger-table thead th {
+    @apply sticky top-0 z-10 py-2.5 px-3 text-left text-[10px] font-bold uppercase tracking-[0.07em];
+    background: var(--bg-subtle);
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .ledger-table tbody td {
+    @apply py-2.5 px-3 text-[13px];
+    border-bottom: 1px solid var(--border);
+  }
+
+  .ledger-table tbody tr:last-child td {
+    border-bottom: none;
+  }
+
+  .ledger-table tbody tr:hover td {
+    background: var(--bg-subtle);
+  }
+
+  .product-card {
+    @apply bg-white border border-slate-200 dark:bg-white/[0.03] dark:border-white/10 rounded-2xl p-4 cursor-pointer select-none transition-all duration-200 hover:-translate-y-0.5 active:scale-95 flex flex-col justify-between shadow-sm;
+  }
+}
+
+/* Custom scrollbars — thin, unobtrusive, visible on hover. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+  background-clip: padding-box;
+}
+
+/* ==========================================================================
+   Print — thermal receipts and A4 accounting statements
+   ========================================================================== */
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+
+  #printable-thermal-receipt,
+  #printable-thermal-receipt * {
+    visibility: visible;
+  }
+
+  #printable-thermal-receipt {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 80mm;
+    background: #fff !important;
+    color: #000 !important;
+    padding: 12px;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 12px;
+  }
+
+  #printable-statement,
+  #printable-statement * {
+    visibility: visible;
+  }
+
+  #printable-statement {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    background: #fff !important;
+    color: #000 !important;
+    padding: 16mm 14mm;
+    font-size: 11px;
+  }
+
+  #printable-statement .no-print {
+    display: none !important;
+  }
+
+  #printable-statement table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  #printable-statement th,
+  #printable-statement td {
+    border-bottom: 1px solid #ddd;
+    padding: 5px 6px;
+    color: #000 !important;
+  }
+
+  @page {
+    margin: 0;
+  }
+}
