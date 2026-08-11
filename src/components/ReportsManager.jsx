@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   BarChart3, CalendarDays, CalendarRange, Package, Layers, Truck, CreditCard,
-  Boxes, History, ClipboardList, TrendingUp, AlertTriangle, Wallet
+  Boxes, History, ClipboardList, TrendingUp, AlertTriangle, Wallet,
+  Users, Landmark, Receipt, PiggyBank
 } from 'lucide-react';
 
 import api, { money, moneyShort, fmtDate, fmtDateTime, monthStartISO, todayISO } from '../lib/api';
@@ -24,7 +25,11 @@ const REPORTS = [
   { id: 'stock', label: 'Stock Report', icon: Boxes, group: 'Inventory' },
   { id: 'movements', label: 'Stock History', icon: History, group: 'Inventory' },
   { id: 'purchases', label: 'Purchase Report', icon: Truck, group: 'Purchases' },
-  { id: 'sessions', label: 'Session History', icon: ClipboardList, group: 'Counter' }
+  { id: 'sessions', label: 'Session History', icon: ClipboardList, group: 'Counter' },
+  { id: 'customer-outstanding', label: 'Customer Outstanding', icon: Users, group: 'Receivables' },
+  { id: 'vendor-payables', label: 'Vendor Payables', icon: Landmark, group: 'Receivables' },
+  { id: 'expenses', label: 'Expense Report', icon: Receipt, group: 'Expenses' },
+  { id: 'cash-summary', label: 'Daily Cash Summary', icon: PiggyBank, group: 'Counter' }
 ];
 
 const GROUPS = [...new Set(REPORTS.map((r) => r.group))];
@@ -64,7 +69,11 @@ export default function ReportsManager({ showToast }) {
       stock: '/reports/stock',
       movements: '/inventory/movements',
       purchases: '/reports/purchases',
-      sessions: '/reports/sessions'
+      sessions: '/reports/sessions',
+      'customer-outstanding': '/reports/customers/outstanding',
+      'vendor-payables': '/reports/vendors/payables',
+      expenses: '/reports/expenses',
+      'cash-summary': '/reports/cash-summary'
     };
     return [paths[reportId], q];
   }, [reportId, range]);
@@ -214,6 +223,14 @@ function renderReport(id, data) {
       return <PurchaseReport data={data} />;
     case 'sessions':
       return <SessionHistory rows={data} />;
+    case 'customer-outstanding':
+      return <CustomerOutstanding data={data} />;
+    case 'vendor-payables':
+      return <VendorPayables data={data} />;
+    case 'expenses':
+      return <ExpenseReport data={data} />;
+    case 'cash-summary':
+      return <CashSummary data={data} />;
     default:
       return null;
   }
@@ -616,6 +633,235 @@ function SessionHistory({ rows }) {
   );
 }
 
+const AGEING_COLUMNS = [
+  { key: 'name', label: 'Party', render: (r) => <span className="font-semibold">{r.name}</span> },
+  { key: 'current', label: 'Current', align: 'right', width: 100, render: (r) => <Money value={r.current} showZero={false} /> },
+  { key: 'd30', label: '31-60', align: 'right', width: 100, render: (r) => <Money value={r.d30} showZero={false} /> },
+  { key: 'd60', label: '61-90', align: 'right', width: 100, render: (r) => <Money value={r.d60} showZero={false} /> },
+  { key: 'd90', label: '91-120', align: 'right', width: 100, render: (r) => <Money value={r.d90} showZero={false} /> },
+  {
+    key: 'older',
+    label: 'Older',
+    align: 'right',
+    width: 100,
+    render: (r) => <Money value={r.older} showZero={false} className="text-rose-600 dark:text-rose-400" />
+  },
+  { key: 'total', label: 'Total', align: 'right', width: 110, render: (r) => <Money value={r.total} className="font-bold" /> }
+];
+
+function AgeingTable({ rows }) {
+  return (
+    <div className="mt-4">
+      <div className="label-eyebrow mb-2">Ageing analysis</div>
+      <DataTable
+        maxHeight="none"
+        dense
+        columns={AGEING_COLUMNS}
+        rows={rows}
+        rowKey={(r) => r.partyId}
+        empty={<EmptyState title="Nothing outstanding to age" />}
+      />
+    </div>
+  );
+}
+
+function CustomerOutstanding({ data }) {
+  return (
+    <>
+      <div className="mb-3 grid grid-cols-3 gap-3">
+        <Mini label="Total outstanding" value={money(data.totalOutstanding)} tone="danger" />
+        <Mini label="Total advance" value={money(data.totalAdvance)} tone="success" />
+        <Mini label="Customers over limit" value={data.overLimitCount} tone={data.overLimitCount > 0 ? 'danger' : 'neutral'} />
+      </div>
+
+      <DataTable
+        maxHeight="none"
+        dense
+        columns={[
+          {
+            key: 'name',
+            label: 'Customer',
+            render: (r) => (
+              <span className="flex items-center gap-1.5 font-semibold">
+                {r.name}
+                {r.overLimit && <Badge tone="danger">Over limit</Badge>}
+              </span>
+            )
+          },
+          { key: 'phone', label: 'Phone', width: 120, render: (r) => <span className="text-[color:var(--text-muted)]">{r.phone || '—'}</span> },
+          { key: 'group', label: 'Group', width: 100 },
+          { key: 'creditLimit', label: 'Credit Limit', align: 'right', width: 120, render: (r) => <Money value={r.creditLimit} showZero={false} /> },
+          { key: 'outstanding', label: 'Outstanding', align: 'right', width: 130, render: (r) => <Money value={r.outstanding} className="font-bold" /> },
+          {
+            key: 'advance',
+            label: 'Advance',
+            align: 'right',
+            width: 110,
+            render: (r) => <Money value={r.advance} showZero={false} className="text-emerald-600 dark:text-emerald-400" />
+          },
+          { key: 'lastBillDate', label: 'Last Bill', width: 110, render: (r) => fmtDate(r.lastBillDate) },
+          { key: 'billCount', label: 'Bills', align: 'right', width: 70 }
+        ]}
+        rows={data.rows}
+        rowKey={(r) => r.id}
+        empty={<EmptyState icon={Users} title="No customer balances in this period" />}
+        footer={['Total', '', '', '', money(data.totalOutstanding), money(data.totalAdvance), '', '']}
+      />
+
+      <AgeingTable rows={data.ageing} />
+    </>
+  );
+}
+
+function VendorPayables({ data }) {
+  return (
+    <>
+      <div className="mb-3 grid grid-cols-2 gap-3">
+        <Mini label="Total payable" value={money(data.totalPayable)} tone="danger" />
+        <Mini label="Total advance" value={money(data.totalAdvance)} tone="success" />
+      </div>
+
+      <DataTable
+        maxHeight="none"
+        dense
+        columns={[
+          { key: 'name', label: 'Vendor', render: (r) => <span className="font-semibold">{r.name}</span> },
+          { key: 'phone', label: 'Phone', width: 120, render: (r) => <span className="text-[color:var(--text-muted)]">{r.phone || '—'}</span> },
+          { key: 'gstin', label: 'GSTIN', width: 140, render: (r) => <span className="text-[color:var(--text-muted)]">{r.gstin || '—'}</span> },
+          { key: 'payable', label: 'Payable', align: 'right', width: 130, render: (r) => <Money value={r.payable} className="font-bold" /> },
+          {
+            key: 'advancePaid',
+            label: 'Advance',
+            align: 'right',
+            width: 110,
+            render: (r) => <Money value={r.advancePaid} showZero={false} className="text-emerald-600 dark:text-emerald-400" />
+          },
+          { key: 'totalPurchased', label: 'Total Purchased', align: 'right', width: 140, render: (r) => <Money value={r.totalPurchased} /> },
+          { key: 'lastInvoiceDate', label: 'Last Invoice', width: 110, render: (r) => fmtDate(r.lastInvoiceDate) },
+          { key: 'invoiceCount', label: 'Invoices', align: 'right', width: 80 }
+        ]}
+        rows={data.rows}
+        rowKey={(r) => r.id}
+        empty={<EmptyState icon={Landmark} title="No vendor balances in this period" />}
+        footer={['Total', '', '', money(data.totalPayable), money(data.totalAdvance), '', '', '']}
+      />
+
+      <AgeingTable rows={data.ageing} />
+    </>
+  );
+}
+
+function ExpenseReport({ data }) {
+  const categoryShare = data.rows.map((r) => ({ name: r.category, amount: r.amount }));
+  const modeShare = data.byMode.map((m) => ({ name: m.mode, amount: m.amount }));
+
+  return (
+    <>
+      <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Mini label="Total expenses" value={money(data.total)} />
+        <Mini label="GST input credit" value={money(data.totalTax)} tone="success" />
+        <Mini label="Unpaid" value={money(data.unpaid)} tone="danger" />
+        <Mini label="Entries" value={data.count} />
+      </div>
+
+      <div className="mb-4 grid gap-4 lg:grid-cols-2">
+        <div>
+          <div className="label-eyebrow mb-2">By category</div>
+          {categoryShare.length > 0 ? <ShareBars items={categoryShare} tone="danger" /> : <EmptyState title="No expenses in this period" />}
+        </div>
+        <div>
+          <div className="label-eyebrow mb-2">By payment mode</div>
+          {modeShare.length > 0 ? <ShareBars items={modeShare} tone="accent" /> : <EmptyState title="No payments in this period" />}
+        </div>
+      </div>
+
+      <DataTable
+        maxHeight="none"
+        dense
+        columns={[
+          { key: 'date', label: 'Date', width: 100, render: (r) => fmtDate(r.date) },
+          { key: 'category', label: 'Category', width: 130 },
+          { key: 'vendorName', label: 'Paid To', render: (r) => r.vendorName || '—' },
+          { key: 'amount', label: 'Amount', align: 'right', width: 110, render: (r) => <Money value={r.amount} className="font-bold" /> },
+          { key: 'tax', label: 'GST', align: 'right', width: 90, render: (r) => <Money value={r.tax} showZero={false} /> },
+          {
+            key: 'paymentMode',
+            label: 'Mode',
+            width: 110,
+            render: (r) => (r.unpaid ? <Badge tone="warning">Unpaid</Badge> : r.paymentMode || 'Cash')
+          },
+          {
+            key: 'voucherNo',
+            label: 'Voucher',
+            width: 90,
+            render: (r) => <span className="tabular text-[10.5px] font-bold text-[color:var(--accent)]">{r.voucherNo}</span>
+          },
+          { key: 'notes', label: 'Notes', render: (r) => <span className="text-[color:var(--text-muted)]">{r.notes || '—'}</span> }
+        ]}
+        rows={data.entries}
+        rowKey={(r) => r.id}
+        empty={<EmptyState icon={Receipt} title="No expense entries in this period" />}
+        footer={['Total', '', '', money(data.total), money(data.totalTax), '', '', '']}
+      />
+    </>
+  );
+}
+
+function CashSummary({ data }) {
+  return (
+    <>
+      <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Mini label="Cash in hand" value={money(data.cashBalance)} />
+        <Mini label="Bank balance" value={money(data.bankBalance)} />
+        <Mini label="Total in" value={money(data.totalInflow)} tone="success" />
+        <Mini label="Total out" value={money(data.totalOutflow)} tone="danger" />
+      </div>
+
+      {data.accounts?.length > 0 && (
+        <div className="mb-4 grid grid-cols-2 gap-2 lg:grid-cols-4">
+          {data.accounts.map((a) => (
+            <div key={a.id} className="rounded-xl px-3 py-2" style={{ background: 'var(--bg-subtle)' }}>
+              <div className="label-eyebrow">
+                {a.kind === 'CASH' ? 'Cash' : 'Bank'} · {a.name}
+              </div>
+              <div className="tabular mt-0.5 text-[14px] font-bold text-[color:var(--text-primary)]">{money(a.balance)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <DataTable
+        maxHeight="none"
+        dense
+        columns={[
+          { key: 'date', label: 'Date', width: 120, render: (r) => fmtDate(r.date) },
+          { key: 'opening', label: 'Opening', align: 'right', width: 120, render: (r) => <Money value={r.opening} /> },
+          {
+            key: 'inflow',
+            label: 'Cash In',
+            align: 'right',
+            width: 120,
+            render: (r) => <Money value={r.inflow} showZero={false} className="text-emerald-600 dark:text-emerald-400" />
+          },
+          {
+            key: 'outflow',
+            label: 'Cash Out',
+            align: 'right',
+            width: 120,
+            render: (r) => <Money value={r.outflow} showZero={false} className="text-rose-600 dark:text-rose-400" />
+          },
+          { key: 'closing', label: 'Closing', align: 'right', width: 130, render: (r) => <Money value={r.closing} className="font-bold" /> },
+          { key: 'entries', label: 'Entries', align: 'right', width: 80, render: (r) => r.entries?.length ?? 0 }
+        ]}
+        rows={data.days}
+        rowKey={(r) => r.date}
+        empty={<EmptyState icon={PiggyBank} title="No cash movements in this period" />}
+        footer={['Total', '', money(data.totalInflow), money(data.totalOutflow), '', '']}
+      />
+    </>
+  );
+}
+
 function Mini({ label, value, tone = 'neutral' }) {
   const color = {
     neutral: 'text-[color:var(--text-primary)]',
@@ -782,6 +1028,71 @@ function buildExport(id, data, title) {
           { key: 'status', label: 'Status' }
         ],
         rows: data
+      };
+
+    case 'customer-outstanding':
+      return {
+        title,
+        columns: [
+          { key: 'name', label: 'Customer' },
+          { key: 'phone', label: 'Phone' },
+          { key: 'group', label: 'Group' },
+          { key: 'creditLimit', label: 'Credit Limit', align: 'right', value: (r) => num(r.creditLimit) },
+          { key: 'outstanding', label: 'Outstanding', align: 'right', value: (r) => num(r.outstanding) },
+          { key: 'advance', label: 'Advance', align: 'right', value: (r) => num(r.advance) },
+          { key: 'billCount', label: 'Bills', align: 'right' },
+          { key: 'lastBillDate', label: 'Last Bill', value: (r) => fmtDate(r.lastBillDate) }
+        ],
+        rows: data.rows,
+        totals: ['TOTAL', '', '', '', num(data.totalOutstanding), num(data.totalAdvance), '', '']
+      };
+
+    case 'vendor-payables':
+      return {
+        title,
+        columns: [
+          { key: 'name', label: 'Vendor' },
+          { key: 'phone', label: 'Phone' },
+          { key: 'gstin', label: 'GSTIN' },
+          { key: 'payable', label: 'Payable', align: 'right', value: (r) => num(r.payable) },
+          { key: 'advancePaid', label: 'Advance', align: 'right', value: (r) => num(r.advancePaid) },
+          { key: 'totalPurchased', label: 'Total Purchased', align: 'right', value: (r) => num(r.totalPurchased) },
+          { key: 'invoiceCount', label: 'Invoices', align: 'right' },
+          { key: 'lastInvoiceDate', label: 'Last Invoice', value: (r) => fmtDate(r.lastInvoiceDate) }
+        ],
+        rows: data.rows,
+        totals: ['TOTAL', '', '', num(data.totalPayable), num(data.totalAdvance), '', '', '']
+      };
+
+    case 'expenses':
+      return {
+        title,
+        columns: [
+          { key: 'date', label: 'Date', value: (r) => fmtDate(r.date) },
+          { key: 'category', label: 'Category' },
+          { key: 'vendorName', label: 'Paid To' },
+          { key: 'amount', label: 'Amount', align: 'right', value: (r) => num(r.amount) },
+          { key: 'tax', label: 'GST', align: 'right', value: (r) => num(r.tax) },
+          { key: 'paymentMode', label: 'Mode', value: (r) => (r.unpaid ? 'Unpaid (Credit)' : r.paymentMode || 'Cash') },
+          { key: 'voucherNo', label: 'Voucher' },
+          { key: 'notes', label: 'Notes' }
+        ],
+        rows: data.entries,
+        totals: ['TOTAL', '', '', num(data.total), num(data.totalTax), '', '', '']
+      };
+
+    case 'cash-summary':
+      return {
+        title,
+        columns: [
+          { key: 'date', label: 'Date', value: (r) => fmtDate(r.date) },
+          { key: 'opening', label: 'Opening', align: 'right', value: (r) => num(r.opening) },
+          { key: 'inflow', label: 'Cash In', align: 'right', value: (r) => num(r.inflow) },
+          { key: 'outflow', label: 'Cash Out', align: 'right', value: (r) => num(r.outflow) },
+          { key: 'closing', label: 'Closing', align: 'right', value: (r) => num(r.closing) }
+        ],
+        rows: data.days,
+        totals: ['TOTAL', '', num(data.totalInflow), num(data.totalOutflow), '']
       };
 
     default:

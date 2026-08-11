@@ -42,10 +42,12 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
   const [weightModal, setWeightModal] = useState(null);
   const [weightInput, setWeightInput] = useState('1.000');
   const [scaleReading, setScaleReading] = useState(false);
+  const [liveWeight, setLiveWeight] = useState(0);
 
   const [showCheckout, setShowCheckout] = useState(false);
   const [paymentMode, setPaymentMode] = useState('Cash');
   const [cashTendered, setCashTendered] = useState('');
+  const [redeemPoints, setRedeemPoints] = useState(0);
   const [receipt, setReceipt] = useState(null);
   const [showHeld, setShowHeld] = useState(false);
   const [showSession, setShowSession] = useState(false);
@@ -117,7 +119,43 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
     };
   }, [cart, discountPercent, taxInclusive, gstEnabled, settings]);
 
-  const changeDue = Math.max(0, (parseFloat(cashTendered) || 0) - totals.grand);
+  /* ------------------------- loyalty redemption -------------------------
+   * Points are worth a fixed rupee value the shop sets. They come off the bill
+   * before payment, so the tendered amount, the change and the receipt all
+   * refer to what the customer actually hands over.
+   */
+  const loyalty = useMemo(() => {
+    const pos = settings?.pos || {};
+    const rate = Number(pos.loyaltyRedeemValue) || 0;
+    const available = customer?.loyaltyPoints || 0;
+    const minPoints = Number(pos.loyaltyMinRedeemPoints) || 0;
+
+    // Never let points turn a bill into a refund.
+    const maxByBill = rate > 0 ? Math.floor(totals.grand / rate) : 0;
+    const maxPoints = Math.max(0, Math.min(available, maxByBill));
+
+    const points = Math.min(Number(redeemPoints) || 0, maxPoints);
+    return {
+      enabled: pos.enableLoyalty !== false && rate > 0 && Boolean(customer),
+      rate,
+      available,
+      minPoints,
+      maxPoints,
+      points,
+      amount: Math.round(points * rate * 100) / 100,
+      belowMinimum: available > 0 && available < minPoints
+    };
+  }, [settings, customer, totals.grand, redeemPoints]);
+
+  const payable = Math.round((totals.grand - loyalty.amount) * 100) / 100;
+
+  // Points reset whenever the bill or the customer changes — a stale redemption
+  // against a different total is the one thing that must never happen here.
+  useEffect(() => {
+    setRedeemPoints(0);
+  }, [customerId, cart.length]);
+
+  const changeDue = Math.max(0, (parseFloat(cashTendered) || 0) - payable);
 
   /* ------------------------- adding items ------------------------- */
 
@@ -153,11 +191,15 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
       const trimmed = code.trim();
       if (!trimmed) return;
 
-      if (trimmed.length === 12 && trimmed.startsWith('21')) {
-        const itemPart = trimmed.slice(2, 7);
-        const grams = Number(trimmed.slice(7));
-        const match = products.find((p) => p.barcode.slice(-5) === itemPart);
-        if (match) {
+      const prefix = settings?.hardware?.weighingScale?.embeddedBarcodePrefix || '21';
+
+      if (trimmed.length >= 12 && trimmed.startsWith(prefix)) {
+        const itemPart = trimmed.slice(prefix.length, prefix.length + 5);
+        const grams = Number(trimmed.slice(prefix.length + 5, prefix.length + 10));
+        const match = products.find(
+          (p) => String(p.barcode).slice(-5) === itemPart || (p.barcodes || []).some((b) => String(b).slice(-5) === itemPart)
+        );
+        if (match && Number.isFinite(grams)) {
           addToCart(match, grams / 1000);
           showToast(`${match.name} — ${(grams / 1000).toFixed(3)} kg added from label.`);
           return;
@@ -171,6 +213,21 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
         return;
       }
 
+      // The server knows every barcode, including alternate-unit codes and any
+      // weight-embedded layout this shop has configured.
+      try {
+        const decoded = await api.get(`/hardware/decode-barcode/${encodeURIComponent(trimmed)}`);
+        addToCart(decoded.product, decoded.quantity || 1);
+        showToast(
+          decoded.embedded
+            ? `${decoded.product.name} — ${Number(decoded.quantity).toFixed(3)} ${decoded.product.unit} from label.`
+            : `Scanned ${decoded.product.name}`
+        );
+        return;
+      } catch {
+        /* fall through to the plain product lookup */
+      }
+
       try {
         const found = await api.get(`/products/lookup/${encodeURIComponent(trimmed)}`);
         addToCart(found);
@@ -179,7 +236,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
         showToast(`No product matches barcode ${trimmed}`, 'error');
       }
     },
-    [products, addToCart, showToast]
+    [products, addToCart, showToast, settings]
   );
 
   // Global keyboard-wedge capture: a scanner types fast and ends with Enter.
@@ -224,8 +281,10 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
     setScaleReading(true);
     try {
       const res = await api.get('/hardware/weight');
-      setWeightInput(res.weight.toFixed(3));
-      showToast(`Stable weight: ${res.weight.toFixed(3)} kg`);
+      const grams = Number(res.weight) || 0;
+      setLiveWeight(grams);
+      setWeightInput(grams.toFixed(3));
+      showToast(`Stable weight: ${grams.toFixed(3)} kg${res.simulated ? ' (simulated — scale not connected)' : ''}`);
     } catch (err) {
       showToast(api.message(err, 'Scale did not respond.'), 'error');
     } finally {
@@ -333,7 +392,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
       return;
     }
     if (customer?.creditLimit > 0 && paymentMode === 'Credit (Udhar)') {
-      const projected = (customer.outstanding || 0) + totals.grand;
+      const projected = (customer.outstanding || 0) + payable;
       if (projected > customer.creditLimit) {
         showToast(
           `Warning: ${customer.name} will exceed their ${money(customer.creditLimit)} credit limit (${money(projected)}).`,
@@ -352,6 +411,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
         tax: totals.tax,
         discount: totals.discountAmount,
         total: totals.grand,
+        redeemPoints: loyalty.points || 0,
         items: cart,
         tableId: tableId || null,
         notes: note
@@ -361,6 +421,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
       setShowCheckout(false);
       clearCart();
       setCashTendered('');
+      setRedeemPoints(0);
       load();
       (res.warnings || []).forEach((w) => showToast(w, 'error'));
       showToast(res.message);
@@ -412,10 +473,27 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
             />
           </div>
 
-          <Badge tone={settings?.hardware?.barcodeScanner?.enabled ? 'success' : 'neutral'}>
+          <Badge tone={settings?.hardware?.barcodeScanner?.enabled !== false ? 'success' : 'neutral'}>
             <Barcode className="h-3 w-3" />
-            Scanner {settings?.hardware?.barcodeScanner?.enabled ? 'armed' : 'off'}
+            Scanner {settings?.hardware?.barcodeScanner?.enabled !== false ? 'armed' : 'off'}
           </Badge>
+
+          {/* Live weight display — the counter operator needs the scale reading
+              visible without opening a dialog first. */}
+          {settings?.hardware?.weighingScale?.enabled !== false && (
+            <button
+              type="button"
+              onClick={readScale}
+              title="Read the weighing scale"
+              className="flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-2 text-[11.5px] font-bold transition-colors"
+              style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}
+            >
+              <Scale className={`h-3.5 w-3.5 ${scaleReading ? 'animate-pulse text-amber-500' : 'text-[color:var(--accent)]'}`} />
+              <span className="tabular text-[color:var(--text-primary)]">
+                {scaleReading ? '— — —' : `${Number(liveWeight || 0).toFixed(3)} kg`}
+              </span>
+            </button>
+          )}
 
           {settings?.pos?.enableTables && (
             <Button icon={LayoutGrid} onClick={() => setShowTables(true)}>
@@ -717,7 +795,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
       <Modal
         open={showCheckout}
         onClose={() => setShowCheckout(false)}
-        title={`Collect ${money(totals.grand)}`}
+        title={`Collect ${money(payable)}`}
         subtitle={customer ? `From ${customer.name}` : 'Walk-in customer'}
         icon={Wallet}
         size="md"
@@ -731,6 +809,71 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
         }
       >
         <div className="space-y-3">
+          {loyalty.enabled && loyalty.available > 0 && (
+            <div
+              className="space-y-2 rounded-xl px-3 py-2.5"
+              style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}
+            >
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-1.5 text-[11.5px] font-bold text-[color:var(--text-secondary)]">
+                  <Star className="h-3.5 w-3.5 text-amber-500" />
+                  Loyalty points
+                </span>
+                <Badge tone="accent">{loyalty.available} pts available</Badge>
+              </div>
+
+              {loyalty.belowMinimum ? (
+                <div className="text-[10.5px] font-semibold text-[color:var(--text-muted)]">
+                  {loyalty.minPoints} points are needed before they can be redeemed.
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="number"
+                      min="0"
+                      max={loyalty.maxPoints}
+                      value={redeemPoints}
+                      onChange={(e) => setRedeemPoints(Math.max(0, Math.min(loyalty.maxPoints, Number(e.target.value) || 0)))}
+                      className="tabular w-24 text-center font-bold"
+                    />
+                    <Button size="sm" onClick={() => setRedeemPoints(loyalty.maxPoints)} disabled={loyalty.maxPoints === 0}>
+                      Use max
+                    </Button>
+                    {redeemPoints > 0 && (
+                      <Button size="sm" onClick={() => setRedeemPoints(0)}>
+                        Clear
+                      </Button>
+                    )}
+                    <span className="ml-auto text-[10.5px] font-semibold text-[color:var(--text-muted)]">
+                      1 pt = {money(loyalty.rate)}
+                    </span>
+                  </div>
+
+                  {loyalty.amount > 0 && (
+                    <div className="flex items-center justify-between border-t pt-2" style={{ borderColor: 'var(--border)' }}>
+                      <span className="text-[11.5px] font-semibold text-[color:var(--text-secondary)]">
+                        {loyalty.points} pts redeemed
+                      </span>
+                      <span className="tabular text-[12.5px] font-bold text-emerald-600 dark:text-emerald-400">
+                        −{money(loyalty.amount)}
+                      </span>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {loyalty.amount > 0 && (
+            <div className="flex items-center justify-between rounded-xl px-3 py-2.5" style={{ background: 'var(--bg-subtle)' }}>
+              <div className="text-[11.5px] font-semibold text-[color:var(--text-secondary)]">
+                Bill {money(totals.grand)} − points {money(loyalty.amount)}
+              </div>
+              <Money value={payable} className="text-[18px] font-bold text-[color:var(--accent)]" />
+            </div>
+          )}
+
           <Field label="Payment mode">
             <div className="grid grid-cols-2 gap-2">
               {PAYMENT_MODES.map((mode) => (
@@ -758,19 +901,19 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
                   type="number"
                   value={cashTendered}
                   onChange={(e) => setCashTendered(e.target.value)}
-                  placeholder={String(totals.grand)}
+                  placeholder={String(payable)}
                   className="tabular text-[19px] font-bold"
                   autoFocus
                 />
               </Field>
               <div className="flex gap-1.5">
-                {[totals.grand, 500, 1000, 2000].map((amount, i) => (
+                {[payable, ...(settings?.pos?.quickAmountPills || [500, 1000, 2000])].map((amount, i) => (
                   <Button key={i} size="sm" onClick={() => setCashTendered(String(amount))}>
                     {money(amount, { decimals: false })}
                   </Button>
                 ))}
               </div>
-              {parseFloat(cashTendered) > totals.grand && (
+              {parseFloat(cashTendered) > payable && (
                 <div className="flex items-center justify-between rounded-xl bg-emerald-50 px-3 py-2.5 dark:bg-emerald-950/40">
                   <span className="text-[12px] font-bold text-emerald-700 dark:text-emerald-300">Change due</span>
                   <Money value={changeDue} className="text-[19px] font-bold text-emerald-700 dark:text-emerald-300" />
@@ -783,7 +926,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
             <div className="rounded-2xl px-4 py-5 text-center" style={{ background: 'var(--bg-subtle)' }}>
               <QrCode className="mx-auto h-16 w-16 text-[color:var(--accent)]" />
               <div className="tabular mt-2 text-[13px] font-bold text-[color:var(--text-primary)]">
-                Scan to pay {money(totals.grand)}
+                Scan to pay {money(payable)}
               </div>
               <div className="text-[10.5px] text-[color:var(--text-muted)]">
                 {settings?.company?.name} · confirm once the customer's app shows success
@@ -800,7 +943,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
               }`}
             >
               {customer
-                ? `${customer.name}'s balance will rise from ${money(customer.outstanding || 0)} to ${money((customer.outstanding || 0) + totals.grand)}.`
+                ? `${customer.name}'s balance will rise from ${money(customer.outstanding || 0)} to ${money((customer.outstanding || 0) + payable)}.`
                 : 'Select a customer above — a credit sale needs a named party.'}
             </div>
           )}
@@ -974,6 +1117,9 @@ function ReceiptModal({ receipt, settings, tenant, onClose }) {
           <ReceiptRow label="Subtotal" value={receipt.subtotal} />
           {receipt.discount > 0 && <ReceiptRow label="Discount" value={-receipt.discount} />}
           {receipt.tax > 0 && <ReceiptRow label="GST" value={receipt.tax} />}
+          {receipt.loyaltyRedeemed > 0 && (
+            <ReceiptRow label={`Points redeemed (${receipt.pointsRedeemed})`} value={-receipt.loyaltyRedeemed} />
+          )}
           <div className="flex justify-between border-t border-dashed pt-1 text-[14px] font-bold" style={{ borderColor: 'var(--border-strong)' }}>
             <span>TOTAL</span>
             <span className="tabular">₹{Number(receipt.total).toFixed(2)}</span>
@@ -982,6 +1128,9 @@ function ReceiptModal({ receipt, settings, tenant, onClose }) {
             <span>Paid by {receipt.paymentMethod}</span>
             {receipt.loyaltyEarned > 0 && <span>+{receipt.loyaltyEarned} pts</span>}
           </div>
+          {receipt.loyaltyBalance !== undefined && (
+            <div className="text-[9.5px]">Points balance: {receipt.loyaltyBalance}</div>
+          )}
         </div>
 
         {showGst && Object.keys(gstSlabs).length > 0 && (
@@ -1189,18 +1338,74 @@ function SessionModal({ open, session, onClose, showToast, onChanged }) {
   );
 }
 
+/**
+ * Table management — SOW Module 19.
+ *
+ * Three things happen on one grid, so the grid works in modes: normally a tap
+ * assigns the current bill to a table; while a move is armed the next tap is the
+ * destination. Transfer needs a free destination, merge needs a busy one, which
+ * is why the armed mode dims the tables that cannot receive the action.
+ */
 function TablesModal({ open, tables, selectedId, onSelect, onClose, showToast, onChanged }) {
-  const [transferFrom, setTransferFrom] = useState('');
+  const [pending, setPending] = useState(null); // { mode: 'TRANSFER' | 'MERGE', tableId }
+  const [busy, setBusy] = useState(false);
 
-  const transfer = async (toTableId) => {
+  // Arming a move and then closing the sheet should not leave it armed.
+  useEffect(() => {
+    if (!open) setPending(null);
+  }, [open]);
+
+  const source = pending ? tables.find((t) => t.id === pending.tableId) : null;
+
+  const runMove = async (target) => {
+    if (!pending || target.id === pending.tableId) {
+      setPending(null);
+      return;
+    }
+
+    setBusy(true);
     try {
-      const res = await api.post('/tables/transfer', { fromTableId: transferFrom, toTableId });
+      const res =
+        pending.mode === 'MERGE'
+          ? await api.post('/tables/merge', { sourceTableId: pending.tableId, targetTableId: target.id })
+          : await api.post('/tables/transfer', { fromTableId: pending.tableId, toTableId: target.id });
+
       showToast(res.message);
-      setTransferFrom('');
+      setPending(null);
       onChanged();
     } catch (err) {
-      showToast(api.message(err, 'Could not transfer the table.'), 'error');
+      showToast(
+        api.message(err, pending.mode === 'MERGE' ? 'Could not merge the tables.' : 'Could not transfer the table.'),
+        'error'
+      );
+    } finally {
+      setBusy(false);
     }
+  };
+
+  // Transfer needs an empty table; merge needs another running bill to fold into.
+  const canReceive = (table) => {
+    if (!pending) return true;
+    if (table.id === pending.tableId) return false;
+    return pending.mode === 'MERGE' ? table.status === 'OCCUPIED' && table.bill : table.status !== 'OCCUPIED';
+  };
+
+  const handleTap = (table) => {
+    if (busy) return;
+    if (pending) {
+      if (!canReceive(table)) {
+        showToast(
+          pending.mode === 'MERGE'
+            ? `${table.name} has no running bill to merge into.`
+            : `${table.name} is occupied — merge instead of transferring.`,
+          'error'
+        );
+        return;
+      }
+      runMove(table);
+      return;
+    }
+    onSelect(table.id);
   };
 
   return (
@@ -1208,15 +1413,27 @@ function TablesModal({ open, tables, selectedId, onSelect, onClose, showToast, o
       open={open}
       onClose={onClose}
       title="Tables"
-      subtitle="Assign this bill to a table, or move a running bill to another table."
+      subtitle={
+        pending
+          ? pending.mode === 'MERGE'
+            ? `Pick the table to merge ${source?.name} into.`
+            : `Pick the free table to move ${source?.name} to.`
+          : 'Assign this bill to a table, move a running bill, or merge two tables.'
+      }
       icon={LayoutGrid}
       size="lg"
       footer={
         <>
-          {selectedId && (
-            <Button className="mr-auto" onClick={() => onSelect('')}>
-              Clear table
+          {pending ? (
+            <Button className="mr-auto" onClick={() => setPending(null)}>
+              Cancel {pending.mode === 'MERGE' ? 'merge' : 'transfer'}
             </Button>
+          ) : (
+            selectedId && (
+              <Button className="mr-auto" onClick={() => onSelect('')}>
+                Clear table
+              </Button>
+            )
           )}
           <Button onClick={onClose}>Close</Button>
         </>
@@ -1229,40 +1446,73 @@ function TablesModal({ open, tables, selectedId, onSelect, onClose, showToast, o
           {tables.map((table) => {
             const occupied = table.status === 'OCCUPIED';
             const isSelected = selectedId === table.id;
+            const isSource = pending?.tableId === table.id;
+            const receivable = canReceive(table);
+
             return (
-              <button
+              <div
                 key={table.id}
-                onClick={() => (transferFrom ? transfer(table.id) : onSelect(table.id))}
-                className={`surface rounded-2xl p-3 text-left transition-all hover:-translate-y-0.5 ${
+                onClick={() => handleTap(table)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && handleTap(table)}
+                className={`surface cursor-pointer rounded-2xl p-3 text-left transition-all hover:-translate-y-0.5 ${
                   isSelected ? 'ring-2 ring-indigo-500' : ''
+                } ${isSource ? 'ring-2 ring-amber-500' : ''} ${
+                  pending && !receivable ? 'pointer-events-none opacity-40' : ''
                 }`}
               >
                 <div className="flex items-start justify-between">
                   <span className="text-[15px] font-bold text-[color:var(--text-primary)]">{table.name}</span>
-                  <Badge tone={occupied ? 'warning' : 'success'}>{occupied ? 'Busy' : 'Free'}</Badge>
+                  <Badge tone={isSource ? 'accent' : occupied ? 'warning' : 'success'}>
+                    {isSource ? 'Moving' : occupied ? 'Busy' : 'Free'}
+                  </Badge>
                 </div>
                 <div className="mt-1 text-[10.5px] text-[color:var(--text-muted)]">
                   {table.area} · {table.seats} seats
                 </div>
+
                 {table.bill && (
                   <div className="mt-2 border-t pt-1.5" style={{ borderColor: 'var(--border)' }}>
                     <Money value={table.bill.total} className="text-[13px] font-bold" />
-                    <div className="text-[10px] text-[color:var(--text-muted)]">{table.bill.items.length} items running</div>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setTransferFrom(table.id);
-                        showToast(`Now pick the table to move ${table.name} to.`);
-                      }}
-                      className="mt-1 text-[10px] font-bold text-[color:var(--accent)]"
-                    >
-                      Transfer →
-                    </button>
+                    <div className="text-[10px] text-[color:var(--text-muted)]">
+                      {table.bill.items.length} items running
+                    </div>
+
+                    {!pending && (
+                      <div className="mt-1 flex items-center gap-2.5">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setPending({ mode: 'TRANSFER', tableId: table.id });
+                          }}
+                          className="text-[10px] font-bold text-[color:var(--accent)]"
+                        >
+                          Transfer →
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setPending({ mode: 'MERGE', tableId: table.id });
+                          }}
+                          className="text-[10px] font-bold text-amber-600 dark:text-amber-400"
+                        >
+                          Merge ⇢
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
-              </button>
+              </div>
             );
           })}
+        </div>
+      )}
+
+      {pending?.mode === 'MERGE' && (
+        <div className="mt-3 rounded-xl bg-amber-50 px-3 py-2.5 text-[11px] font-semibold text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+          Merging moves every item from {source?.name} onto the destination's bill and frees {source?.name}. Matching
+          items are combined rather than duplicated.
         </div>
       )}
     </Modal>

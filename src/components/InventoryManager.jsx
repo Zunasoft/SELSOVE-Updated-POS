@@ -285,8 +285,38 @@ const blankProduct = (categories) => ({
   imageUrl: '',
   warehouses: { wh_main: 0, wh_shop: 0 },
   requiresWeight: false,
-  taxRate: 5
+  taxRate: 5,
+  altUnits: [],
+  recipe: { yieldQty: 1, ingredients: [], notes: '' }
 });
+
+/**
+ * Live cost/yield math for the recipe builder — mirrors the server's
+ * `decorateRecipe` in modules/recipes.js so the numbers shown while editing
+ * never surprise the user once the request round-trips.
+ */
+function computeRecipeTotals(ingredients, yieldQty, products) {
+  const rows = (ingredients || [])
+    .map((ing) => {
+      const material = (products || []).find((p) => p.id === ing.productId);
+      const qty = Number(ing.qty) || 0;
+      const cost = material ? Number(material.purchasePrice) || 0 : 0;
+      return { productId: ing.productId, material, qty, cost, lineCost: qty * cost };
+    })
+    .filter((r) => r.productId && r.qty > 0);
+
+  const batchCost = rows.reduce((sum, r) => sum + r.lineCost, 0);
+  const y = Number(yieldQty) > 0 ? Number(yieldQty) : 1;
+  const unitCost = batchCost / y;
+
+  const producible = rows.length
+    ? Math.floor(
+        Math.min(...rows.map((r) => (r.qty > 0 ? ((r.material?.stock || 0) / r.qty) * y : 0)))
+      )
+    : 0;
+
+  return { rows, batchCost, unitCost, producible: Math.max(0, Number.isFinite(producible) ? producible : 0) };
+}
 
 function ProductsTab({ products, categories, units, warehouses, showToast, onRefresh }) {
   const [query, setQuery] = useState('');
@@ -342,9 +372,58 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       ...product,
       regionalName: product.regionalName || product.printName || '',
       barcodes: Array.isArray(product.barcodes) ? product.barcodes.join(', ') : product.barcode || '',
-      warehouses: product.warehouses || { wh_main: Math.max(0, product.stock - 10), wh_shop: Math.min(product.stock, 10) }
+      warehouses: product.warehouses || { wh_main: Math.max(0, product.stock - 10), wh_shop: Math.min(product.stock, 10) },
+      altUnits: Array.isArray(product.altUnits) ? product.altUnits.map((u) => ({ ...u })) : [],
+      recipe: product.recipe
+        ? {
+            yieldQty: product.recipe.yieldQty || 1,
+            notes: product.recipe.notes || '',
+            ingredients: (product.recipe.ingredients || []).map((i) => ({ productId: i.productId, qty: i.qty }))
+          }
+        : { yieldQty: 1, ingredients: [], notes: '' }
     });
     setShowForm(true);
+  };
+
+  const addIngredient = () => {
+    setForm((f) => ({
+      ...f,
+      recipe: { ...f.recipe, ingredients: [...(f.recipe?.ingredients || []), { productId: '', qty: '' }] }
+    }));
+  };
+
+  const updateIngredient = (index, patch) => {
+    setForm((f) => {
+      const ingredients = [...(f.recipe?.ingredients || [])];
+      ingredients[index] = { ...ingredients[index], ...patch };
+      return { ...f, recipe: { ...f.recipe, ingredients } };
+    });
+  };
+
+  const removeIngredient = (index) => {
+    setForm((f) => ({
+      ...f,
+      recipe: { ...f.recipe, ingredients: (f.recipe?.ingredients || []).filter((_, i) => i !== index) }
+    }));
+  };
+
+  const addAltUnit = () => {
+    setForm((f) => ({
+      ...f,
+      altUnits: [...(f.altUnits || []), { unit: '', factor: '', price: '', barcode: '', isDefaultSaleUnit: false }]
+    }));
+  };
+
+  const updateAltUnit = (index, patch) => {
+    setForm((f) => {
+      const altUnits = [...(f.altUnits || [])];
+      altUnits[index] = { ...altUnits[index], ...patch };
+      return { ...f, altUnits };
+    });
+  };
+
+  const removeAltUnit = (index) => {
+    setForm((f) => ({ ...f, altUnits: (f.altUnits || []).filter((_, i) => i !== index) }));
   };
 
   const handleImageUpload = async (e) => {
@@ -377,14 +456,46 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       return;
     }
 
+    const isComposite = form.productType === 'composite';
+    const validIngredients = (form.recipe?.ingredients || [])
+      .filter((i) => i.productId && Number(i.qty) > 0)
+      .map((i) => ({ productId: i.productId, qty: Number(i.qty) }));
+
+    if (isComposite && validIngredients.length === 0) {
+      showToast('A composite product needs a recipe — add at least one raw material with a quantity.', 'error');
+      return;
+    }
+
+    const cleanAltUnits = (form.altUnits || [])
+      .filter((u) => u.unit && Number(u.factor) > 0)
+      .map((u) => ({
+        unit: u.unit,
+        factor: Number(u.factor),
+        price: u.price === '' || u.price === undefined ? null : Number(u.price),
+        barcode: u.barcode || '',
+        isDefaultSaleUnit: Boolean(u.isDefaultSaleUnit)
+      }));
+
     const payload = {
       ...form,
       printName: form.regionalName || form.printName,
       barcodes: String(form.barcodes || '')
         .split(',')
         .map((b) => b.trim())
-        .filter(Boolean)
+        .filter(Boolean),
+      altUnits: cleanAltUnits
     };
+
+    if (isComposite) {
+      payload.recipe = {
+        yieldQty: Number(form.recipe?.yieldQty) > 0 ? Number(form.recipe.yieldQty) : 1,
+        ingredients: validIngredients,
+        notes: form.recipe?.notes || ''
+      };
+      payload.purchasePrice = computeRecipeTotals(form.recipe?.ingredients, form.recipe?.yieldQty, products).unitCost;
+    } else {
+      delete payload.recipe;
+    }
 
     try {
       const res = editing
@@ -476,10 +587,13 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
               <tbody className="divide-y divide-[color:var(--border-subtle)]">
                 {rows.map((p) => {
                   const cat = categories.find((c) => c.id === p.categoryId);
+                  const isCompositeRow = p.productType === 'composite' || p.isComposite;
+                  const producible = p.recipe?.producible ?? 0;
                   const displayStock = warehouseFilter === 'all' ? p.stock : (p.warehouses?.[warehouseFilter] || 0);
-                  const isLow = p.productType !== 'service' && Number(displayStock) <= Number(p.minStock ?? 5);
-                  const isOut = p.productType !== 'service' && Number(displayStock) <= 0;
+                  const isLow = p.productType !== 'service' && (isCompositeRow ? producible <= 5 : Number(displayStock) <= Number(p.minStock ?? 5));
+                  const isOut = p.productType !== 'service' && (isCompositeRow ? producible <= 0 : Number(displayStock) <= 0);
                   const typeInfo = PRODUCT_TYPE_LABELS[p.productType || 'standard'];
+                  const ingredientCount = p.recipe?.ingredients?.length ?? p.recipeItems?.length ?? 0;
 
                   return (
                     <tr key={p.id} className="hover:bg-[color:var(--bg-subtle)]/50 transition-colors">
@@ -504,7 +618,12 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
 
                       <td className="py-3 px-3">
                         <div className="font-medium text-[color:var(--text-primary)]">{cat?.name || '—'}</div>
-                        <Badge tone={typeInfo?.tone || 'neutral'}>{typeInfo?.label || 'Standard'}</Badge>
+                        <div className="flex flex-wrap items-center gap-1 mt-0.5">
+                          <Badge tone={typeInfo?.tone || 'neutral'}>{typeInfo?.label || 'Standard'}</Badge>
+                          {isCompositeRow && (
+                            <Badge tone="success">{ingredientCount} ingredient{ingredientCount === 1 ? '' : 's'}</Badge>
+                          )}
+                        </div>
                       </td>
 
                       <td className="py-3 px-3 font-mono">
@@ -541,6 +660,15 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                       <td className="py-3 px-3 text-center">
                         {p.productType === 'service' ? (
                           <Badge tone="info">N/A Service</Badge>
+                        ) : isCompositeRow ? (
+                          <span className={`inline-flex flex-col items-center px-2.5 py-1 rounded-xl text-xs font-bold ${
+                            isOut ? 'bg-red-500/15 text-red-600 border border-red-500/20' :
+                            isLow ? 'bg-amber-500/15 text-amber-600 border border-amber-500/20' :
+                            'bg-emerald-500/15 text-emerald-600 border border-emerald-500/20'
+                          }`}>
+                            <span>{producible} {p.unit}</span>
+                            <span className="text-[9px] uppercase">Can Produce</span>
+                          </span>
                         ) : (
                           <span className={`inline-flex flex-col items-center px-2.5 py-1 rounded-xl text-xs font-bold ${
                             isOut ? 'bg-red-500/15 text-red-600 border border-red-500/20' :
@@ -669,8 +797,19 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
               <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
                 <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">Multiple Selling Prices</h4>
                 <div className="grid grid-cols-4 gap-3">
-                  <Field label="Purchase Price (₹)">
-                    <Input type="number" step="0.01" value={form.purchasePrice} onChange={(e) => setForm({ ...form, purchasePrice: e.target.value })} />
+                  <Field label="Purchase Price (₹)" hint={form.productType === 'composite' ? 'Calculated from the recipe' : undefined}>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={
+                        form.productType === 'composite'
+                          ? computeRecipeTotals(form.recipe?.ingredients, form.recipe?.yieldQty, products).unitCost.toFixed(2)
+                          : form.purchasePrice
+                      }
+                      onChange={(e) => setForm({ ...form, purchasePrice: e.target.value })}
+                      disabled={form.productType === 'composite'}
+                      className={form.productType === 'composite' ? 'opacity-70 cursor-not-allowed' : ''}
+                    />
                   </Field>
                   <Field label="Selling Price (₹) *">
                     <Input type="number" step="0.01" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} required />
@@ -685,7 +824,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
               </div>
             )}
 
-            {form.productType !== 'service' && (
+            {form.productType !== 'service' && form.productType !== 'composite' && (
               <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
                 <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">Warehouse Distribution & Minimum Stock</h4>
                 <div className="grid grid-cols-3 gap-3">
@@ -709,6 +848,118 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                 </div>
               </div>
             )}
+
+            {form.productType === 'composite' && (
+              <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] text-[11px] text-[color:var(--text-muted)]">
+                This is a composite item — it has no stock of its own. Its availability is computed live from the raw materials in its recipe below ("Can produce").
+              </div>
+            )}
+
+            {form.productType === 'composite' && (
+              <div className="p-3 rounded-xl border border-emerald-300/50 dark:border-emerald-800/60 bg-emerald-50/40 dark:bg-emerald-950/20 space-y-3">
+                <div>
+                  <h4 className="text-xs font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Boxes className="h-3.5 w-3.5" /> Recipe — Raw Materials
+                  </h4>
+                  <p className="text-[11px] text-[color:var(--text-muted)] mt-0.5">
+                    Selling one {form.unit || 'unit'} of this product consumes these raw materials from stock. At least one material with a quantity is required.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 max-w-xs">
+                  <Field label="Batch Yields" hint={`Units of ${form.unit || 'unit'} produced per batch`}>
+                    <Input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={form.recipe?.yieldQty ?? 1}
+                      onChange={(e) => setForm({ ...form, recipe: { ...form.recipe, yieldQty: e.target.value } })}
+                    />
+                  </Field>
+                </div>
+
+                <div className="space-y-2">
+                  {(form.recipe?.ingredients || []).length > 0 && (
+                    <div className="hidden md:grid grid-cols-12 gap-2 px-2 text-[10px] font-bold uppercase text-[color:var(--text-muted)]">
+                      <div className="col-span-5">Raw Material</div>
+                      <div className="col-span-2">Qty</div>
+                      <div className="col-span-1 text-center">Unit</div>
+                      <div className="col-span-2 text-right">Cost</div>
+                      <div className="col-span-1 text-right">Line Cost</div>
+                    </div>
+                  )}
+
+                  {(form.recipe?.ingredients || []).map((row, idx) => (
+                    <IngredientRow
+                      key={idx}
+                      row={row}
+                      index={idx}
+                      products={products}
+                      excludeIds={[editing?.id, ...(form.recipe?.ingredients || []).map((i) => i.productId)].filter(Boolean)}
+                      onChange={updateIngredient}
+                      onRemove={removeIngredient}
+                    />
+                  ))}
+
+                  <Button type="button" size="sm" variant="secondary" icon={Plus} onClick={addIngredient}>
+                    Add Raw Material
+                  </Button>
+                </div>
+
+                {(() => {
+                  const totals = computeRecipeTotals(form.recipe?.ingredients, form.recipe?.yieldQty, products);
+                  const sellingPrice = Number(form.price) || 0;
+                  const margin = sellingPrice - totals.unitCost;
+                  const marginPct = sellingPrice ? (margin / sellingPrice) * 100 : 0;
+                  return (
+                    <div className="pt-2 border-t border-emerald-300/40 dark:border-emerald-800/40 space-y-2">
+                      <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                        <StatBlock label="Batch Cost" value={money(totals.batchCost)} />
+                        <StatBlock label="Cost / Unit" value={money(totals.unitCost)} />
+                        <StatBlock label="Selling Price" value={money(sellingPrice)} />
+                        <StatBlock label="Margin" value={money(margin)} tone={margin < 0 ? 'danger' : 'success'} />
+                        <StatBlock label="Margin %" value={`${marginPct.toFixed(1)}%`} tone={margin < 0 ? 'danger' : 'success'} />
+                      </div>
+                      <div className="text-xs font-bold text-[color:var(--text-secondary)]">
+                        Can produce:{' '}
+                        <span className={totals.producible <= 0 ? 'text-red-600' : totals.producible <= 5 ? 'text-amber-600' : 'text-emerald-600'}>
+                          {totals.producible} {form.unit || 'unit'}(s)
+                        </span>{' '}
+                        from current raw material stock.
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+
+            <details className="rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)]" open={(form.altUnits || []).length > 0}>
+              <summary className="cursor-pointer select-none px-3 py-2.5 text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider flex items-center justify-between">
+                <span className="flex items-center gap-2 normal-case">
+                  <Sliders className="h-3.5 w-3.5" /> Alternate Units
+                  {(form.altUnits || []).length > 0 && <Badge tone="accent">{form.altUnits.length}</Badge>}
+                </span>
+                <span className="text-[10px] normal-case font-medium text-[color:var(--text-muted)]">e.g. 1 Box = 12 pcs</span>
+              </summary>
+              <div className="px-3 pb-3 space-y-2">
+                {(form.altUnits || []).map((row, idx) => (
+                  <AltUnitRow
+                    key={idx}
+                    row={row}
+                    index={idx}
+                    units={units}
+                    baseUnit={form.unit}
+                    usedUnits={(form.altUnits || []).map((u) => u.unit).filter(Boolean)}
+                    basePrice={Number(form.price) || 0}
+                    onChange={updateAltUnit}
+                    onRemove={removeAltUnit}
+                  />
+                ))}
+                <Button type="button" size="sm" variant="secondary" icon={Plus} onClick={addAltUnit}>
+                  Add alternate unit
+                </Button>
+              </div>
+            </details>
 
             <div className="grid grid-cols-2 gap-3">
               <Field label="HSN Code">
@@ -737,6 +988,175 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       {labelProduct && (
         <BarcodePrinterModal product={labelProduct} onClose={() => setLabelProduct(null)} showToast={showToast} />
       )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Recipe & Alternate Unit row widgets — used inside the Product form
+ * ------------------------------------------------------------------ */
+
+function StatBlock({ label, value, tone = 'neutral' }) {
+  const color = tone === 'danger' ? 'text-red-600' : tone === 'success' ? 'text-emerald-600' : 'text-[color:var(--text-primary)]';
+  return (
+    <div className="p-2 rounded-lg bg-[color:var(--bg-surface)] border border-[color:var(--border-subtle)]">
+      <div className="text-[9px] uppercase font-bold text-[color:var(--text-muted)]">{label}</div>
+      <div className={`text-sm font-bold tabular ${color}`}>{value}</div>
+    </div>
+  );
+}
+
+/** Searchable raw-material picker + qty for one recipe ingredient row. */
+function IngredientRow({ row, index, products, excludeIds, onChange, onRemove }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const material = (products || []).find((p) => p.id === row.productId);
+
+  const candidates = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return (products || [])
+      .filter((p) => p.productType !== 'composite' && !p.isComposite)
+      .filter((p) => p.id === row.productId || !excludeIds.includes(p.id))
+      .filter((p) => !needle || p.name.toLowerCase().includes(needle) || String(p.barcode || '').includes(needle))
+      .slice(0, 30);
+  }, [products, query, excludeIds, row.productId]);
+
+  const cost = material ? Number(material.purchasePrice) || 0 : 0;
+  const qty = Number(row.qty) || 0;
+
+  return (
+    <div className="grid grid-cols-12 gap-2 items-center p-2 rounded-lg border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)]">
+      <div className="col-span-12 md:col-span-5 relative">
+        {material ? (
+          <div className="field-input flex items-center justify-between gap-2 !py-1.5">
+            <span className="truncate text-xs font-bold text-[color:var(--text-primary)]">{material.name}</span>
+            <button
+              type="button"
+              onClick={() => { onChange(index, { productId: '' }); setQuery(''); }}
+              className="shrink-0 text-[10px] font-bold text-indigo-600 hover:underline"
+            >
+              Change
+            </button>
+          </div>
+        ) : (
+          <>
+            <Input
+              value={query}
+              onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
+              onFocus={() => setOpen(true)}
+              onBlur={() => setTimeout(() => setOpen(false), 150)}
+              placeholder="Search raw material..."
+              className="text-xs"
+            />
+            {open && (
+              <div className="absolute z-20 mt-1 w-full max-h-48 overflow-y-auto rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] shadow-lg">
+                {candidates.length === 0 ? (
+                  <div className="px-3 py-2 text-xs text-[color:var(--text-muted)]">No matching products.</div>
+                ) : (
+                  candidates.map((p) => (
+                    <button
+                      type="button"
+                      key={p.id}
+                      onMouseDown={() => { onChange(index, { productId: p.id }); setQuery(''); setOpen(false); }}
+                      className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-xs hover:bg-[color:var(--bg-subtle)]"
+                    >
+                      <span className="font-medium text-[color:var(--text-primary)]">{p.name}</span>
+                      <span className="text-[color:var(--text-muted)]">{money(p.purchasePrice)}/{p.unit}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+      <div className="col-span-4 md:col-span-2">
+        <Input
+          type="number"
+          step="0.01"
+          min="0"
+          value={row.qty}
+          onChange={(e) => onChange(index, { qty: e.target.value })}
+          placeholder="Qty"
+          className="text-xs"
+        />
+      </div>
+      <div className="col-span-2 md:col-span-1 text-xs text-center text-[color:var(--text-muted)] font-medium">
+        {material?.unit || '—'}
+      </div>
+      <div className="col-span-3 md:col-span-2 text-xs text-right text-[color:var(--text-secondary)]">
+        {material ? money(cost) : '—'}
+      </div>
+      <div className="col-span-2 md:col-span-1 text-xs text-right font-bold text-[color:var(--text-primary)]">
+        {material ? money(qty * cost) : '—'}
+      </div>
+      <div className="col-span-1 text-right">
+        <button
+          type="button"
+          onClick={() => onRemove(index)}
+          className="p-1 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)] hover:text-red-600"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** One alternate-unit row (unit, factor, optional price/barcode override). */
+function AltUnitRow({ row, index, units, baseUnit, usedUnits, basePrice, onChange, onRemove }) {
+  const availableUnits = (units || []).filter((u) => u !== baseUnit && (u === row.unit || !usedUnits.includes(u)));
+  const factor = Number(row.factor) || 0;
+  const derivedPrice = basePrice * factor;
+
+  return (
+    <div className="grid grid-cols-12 gap-2 items-center p-2 rounded-lg border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)]">
+      <div className="col-span-6 md:col-span-3">
+        <Select value={row.unit} onChange={(e) => onChange(index, { unit: e.target.value })}>
+          <option value="">Select unit</option>
+          {availableUnits.map((u) => (
+            <option key={u} value={u}>{u}</option>
+          ))}
+        </Select>
+      </div>
+      <div className="col-span-6 md:col-span-2">
+        <Input
+          type="number"
+          step="0.01"
+          min="0"
+          value={row.factor}
+          onChange={(e) => onChange(index, { factor: e.target.value })}
+          placeholder={`1 ${row.unit || 'unit'} = ? ${baseUnit || 'base'}`}
+          className="text-xs"
+        />
+      </div>
+      <div className="col-span-6 md:col-span-3">
+        <Input
+          type="number"
+          step="0.01"
+          value={row.price}
+          onChange={(e) => onChange(index, { price: e.target.value })}
+          placeholder={`Auto: ${money(derivedPrice)}`}
+          className="text-xs"
+        />
+      </div>
+      <div className="col-span-5 md:col-span-3">
+        <Input
+          value={row.barcode}
+          onChange={(e) => onChange(index, { barcode: e.target.value })}
+          placeholder="Barcode (optional)"
+          className="text-xs"
+        />
+      </div>
+      <div className="col-span-1 text-right">
+        <button
+          type="button"
+          onClick={() => onRemove(index)}
+          className="p-1 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)] hover:text-red-600"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </div>
     </div>
   );
 }

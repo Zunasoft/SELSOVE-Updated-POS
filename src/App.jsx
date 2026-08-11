@@ -2,11 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ShoppingCart, Package, Users, BarChart3, LogOut, Database, CheckCircle2,
-  XCircle, Sun, Moon, Truck, Landmark, Settings as SettingsIcon, Menu, X
+  XCircle, Sun, Moon, Truck, Landmark, Settings as SettingsIcon, Menu, X, LayoutDashboard
 } from 'lucide-react';
 
-import api from './lib/api';
+import api, { setSessionExpiredHandler, SESSION_KEYS } from './lib/api';
 import OTPLogin from './components/OTPLogin';
+import ShopDashboard from './components/ShopDashboard';
 import POSTerminal from './components/POSTerminal';
 import InventoryManager from './components/InventoryManager';
 import CustomerVendorLedger from './components/CustomerVendorLedger';
@@ -16,6 +17,7 @@ import SettingsManager from './components/SettingsManager';
 import AccountsModule from './components/accounts/AccountsModule';
 
 const TABS = [
+  { id: 'dashboard', label: 'Shop Dashboard', short: 'Home', icon: LayoutDashboard },
   { id: 'pos', label: 'POS Billing', short: 'Billing', icon: ShoppingCart },
   { id: 'inventory', label: 'Products & Stock', short: 'Stock', icon: Package },
   { id: 'purchases', label: 'Purchases', short: 'Purchase', icon: Truck },
@@ -25,11 +27,23 @@ const TABS = [
   { id: 'settings', label: 'Settings', short: 'Settings', icon: SettingsIcon }
 ];
 
+/** Maps a nav tab to the plan feature that gates it. Tabs absent from this
+ * map (Settings) are always shown — a shop must always be able to reach it. */
+const TAB_FEATURE_MAP = {
+  dashboard: 'dashboard',
+  pos: 'billing',
+  inventory: 'products',
+  purchases: 'purchases',
+  customers: 'customers',
+  accounts: 'accounts',
+  reports: 'reports'
+};
+
 export default function App() {
   const [tenant, setTenant] = useState(null);
   const [token, setToken] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('pos');
+  const [activeTab, setActiveTab] = useState('dashboard');
   const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('pos_theme') === 'dark');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
@@ -37,6 +51,9 @@ export default function App() {
   const [categories, setCategories] = useState([]);
   const [settings, setSettings] = useState(null);
   const [toast, setToast] = useState(null);
+  // null = unknown (still loading, or the /features call failed) — every tab
+  // stays visible in that state so a network hiccup never locks a shop out.
+  const [features, setFeatures] = useState(null);
 
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type, id: Date.now() });
@@ -75,6 +92,29 @@ export default function App() {
     if (tenant && token) fetchStoreData();
   }, [tenant, token]);
 
+  // Plan-based feature gating: hide tabs the shop's plan does not include.
+  // Fail open on error — never lock a shop out of its own POS because one
+  // request failed.
+  useEffect(() => {
+    if (!tenant || !token) return;
+    api
+      .get('/features')
+      .then((d) => setFeatures(d?.features || {}))
+      .catch(() => setFeatures(null));
+  }, [tenant, token]);
+
+  const visibleTabs = TABS.filter((tab) => {
+    const featureKey = TAB_FEATURE_MAP[tab.id];
+    if (!featureKey || !features) return true;
+    return features[featureKey] !== false;
+  });
+
+  useEffect(() => {
+    if (visibleTabs.length && !visibleTabs.some((t) => t.id === activeTab)) {
+      setActiveTab(visibleTabs[0].id);
+    }
+  }, [features]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     document.documentElement.classList.toggle('dark', isDarkMode);
     localStorage.setItem('pos_theme', isDarkMode ? 'dark' : 'light');
@@ -86,10 +126,22 @@ export default function App() {
   };
 
   const handleLogout = () => {
-    ['pos_token', 'pos_tenant', 'pos_user_name'].forEach((k) => localStorage.removeItem(k));
+    SESSION_KEYS.forEach((k) => localStorage.removeItem(k));
     setTenant(null);
     setToken(null);
+    setFeatures(null);
   };
+
+  // An expired token, or a shop the Super Admin has deactivated, ends the
+  // session server-side; drop back to the login screen and say why.
+  useEffect(() => {
+    setSessionExpiredHandler((message) => {
+      setTenant(null);
+      setToken(null);
+      showToast(message, 'error');
+    });
+    return () => setSessionExpiredHandler(null);
+  }, []);
 
   if (loading) {
     return (
@@ -104,6 +156,7 @@ export default function App() {
   const shared = { tenant, token, showToast };
 
   const screens = {
+    dashboard: <ShopDashboard {...shared} onNavigate={setActiveTab} />,
     pos: <POSTerminal {...shared} settings={settings} />,
     inventory: (
       <InventoryManager
@@ -178,7 +231,7 @@ export default function App() {
           className="hidden items-center gap-0.5 rounded-2xl p-1 xl:flex"
           style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}
         >
-          {TABS.map((tab) => {
+          {visibleTabs.map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
             return (
@@ -237,7 +290,7 @@ export default function App() {
             style={{ background: 'var(--surface)', borderBottom: '1px solid var(--border)' }}
           >
             <div className="grid grid-cols-2 gap-1.5 p-3 sm:grid-cols-4">
-              {TABS.map((tab) => {
+              {visibleTabs.map((tab) => {
                 const Icon = tab.icon;
                 const isActive = activeTab === tab.id;
                 return (

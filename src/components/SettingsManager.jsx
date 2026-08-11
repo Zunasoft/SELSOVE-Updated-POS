@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Settings, Plus, Trash2 } from 'lucide-react';
+import { Settings, Plus, Trash2, ShieldCheck, RotateCcw, Check, X as XIcon } from 'lucide-react';
 
-import api, { money } from '../lib/api';
+import api from '../lib/api';
 import {
   Panel, SectionHeader, Button, Modal, Field, Input, Select, Textarea,
   Badge, Money, Spinner, EmptyState, StatTile, DataTable, cx
@@ -12,15 +12,13 @@ const TABS = [
   { key: 'billing', label: 'Billing & Tax' },
   { key: 'hardware', label: 'Hardware' },
   { key: 'users', label: 'Users & Roles' },
-  { key: 'tables', label: 'Tables' },
-  { key: 'recipes', label: 'Composite Items' }
+  { key: 'tables', label: 'Tables' }
 ];
 
 /**
  * Store configuration in one place — company profile, billing/tax defaults,
- * connected hardware, staff access, dine-in tables and composite (recipe)
- * items. Each tab owns its own data so switching tabs never re-fetches
- * everything else.
+ * connected hardware, staff access and dine-in tables. Each tab owns its own
+ * data so switching tabs never re-fetches everything else.
  */
 export default function SettingsManager({ tenant, token, showToast, onSettingsChange }) {
   const [settings, setSettings] = useState(null);
@@ -55,7 +53,7 @@ export default function SettingsManager({ tenant, token, showToast, onSettingsCh
 
   return (
     <div className="space-y-4">
-      <SectionHeader eyebrow="Configuration" title="Settings" icon={Settings} subtitle="Company profile, billing, tax, hardware, staff access, tables and composite items." />
+      <SectionHeader eyebrow="Configuration" title="Settings" icon={Settings} subtitle="Company profile, billing, tax, hardware, staff access and tables." />
 
       <div
         className="inline-flex flex-wrap items-center gap-0.5 rounded-xl p-0.5"
@@ -82,7 +80,6 @@ export default function SettingsManager({ tenant, token, showToast, onSettingsCh
       {tab === 'hardware' && <HardwareTab showToast={showToast} />}
       {tab === 'users' && <UsersTab showToast={showToast} />}
       {tab === 'tables' && <TablesTab enableTables={settings.pos?.enableTables} showToast={showToast} />}
-      {tab === 'recipes' && <CompositeItemsTab showToast={showToast} />}
     </div>
   );
 }
@@ -114,15 +111,6 @@ function Toggle({ label, hint, checked, onChange }) {
         />
       </button>
     </label>
-  );
-}
-
-function Summary({ label, value, bold }) {
-  return (
-    <div>
-      <div className="label-eyebrow">{label}</div>
-      <div className={`mt-0.5 text-[13px] text-[color:var(--text-primary)] ${bold ? 'font-bold' : 'font-semibold'}`}>{value}</div>
-    </div>
   );
 }
 
@@ -458,11 +446,26 @@ function DeviceCard({ deviceKey, device, showToast, onSaved }) {
  * Users & Roles
  * ------------------------------------------------------------------ */
 
+// Which subscription feature gates each module toggle. Modules absent from
+// this map (dashboard, billing, customers, settings, users) are always
+// available regardless of plan.
+const MODULE_FEATURE_MAP = {
+  products: 'products',
+  inventory: 'inventory',
+  purchases: 'purchases',
+  vendors: 'vendors',
+  accounts: 'accounts',
+  expenses: 'expenses',
+  reports: 'reports',
+  tables: 'tableMgmt'
+};
+
 function UsersTab({ showToast }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [permUser, setPermUser] = useState(null);
 
   const load = async () => {
     setLoading(true);
@@ -491,9 +494,9 @@ function UsersTab({ showToast }) {
 
   if (loading || !data) return <Spinner label="Loading users…" />;
 
-  const { users, roles, permissionMatrix, permissionKeys } = data;
+  const { users, roles, permissionMatrix, permissionKeys, permissionLabels, moduleKeys, moduleLabels, planFeatures } = data;
   const roleCounts = useMemo(
-    () => roles.reduce((acc, r) => ({ ...acc, [r]: users.filter((u) => u.role === r).length }), {}),
+    () => roles.reduce((acc, r) => ({ ...acc, [r.key]: users.filter((u) => u.role === r.key).length }), {}),
     [roles, users]
   );
 
@@ -502,9 +505,11 @@ function UsersTab({ showToast }) {
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatTile label="Total Users" value={users.length} />
         {roles.map((r) => (
-          <StatTile key={r} label={r} value={roleCounts[r] || 0} />
+          <StatTile key={r.key} label={r.label} value={roleCounts[r.key] || 0} />
         ))}
       </div>
+
+      <RoleReferenceTable roles={roles} moduleKeys={moduleKeys} moduleLabels={moduleLabels} permissionMatrix={permissionMatrix} />
 
       <div className="flex justify-end">
         <Button
@@ -531,7 +536,12 @@ function UsersTab({ showToast }) {
               </div>
             )
           },
-          { key: 'role', label: 'Role', width: 100, render: (u) => <Badge tone="accent">{u.role}</Badge> },
+          {
+            key: 'role',
+            label: 'Role',
+            width: 130,
+            render: (u) => <Badge tone="accent">{u.effective?.label || permissionMatrix[u.role]?.label || u.role}</Badge>
+          },
           {
             key: 'status',
             label: 'Status',
@@ -548,9 +558,12 @@ function UsersTab({ showToast }) {
             key: 'actions',
             label: '',
             align: 'right',
-            width: 150,
+            width: 220,
             render: (u) => (
               <div className="flex justify-end gap-1.5">
+                <Button size="sm" icon={ShieldCheck} onClick={() => setPermUser(u)}>
+                  Permissions
+                </Button>
                 <Button
                   size="sm"
                   onClick={() => {
@@ -560,7 +573,7 @@ function UsersTab({ showToast }) {
                 >
                   Edit
                 </Button>
-                {u.role !== 'Owner' && (
+                {u.role !== 'OWNER' && (
                   <Button size="sm" variant="danger" onClick={() => remove(u)}>
                     Delete
                   </Button>
@@ -578,11 +591,26 @@ function UsersTab({ showToast }) {
         onClose={() => setShowModal(false)}
         editing={editing}
         roles={roles}
-        permissionMatrix={permissionMatrix}
-        permissionKeys={permissionKeys}
         showToast={showToast}
         onSaved={() => {
           setShowModal(false);
+          load();
+        }}
+      />
+
+      <PermissionsModal
+        open={Boolean(permUser)}
+        user={permUser}
+        onClose={() => setPermUser(null)}
+        permissionMatrix={permissionMatrix}
+        permissionKeys={permissionKeys}
+        permissionLabels={permissionLabels}
+        moduleKeys={moduleKeys}
+        moduleLabels={moduleLabels}
+        planFeatures={planFeatures}
+        showToast={showToast}
+        onSaved={() => {
+          setPermUser(null);
           load();
         }}
       />
@@ -590,35 +618,69 @@ function UsersTab({ showToast }) {
   );
 }
 
-function UserModal({ open, onClose, editing, roles, permissionMatrix, permissionKeys, showToast, onSaved }) {
-  const blank = { name: '', phone: '', email: '', role: roles[0] || '', pin: '' };
+/** Compact tick/cross matrix so a shop can see what each role means before assigning it. */
+function RoleReferenceTable({ roles, moduleKeys, moduleLabels, permissionMatrix }) {
+  return (
+    <Panel padded={false} className="overflow-hidden">
+      <div className="px-4 pt-3 pb-1 label-eyebrow">Role Reference — module access by role</div>
+      <div className="overflow-x-auto">
+        <table className="ledger-table w-full border-collapse">
+          <thead>
+            <tr>
+              <th style={{ textAlign: 'left' }}>Module</th>
+              {roles.map((r) => (
+                <th key={r.key} style={{ textAlign: 'center', width: 110 }}>
+                  {r.label}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {moduleKeys.map((mKey) => (
+              <tr key={mKey}>
+                <td className="text-[12px] font-semibold text-[color:var(--text-primary)]">{moduleLabels[mKey] || mKey}</td>
+                {roles.map((r) => {
+                  const on = Boolean(permissionMatrix[r.key]?.modules?.[mKey]);
+                  return (
+                    <td key={r.key} style={{ textAlign: 'center' }}>
+                      {on ? (
+                        <Check className="inline h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+                      ) : (
+                        <XIcon className="inline h-3.5 w-3.5 text-[color:var(--text-muted)]" />
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Panel>
+  );
+}
+
+function UserModal({ open, onClose, editing, roles, showToast, onSaved }) {
+  const blank = { name: '', phone: '', email: '', role: roles[0]?.key || '', pin: '' };
   const [form, setForm] = useState(blank);
-  const [overrides, setOverrides] = useState({});
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     if (editing) {
       setForm({ name: editing.name || '', phone: editing.phone || '', email: editing.email || '', role: editing.role, pin: '' });
-      setOverrides(editing.permissions || {});
     } else {
       setForm(blank);
-      setOverrides({});
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, editing]);
-
-  const roleDefaults = permissionMatrix[form.role] || {};
-  const effective = (key) => (key in overrides ? overrides[key] : Boolean(roleDefaults[key]));
-  const toggleKey = (key) => setOverrides((prev) => ({ ...prev, [key]: !effective(key) }));
 
   const submit = async (e) => {
     e.preventDefault();
     if (!form.name.trim()) return;
     setSaving(true);
     try {
-      // Only send an override map when the user actually deviated from the role default.
-      const body = { ...form, permissions: Object.keys(overrides).length ? overrides : null };
+      const body = { ...form };
       if (!body.pin) delete body.pin;
       const res = editing ? await api.put(`/users/${editing.id}`, body) : await api.post('/users', body);
       showToast(res.message || 'User saved.');
@@ -657,17 +719,15 @@ function UserModal({ open, onClose, editing, roles, permissionMatrix, permission
           <Field label="Email">
             <Input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
           </Field>
-          <Field label="Role">
+          <Field label="Role" hint={editing?.role === 'OWNER' ? 'The Owner role cannot be changed.' : undefined}>
             <Select
               value={form.role}
-              onChange={(e) => {
-                setForm({ ...form, role: e.target.value });
-                setOverrides({});
-              }}
+              disabled={editing?.role === 'OWNER'}
+              onChange={(e) => setForm({ ...form, role: e.target.value })}
             >
               {roles.map((r) => (
-                <option key={r} value={r}>
-                  {r}
+                <option key={r.key} value={r.key}>
+                  {r.label}
                 </option>
               ))}
             </Select>
@@ -681,24 +741,226 @@ function UserModal({ open, onClose, editing, roles, permissionMatrix, permission
             />
           </Field>
         </div>
+        <p className="text-[11px] text-[color:var(--text-muted)]">
+          Fine-grained module access and action permissions are set from the “Permissions” action on the user list, once the user
+          has been created.
+        </p>
+      </form>
+    </Modal>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Permission matrix modal
+ * ------------------------------------------------------------------ */
+
+function OverriddenPill() {
+  return <Badge tone="warning">Overridden</Badge>;
+}
+
+function PermissionsModal({
+  open,
+  user,
+  onClose,
+  permissionMatrix,
+  permissionKeys,
+  permissionLabels,
+  moduleKeys,
+  moduleLabels,
+  planFeatures,
+  showToast,
+  onSaved
+}) {
+  const roleDefaults = (user && (permissionMatrix[user.role] || permissionMatrix.CASHIER)) || {};
+  const isOwner = user?.role === 'OWNER';
+
+  const [modules, setModules] = useState({});
+  const [flags, setFlags] = useState({});
+  const [maxDiscountPercent, setMaxDiscountPercent] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [resetting, setResetting] = useState(false);
+
+  useEffect(() => {
+    if (!open || !user) return;
+    const eff = user.effective || roleDefaults;
+    setModules({ ...roleDefaults.modules, ...(eff.modules || {}) });
+    const f = {};
+    permissionKeys.forEach((key) => {
+      f[key] = Boolean(eff[key]);
+    });
+    setFlags(f);
+    setMaxDiscountPercent(eff.maxDiscountPercent ?? roleDefaults.maxDiscountPercent ?? 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, user]);
+
+  if (!user) return null;
+
+  const moduleDisabled = (key) => {
+    const feature = MODULE_FEATURE_MAP[key];
+    return feature ? planFeatures[feature] === false : false;
+  };
+
+  const toggleModule = (key) => setModules((prev) => ({ ...prev, [key]: !prev[key] }));
+  const toggleFlag = (key) => setFlags((prev) => ({ ...prev, [key]: !prev[key] }));
+
+  const isModuleOverridden = (key) => Boolean(modules[key]) !== Boolean(roleDefaults.modules?.[key]);
+  const isFlagOverridden = (key) => Boolean(flags[key]) !== Boolean(roleDefaults[key]);
+  const isDiscountOverridden = Number(maxDiscountPercent) !== Number(roleDefaults.maxDiscountPercent ?? 0);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const res = await api.put(`/users/${user.id}/permissions`, {
+        modules,
+        ...flags,
+        maxDiscountPercent: Number(maxDiscountPercent) || 0
+      });
+      showToast(res.message || 'Permissions updated.');
+      onSaved();
+    } catch (err) {
+      showToast(api.message(err, 'Could not update permissions.'), 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const reset = async () => {
+    setResetting(true);
+    try {
+      const res = await api.put(`/users/${user.id}/permissions`, { reset: true });
+      showToast(res.message || 'Reset to role defaults.');
+      onSaved();
+    } catch (err) {
+      showToast(api.message(err, 'Could not reset permissions.'), 'error');
+    } finally {
+      setResetting(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={`Permissions — ${user.name}`}
+      subtitle={roleDefaults.label || user.role}
+      icon={ShieldCheck}
+      size="xl"
+      footer={
+        isOwner ? (
+          <Button onClick={onClose}>Close</Button>
+        ) : (
+          <>
+            <Button icon={RotateCcw} onClick={reset} loading={resetting}>
+              Reset to role defaults
+            </Button>
+            <Button onClick={onClose}>Cancel</Button>
+            <Button variant="primary" onClick={save} loading={saving}>
+              Save Permissions
+            </Button>
+          </>
+        )
+      }
+    >
+      <div className="space-y-5">
+        {isOwner ? (
+          <div className="rounded-xl px-3 py-2.5 text-[12px] font-semibold text-[color:var(--text-secondary)]" style={{ background: 'var(--bg-subtle)' }}>
+            The Owner always has full access to every module and permission — it cannot be restricted.
+          </div>
+        ) : (
+          <div className="rounded-xl px-3 py-2.5 text-[11px] text-[color:var(--text-secondary)]" style={{ background: 'var(--bg-subtle)' }}>
+            Switches marked <OverriddenPill /> differ from the {roleDefaults.label || user.role} role default for this user.
+          </div>
+        )}
 
         <div>
-          <div className="label-eyebrow mb-1.5">Permissions</div>
+          <div className="label-eyebrow mb-1.5">Module Access Control</div>
           <div className="grid grid-cols-2 gap-1.5 rounded-xl p-3 sm:grid-cols-3" style={{ background: 'var(--bg-subtle)' }}>
-            {permissionKeys.map((key) => (
-              <label key={key} className="flex items-center gap-2 text-[12px] font-semibold text-[color:var(--text-secondary)]">
-                <input
-                  type="checkbox"
-                  checked={effective(key)}
-                  onChange={() => toggleKey(key)}
-                  className="h-3.5 w-3.5 rounded accent-indigo-600"
-                />
-                {key}
-              </label>
-            ))}
+            {moduleKeys.map((key) => {
+              const checked = isOwner ? true : Boolean(modules[key]);
+              const disabled = isOwner || moduleDisabled(key);
+              return (
+                <div key={key} className="flex items-center justify-between gap-2 py-1">
+                  <span>
+                    <span className="block text-[12px] font-semibold text-[color:var(--text-primary)]">{moduleLabels[key] || key}</span>
+                    {!isOwner && moduleDisabled(key) && (
+                      <span className="block text-[10px] text-[color:var(--text-muted)]">Not in your plan</span>
+                    )}
+                    {!isOwner && !moduleDisabled(key) && isModuleOverridden(key) && <OverriddenPill />}
+                  </span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={checked}
+                    disabled={disabled}
+                    onClick={() => toggleModule(key)}
+                    className={cx(
+                      'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-40',
+                      checked ? 'bg-indigo-600' : ''
+                    )}
+                    style={{ background: checked ? undefined : 'var(--bg-subtle)', border: '1px solid var(--border)' }}
+                  >
+                    <span
+                      className={cx(
+                        'inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform',
+                        checked ? 'translate-x-4' : 'translate-x-0.5'
+                      )}
+                    />
+                  </button>
+                </div>
+              );
+            })}
           </div>
         </div>
-      </form>
+
+        <div>
+          <div className="label-eyebrow mb-1.5">Permission Toggles</div>
+          <div className="grid grid-cols-2 gap-1.5 rounded-xl p-3 sm:grid-cols-3" style={{ background: 'var(--bg-subtle)' }}>
+            {permissionKeys.map((key) => {
+              const checked = isOwner ? true : Boolean(flags[key]);
+              return (
+                <div key={key} className="flex items-center justify-between gap-2 py-1">
+                  <span>
+                    <span className="block text-[12px] font-semibold text-[color:var(--text-primary)]">{permissionLabels[key] || key}</span>
+                    {!isOwner && isFlagOverridden(key) && <OverriddenPill />}
+                  </span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={checked}
+                    disabled={isOwner}
+                    onClick={() => toggleFlag(key)}
+                    className={cx(
+                      'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-40',
+                      checked ? 'bg-indigo-600' : ''
+                    )}
+                    style={{ background: checked ? undefined : 'var(--bg-subtle)', border: '1px solid var(--border)' }}
+                  >
+                    <span
+                      className={cx(
+                        'inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform',
+                        checked ? 'translate-x-4' : 'translate-x-0.5'
+                      )}
+                    />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          <div className="mt-2 flex items-center gap-2">
+            <Field label="Max Discount %" className="w-40">
+              <Input
+                type="number"
+                min="0"
+                max="100"
+                value={isOwner ? 100 : maxDiscountPercent}
+                disabled={isOwner}
+                onChange={(e) => setMaxDiscountPercent(e.target.value)}
+              />
+            </Field>
+            {!isOwner && isDiscountOverridden && <OverriddenPill />}
+          </div>
+        </div>
+      </div>
     </Modal>
   );
 }
@@ -753,6 +1015,10 @@ function TablesTab({ enableTables, showToast }) {
           Table management is currently switched off in POS settings — you can still manage tables here, but they will not appear at checkout until it is enabled.
         </div>
       )}
+
+      <p className="text-[11px] text-[color:var(--text-muted)]">
+        Looking for composite / recipe items? Build them from Inventory → Products → Add Product → type “Composite”.
+      </p>
 
       <div className="grid grid-cols-3 gap-3">
         <StatTile label="Total" value={tables.length} />
@@ -858,258 +1124,3 @@ function AddTableModal({ open, onClose, showToast, onSaved }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Composite Items (recipes)
- * ------------------------------------------------------------------ */
-
-function CompositeItemsTab({ showToast }) {
-  const [recipes, setRecipes] = useState([]);
-  const [products, setProducts] = useState([]);
-  const [units, setUnits] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [showNew, setShowNew] = useState(false);
-
-  const load = async () => {
-    setLoading(true);
-    try {
-      const [r, p, u] = await Promise.all([api.get('/recipes'), api.get('/products'), api.get('/units')]);
-      setRecipes(r || []);
-      setProducts(p || []);
-      setUnits(u || []);
-    } catch (err) {
-      showToast(api.message(err, 'Could not load composite items.'), 'error');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    load();
-  }, []);
-
-  const remove = async (r) => {
-    try {
-      const res = await api.del(`/recipes/${r.id}`);
-      showToast(res.message || 'Recipe removed.');
-      load();
-    } catch (err) {
-      showToast(api.message(err, 'Could not delete recipe.'), 'error');
-    }
-  };
-
-  if (loading) return <Spinner label="Loading composite items…" />;
-
-  return (
-    <div className="space-y-4">
-      <div className="flex justify-end">
-        <Button variant="primary" icon={Plus} onClick={() => setShowNew(true)}>
-          New Recipe
-        </Button>
-      </div>
-
-      <DataTable
-        columns={[
-          { key: 'productName', label: 'Product', render: (r) => <span className="font-bold">{r.productName}</span> },
-          { key: 'yieldQty', label: 'Yield Qty', align: 'right', width: 90, render: (r) => r.yieldQty },
-          { key: 'ingredients', label: 'Ingredients', align: 'right', width: 100, render: (r) => r.ingredients?.length || 0 },
-          { key: 'unitCost', label: 'Unit Cost', align: 'right', width: 110, render: (r) => <Money value={r.unitCost} /> },
-          { key: 'sellingPrice', label: 'Selling Price', align: 'right', width: 120, render: (r) => <Money value={r.sellingPrice} /> },
-          {
-            key: 'margin',
-            label: 'Margin',
-            align: 'right',
-            width: 110,
-            render: (r) => <Money value={r.margin} colored className="font-bold" />
-          },
-          {
-            key: 'producible',
-            label: 'Producible',
-            align: 'right',
-            width: 100,
-            render: (r) => <Badge tone={r.producible === 0 ? 'danger' : 'neutral'}>{r.producible}</Badge>
-          },
-          {
-            key: 'actions',
-            label: '',
-            align: 'right',
-            width: 60,
-            render: (r) => <Button size="sm" variant="danger" icon={Trash2} onClick={() => remove(r)} />
-          }
-        ]}
-        rows={recipes}
-        empty={<EmptyState title="No composite items yet" hint="Build a recipe from raw-material ingredients to track its cost and margin." />}
-      />
-
-      <RecipeModal
-        open={showNew}
-        onClose={() => setShowNew(false)}
-        products={products}
-        units={units}
-        showToast={showToast}
-        onSaved={() => {
-          setShowNew(false);
-          load();
-        }}
-      />
-    </div>
-  );
-}
-
-const blankIngredient = () => ({ productId: '', qty: '' });
-
-function RecipeModal({ open, onClose, products, units, showToast, onSaved }) {
-  const [productId, setProductId] = useState('');
-  const [yieldQty, setYieldQty] = useState('1');
-  const [ingredients, setIngredients] = useState([blankIngredient()]);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    if (open) {
-      setProductId('');
-      setYieldQty('1');
-      setIngredients([blankIngredient()]);
-    }
-  }, [open]);
-
-  const setIngredient = (idx, patch) => setIngredients((ls) => ls.map((l, i) => (i === idx ? { ...l, ...patch } : l)));
-  const addIngredient = () => setIngredients((ls) => [...ls, blankIngredient()]);
-  const removeIngredient = (idx) => setIngredients((ls) => ls.filter((_, i) => i !== idx));
-
-  // Live raw-material cost preview — same math the backend will use to derive unitCost.
-  const rawCost = useMemo(
-    () =>
-      ingredients.reduce((s, l) => {
-        const p = products.find((pr) => pr.id === l.productId);
-        return s + (Number(l.qty) || 0) * (p?.purchasePrice || 0);
-      }, 0),
-    [ingredients, products]
-  );
-
-  const canSubmit = Boolean(productId) && Number(yieldQty) > 0 && ingredients.some((l) => l.productId && Number(l.qty) > 0);
-
-  const submit = async (e) => {
-    e.preventDefault();
-    if (!canSubmit) return;
-    setSaving(true);
-    try {
-      const res = await api.post('/recipes', {
-        productId,
-        yieldQty: Number(yieldQty),
-        ingredients: ingredients
-          .filter((l) => l.productId && Number(l.qty) > 0)
-          .map((l) => ({ productId: l.productId, qty: Number(l.qty) }))
-      });
-      showToast(res.message || 'Recipe created.');
-      onSaved();
-    } catch (err) {
-      showToast(api.message(err, 'Could not create recipe.'), 'error');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      title="New Recipe"
-      subtitle="Define the raw materials consumed to produce a finished item."
-      icon={Plus}
-      size="lg"
-      footer={
-        <>
-          <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={submit} loading={saving} disabled={!canSubmit}>
-            Create Recipe
-          </Button>
-        </>
-      }
-    >
-      <form onSubmit={submit} className="space-y-4">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Finished product" required>
-            <Select value={productId} onChange={(e) => setProductId(e.target.value)}>
-              <option value="">— Select product —</option>
-              {products.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <Field label="Yield qty" required>
-            <Input type="number" min="1" value={yieldQty} onChange={(e) => setYieldQty(e.target.value)} />
-          </Field>
-        </div>
-
-        <div>
-          <div className="mb-1.5 flex items-center justify-between">
-            <span className="label-eyebrow">Ingredients</span>
-            <Button type="button" size="sm" icon={Plus} onClick={addIngredient}>
-              Add line
-            </Button>
-          </div>
-
-          <div className="surface overflow-hidden rounded-2xl">
-            <table className="ledger-table w-full border-collapse">
-              <thead>
-                <tr>
-                  <th style={{ textAlign: 'left' }}>Ingredient</th>
-                  <th style={{ width: 100, textAlign: 'right' }}>Qty</th>
-                  <th style={{ width: 70 }}>Unit</th>
-                  <th style={{ width: 40 }} />
-                </tr>
-              </thead>
-              <tbody>
-                {ingredients.map((line, idx) => {
-                  const p = products.find((pr) => pr.id === line.productId);
-                  return (
-                    <tr key={idx}>
-                      <td>
-                        <Select value={line.productId} onChange={(e) => setIngredient(idx, { productId: e.target.value })}>
-                          <option value="">— Select product —</option>
-                          {products.map((pr) => (
-                            <option key={pr.id} value={pr.id}>
-                              {pr.name}
-                            </option>
-                          ))}
-                        </Select>
-                      </td>
-                      <td>
-                        <Input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={line.qty}
-                          onChange={(e) => setIngredient(idx, { qty: e.target.value })}
-                          className="text-right"
-                        />
-                      </td>
-                      <td className="text-center text-[11px] text-[color:var(--text-muted)]">
-                        {p?.unit || units.find((u) => u === p?.unit) || '—'}
-                      </td>
-                      <td className="text-right">
-                        <button
-                          type="button"
-                          onClick={() => removeIngredient(idx)}
-                          disabled={ingredients.length === 1}
-                          className="rounded-lg p-1.5 text-[color:var(--text-muted)] transition-colors hover:bg-[color:var(--bg-subtle)] disabled:opacity-30"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div className="flex justify-end rounded-xl px-4 py-2.5" style={{ background: 'var(--bg-subtle)' }}>
-          <Summary label="Raw Material Cost" value={money(rawCost)} bold />
-        </div>
-      </form>
-    </Modal>
-  );
-}

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Truck, Plus, Trash2, ClipboardList } from 'lucide-react';
+import { Truck, Plus, Trash2, ClipboardList, Wallet } from 'lucide-react';
 
 import api, { money, fmtDate, todayISO, monthStartISO } from '../lib/api';
 import {
@@ -25,6 +25,7 @@ export default function PurchaseManager({ tenant, token, showToast }) {
   const [view, setView] = useState('INVOICES');
   const [showNew, setShowNew] = useState(false);
   const [detail, setDetail] = useState(null);
+  const [payVendorTarget, setPayVendorTarget] = useState(null);
 
   const loadPurchases = () => api.get('/purchases', { from: range.from, to: range.to }).then((d) => setPurchases(d || []));
   const loadVendors = () => api.get('/vendors').then((d) => setVendors(d || []));
@@ -61,7 +62,10 @@ export default function PurchaseManager({ tenant, token, showToast }) {
   const summary = useMemo(() => {
     const count = purchases.length;
     const total = purchases.reduce((s, p) => s + (p.totalAmount || 0), 0);
-    const unpaid = purchases.reduce((s, p) => s + (p.paymentStatus === 'PAID' ? 0 : p.totalAmount || 0), 0);
+    const unpaid = purchases.reduce(
+      (s, p) => s + (p.paymentStatus === 'PAID' ? 0 : (p.totalAmount || 0) - (p.paidAmount || 0)),
+      0
+    );
     return { count, total, unpaid };
   }, [purchases]);
 
@@ -123,8 +127,8 @@ export default function PurchaseManager({ tenant, token, showToast }) {
             {
               key: 'paymentStatus',
               label: 'Status',
-              width: 90,
-              render: (p) => <Badge tone={p.paymentStatus === 'PAID' ? 'success' : 'warning'}>{p.paymentStatus === 'PAID' ? 'Paid' : 'Unpaid'}</Badge>
+              width: 110,
+              render: (p) => <PaymentStatusBadge purchase={p} />
             },
             {
               key: 'voucherNo',
@@ -166,6 +170,8 @@ export default function PurchaseManager({ tenant, token, showToast }) {
         />
       )}
 
+      <VendorPayablesPanel vendors={vendors} onPay={setPayVendorTarget} />
+
       <NewPurchaseModal
         open={showNew}
         onClose={() => setShowNew(false)}
@@ -181,7 +187,89 @@ export default function PurchaseManager({ tenant, token, showToast }) {
       />
 
       <PurchaseDetailModal purchase={detail} onClose={() => setDetail(null)} />
+
+      <PayVendorModal
+        vendor={payVendorTarget}
+        accounts={ledgerAccounts}
+        showToast={showToast}
+        onClose={() => setPayVendorTarget(null)}
+        onPaid={() => {
+          setPayVendorTarget(null);
+          load();
+        }}
+      />
     </div>
+  );
+}
+
+/**
+ * Vendor Cash Payment — Module 6. Settling a supplier without leaving the
+ * purchases screen; the money is applied to their oldest unpaid invoices
+ * first, exactly as the backend does it.
+ */
+function VendorPayablesPanel({ vendors, onPay }) {
+  const payable = vendors.filter((v) => v.outstandingPayable > 0).sort((a, b) => b.outstandingPayable - a.outstandingPayable);
+
+  return (
+    <Panel>
+      <SectionHeader
+        eyebrow="Module 6"
+        title="Vendor Payables"
+        icon={Wallet}
+        subtitle="Settling a vendor here posts a real voucher and clears their oldest unpaid invoices first."
+      />
+      <div className="mt-3">
+        <DataTable
+          maxHeight="40vh"
+          dense
+          columns={[
+            { key: 'name', label: 'Vendor', render: (v) => <span className="font-semibold">{v.name}</span> },
+            { key: 'phone', label: 'Phone', width: 120, render: (v) => <span className="text-[color:var(--text-muted)]">{v.phone || '—'}</span> },
+            {
+              key: 'outstandingPayable',
+              label: 'Payable',
+              align: 'right',
+              width: 130,
+              render: (v) => <Money value={v.outstandingPayable} className="font-bold" />
+            },
+            {
+              key: 'advancePaid',
+              label: 'Advance',
+              align: 'right',
+              width: 110,
+              render: (v) => <Money value={v.advancePaid} showZero={false} className="text-emerald-600 dark:text-emerald-400" />
+            },
+            {
+              key: 'action',
+              label: '',
+              width: 80,
+              render: (v) => (
+                <Button size="sm" variant="primary" onClick={() => onPay(v)}>
+                  Pay
+                </Button>
+              )
+            }
+          ]}
+          rows={payable}
+          rowKey={(v) => v.id}
+          empty={<EmptyState icon={Wallet} title="No vendors with an outstanding balance" />}
+        />
+      </div>
+    </Panel>
+  );
+}
+
+/** Status + paid-so-far badge shared by the invoice list and the detail modal. */
+function PaymentStatusBadge({ purchase }) {
+  const tone = purchase.paymentStatus === 'PAID' ? 'success' : purchase.paymentStatus === 'PARTIAL' ? 'info' : 'warning';
+  const label = purchase.paymentStatus === 'PAID' ? 'Paid' : purchase.paymentStatus === 'PARTIAL' ? 'Partial' : 'Unpaid';
+  return (
+    <span className="flex flex-col items-start gap-0.5">
+      <Badge tone={tone}>{label}</Badge>
+      {purchase.paymentStatus === 'PARTIAL' && (
+        <span className="tabular text-[10px] text-[color:var(--text-muted)]">{money(purchase.paidAmount)} paid</span>
+      )}
+    </span>
   );
 }
 
@@ -199,7 +287,7 @@ function PurchaseDetailModal({ purchase, onClose }) {
       {purchase && (
         <div className="space-y-3">
           <div className="grid grid-cols-3 gap-3">
-            <Summary label="Payment status" value={<Badge tone={purchase.paymentStatus === 'PAID' ? 'success' : 'warning'}>{purchase.paymentStatus === 'PAID' ? 'Paid' : 'Unpaid'}</Badge>} />
+            <Summary label="Payment status" value={<PaymentStatusBadge purchase={purchase} />} />
             <Summary label="Payment mode" value={purchase.paymentMode || '—'} />
             <Summary label="Received by" value={purchase.receivedBy || '—'} />
           </div>
@@ -250,6 +338,158 @@ function Summary({ label, value, bold }) {
       <div className="label-eyebrow">{label}</div>
       <div className={`mt-0.5 text-[13px] text-[color:var(--text-primary)] ${bold ? 'font-bold' : 'font-semibold'}`}>{value}</div>
     </div>
+  );
+}
+
+const PAY_MODES = ['Cash', 'UPI', 'Card', 'Bank Transfer'];
+
+function PayVendorModal({ vendor, accounts, showToast, onClose, onPaid }) {
+  const blankForm = () => ({
+    amount: vendor ? vendor.outstandingPayable : 0,
+    discount: 0,
+    paymentMode: 'Cash',
+    settlementAccountId: '',
+    reference: '',
+    notes: '',
+    date: todayISO()
+  });
+  const [form, setForm] = useState(blankForm());
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (vendor) setForm(blankForm());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vendor]);
+
+  const amount = Number(form.amount) || 0;
+  const overpay = Boolean(vendor) && amount > vendor.outstandingPayable;
+  const needsAccount = form.paymentMode !== 'Cash';
+  const canSubmit = Boolean(vendor) && amount > 0 && (!needsAccount || Boolean(form.settlementAccountId));
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!canSubmit) return;
+    setSaving(true);
+    try {
+      const res = await api.post(`/vendors/${vendor.id}/pay`, {
+        amount,
+        discount: Number(form.discount) || 0,
+        paymentMode: form.paymentMode,
+        settlementAccountId: needsAccount ? form.settlementAccountId : undefined,
+        reference: form.reference,
+        notes: form.notes,
+        date: form.date
+      });
+      const settled = res.data?.settled || [];
+      const msg = settled.length
+        ? `${res.message} Cleared: ${settled.map((s) => s.invoiceNo).join(', ')}.`
+        : res.message;
+      showToast(msg);
+      onPaid();
+    } catch (err) {
+      showToast(api.message(err, 'Could not record the payment.'), 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={Boolean(vendor)}
+      onClose={onClose}
+      title="Pay Vendor"
+      subtitle={vendor ? `${vendor.name} · Payable ${money(vendor.outstandingPayable)}` : ''}
+      icon={Wallet}
+      size="md"
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={submit} loading={saving} disabled={!canSubmit}>
+            Record Payment
+          </Button>
+        </>
+      }
+    >
+      {vendor && (
+        <form onSubmit={submit} className="space-y-3">
+          <div className="grid grid-cols-2 gap-3 rounded-xl px-4 py-2.5" style={{ background: 'var(--bg-subtle)' }}>
+            <Summary label="Vendor" value={vendor.name} />
+            <Summary label="Current payable" value={money(vendor.outstandingPayable)} bold />
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Amount" required>
+              <Input
+                type="number"
+                min="0"
+                step="0.01"
+                value={form.amount}
+                onChange={(e) => setForm({ ...form, amount: e.target.value })}
+                className="text-right"
+              />
+            </Field>
+
+            <Field label="Discount" hint="Waived off against the invoice, if any">
+              <Input
+                type="number"
+                min="0"
+                step="0.01"
+                value={form.discount}
+                onChange={(e) => setForm({ ...form, discount: e.target.value })}
+                className="text-right"
+              />
+            </Field>
+
+            <Field label="Payment mode">
+              <Select
+                value={form.paymentMode}
+                onChange={(e) => setForm({ ...form, paymentMode: e.target.value, settlementAccountId: '' })}
+              >
+                {PAY_MODES.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+
+            <Field label="Date">
+              <Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} />
+            </Field>
+
+            {needsAccount && (
+              <Field label="Pay from" required className="sm:col-span-2">
+                <Select value={form.settlementAccountId} onChange={(e) => setForm({ ...form, settlementAccountId: e.target.value })}>
+                  <option value="">— Select account —</option>
+                  {accounts.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            )}
+
+            <Field label="Reference" hint="Cheque no. / UTR / transaction id" className="sm:col-span-2">
+              <Input value={form.reference} onChange={(e) => setForm({ ...form, reference: e.target.value })} />
+            </Field>
+          </div>
+
+          {overpay && (
+            <div
+              className="rounded-xl px-3 py-2 text-[11.5px] font-semibold text-amber-700 dark:text-amber-300"
+              style={{ background: 'var(--bg-subtle)' }}
+            >
+              This is more than the current payable — the extra will be recorded as an advance to the vendor.
+            </div>
+          )}
+
+          <Field label="Notes">
+            <Textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Optional narration" />
+          </Field>
+        </form>
+      )}
+    </Modal>
   );
 }
 
