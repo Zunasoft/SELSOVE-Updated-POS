@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useDeferredValue } from 'react';
 import {
   Package, Plus, Edit3, Trash2, Upload, AlertTriangle, Barcode, Tag,
   Boxes, History, IndianRupee, Save, Printer, Layers, ScanLine, Building2,
@@ -285,8 +285,42 @@ const blankProduct = (categories) => ({
   imageUrl: '',
   warehouses: { wh_main: 0, wh_shop: 0 },
   requiresWeight: false,
-  taxRate: 5
+  taxRate: 5,
+  dozenQuantity: 12,
+  recipeItems: [],
+  recipeYieldQty: 1,
+  recipeNotes: '',
+  comboItems: [],
+  useCustomPricing: false
 });
+
+/**
+ * Live cost/yield math for the recipe builder — mirrors the server's
+ * `decorateRecipe` in modules/recipes.js so the numbers shown while editing
+ * never surprise the user once the request round-trips.
+ */
+function computeRecipeTotals(ingredients, yieldQty, products) {
+  const rows = (ingredients || [])
+    .map((ing) => {
+      const material = (products || []).find((p) => p.id === ing.productId);
+      const qty = Number(ing.qty) || 0;
+      const cost = material ? Number(material.purchasePrice) || 0 : 0;
+      return { productId: ing.productId, material, qty, cost, lineCost: qty * cost };
+    })
+    .filter((r) => r.productId && r.qty > 0);
+
+  const batchCost = rows.reduce((sum, r) => sum + r.lineCost, 0);
+  const y = Number(yieldQty) > 0 ? Number(yieldQty) : 1;
+  const unitCost = batchCost / y;
+
+  const producible = rows.length
+    ? Math.floor(
+        Math.min(...rows.map((r) => (r.qty > 0 ? ((r.material?.stock || 0) / r.qty) * y : 0)))
+      )
+    : 0;
+
+  return { rows, batchCost, unitCost, producible: Math.max(0, Number.isFinite(producible) ? producible : 0) };
+}
 
 function ProductsTab({ products, categories, units, warehouses, showToast, onRefresh }) {
   const [query, setQuery] = useState('');
@@ -303,15 +337,26 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
 
   const [form, setForm] = useState(blankProduct(categories));
 
+  const deferredQuery = useDeferredValue(query);
+
   const rows = useMemo(() => {
-    const needle = query.trim().toLowerCase();
+    const needle = deferredQuery.trim().toLowerCase();
     return products.filter((p) => {
       if (categoryId !== 'all' && p.categoryId !== categoryId) return false;
       if (typeFilter !== 'all' && p.productType !== typeFilter) return false;
       if (statusFilter === 'active' && p.isActive === false) return false;
       if (statusFilter === 'inactive' && p.isActive !== false) return false;
 
-      const displayStock = warehouseFilter === 'all' ? p.stock : (p.warehouses?.[warehouseFilter] || 0);
+      let displayStock = p.stock;
+      if (warehouseFilter !== 'all') {
+        if (p.warehouses) {
+          displayStock = p.warehouses[warehouseFilter] || 0;
+        } else {
+          if (warehouseFilter === 'wh_main') displayStock = Math.max(0, (p.stock || 0) - 10);
+          else if (warehouseFilter === 'wh_shop') displayStock = Math.min(p.stock || 0, 10);
+          else displayStock = 0;
+        }
+      }
 
       // If a specific warehouse is selected, optionally hide products that have never been in this warehouse (unless OUT is selected)
       if (warehouseFilter !== 'all' && stockFilter !== 'OUT' && displayStock <= 0) return false;
@@ -327,7 +372,15 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
         (p.barcodes || [p.barcode]).some((b) => String(b).includes(needle))
       );
     });
-  }, [products, query, categoryId, typeFilter, stockFilter, statusFilter, warehouseFilter]);
+  }, [products, deferredQuery, categoryId, typeFilter, stockFilter, statusFilter, warehouseFilter]);
+
+  const productsById = useMemo(() => {
+    const map = {};
+    for (const p of products) {
+      map[p.id] = p;
+    }
+    return map;
+  }, [products]);
 
   const openAdd = () => {
     setEditing(null);
@@ -342,10 +395,61 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       ...product,
       regionalName: product.regionalName || product.printName || '',
       barcodes: Array.isArray(product.barcodes) ? product.barcodes.join(', ') : product.barcode || '',
-      warehouses: product.warehouses || { wh_main: Math.max(0, product.stock - 10), wh_shop: Math.min(product.stock, 10) }
+      warehouses: product.warehouses || {},
+      dozenQuantity: product.dozenQuantity || 12,
+      comboItems: Array.isArray(product.comboItems) ? product.comboItems.map((i) => ({ ...i })) : [],
+      recipeItems: Array.isArray(product.recipeItems) ? product.recipeItems.map((i) => ({ ...i })) : [],
+      recipeYieldQty: product.recipeYieldQty || product.recipe?.yieldQty || 1,
+      recipeNotes: product.recipeNotes || product.recipe?.notes || '',
+      useCustomPricing: product.useCustomPricing || false
     });
     setShowForm(true);
   };
+
+  const addIngredient = () => {
+    setForm((f) => ({
+      ...f,
+      recipeItems: [...(f.recipeItems || []), { productId: '', qty: '' }]
+    }));
+  };
+
+  const updateIngredient = (index, patch) => {
+    setForm((f) => {
+      const recipeItems = [...(f.recipeItems || [])];
+      recipeItems[index] = { ...recipeItems[index], ...patch };
+      return { ...f, recipeItems };
+    });
+  };
+
+  const removeIngredient = (index) => {
+    setForm((f) => ({
+      ...f,
+      recipeItems: (f.recipeItems || []).filter((_, i) => i !== index)
+    }));
+  };
+
+  const addComboItem = () => {
+    setForm((f) => ({
+      ...f,
+      comboItems: [...(f.comboItems || []), { productId: '', qty: '' }]
+    }));
+  };
+
+  const updateComboItem = (index, patch) => {
+    setForm((f) => {
+      const comboItems = [...(f.comboItems || [])];
+      comboItems[index] = { ...comboItems[index], ...patch };
+      return { ...f, comboItems };
+    });
+  };
+
+  const removeComboItem = (index) => {
+    setForm((f) => ({
+      ...f,
+      comboItems: (f.comboItems || []).filter((_, i) => i !== index)
+    }));
+  };
+
 
   const handleImageUpload = async (e) => {
     const file = e.target.files?.[0];
@@ -377,14 +481,53 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       return;
     }
 
+    const isComposite = form.productType === 'composite';
+    const isCombo = form.productType === 'combo';
+
+    const validIngredients = (form.recipeItems || [])
+      .filter((i) => i.productId && Number(i.qty) > 0)
+      .map((i) => ({ productId: i.productId, qty: Number(i.qty) }));
+
+    const validComboItems = (form.comboItems || [])
+      .filter((i) => i.productId && Number(i.qty) > 0)
+      .map((i) => ({ productId: i.productId, qty: Number(i.qty) }));
+
+    if (isComposite && validIngredients.length === 0) {
+      showToast('A composite product needs a recipe — add at least one raw material with a quantity.', 'error');
+      return;
+    }
+
+    if (isCombo && validComboItems.length === 0) {
+      showToast('A combo bundle needs at least one existing product with a quantity.', 'error');
+      return;
+    }
+
     const payload = {
       ...form,
       printName: form.regionalName || form.printName,
       barcodes: String(form.barcodes || '')
         .split(',')
         .map((b) => b.trim())
-        .filter(Boolean)
+        .filter(Boolean),
+      comboItems: isCombo ? validComboItems : [],
+      recipeItems: isComposite ? validIngredients : [],
+      recipeYieldQty: isComposite ? (Number(form.recipeYieldQty) > 0 ? Number(form.recipeYieldQty) : 1) : 1,
+      recipeNotes: isComposite ? form.recipeNotes || '' : ''
     };
+
+    if (isComposite && !form.useCustomPricing) {
+      payload.purchasePrice = computeRecipeTotals(form.recipeItems, form.recipeYieldQty, products).unitCost;
+    }
+    
+    if (isCombo && !form.useCustomPricing) {
+      const rows = validComboItems.map(ing => {
+        const material = (products || []).find(p => p.id === ing.productId);
+        const qty = Number(ing.qty) || 0;
+        const cost = material ? Number(material.price) || 0 : 0;
+        return { lineCost: qty * cost };
+      });
+      payload.price = rows.reduce((sum, r) => sum + r.lineCost, 0).toFixed(2);
+    }
 
     try {
       const res = editing
@@ -455,11 +598,11 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       </div>
 
       {/* Products Table */}
-      <Panel title={`Products (${rows.length})`} icon={Package}>
+      <Panel title={`Products (${rows.length}) ${rows.length > 200 ? '(Showing first 200)' : ''}`} icon={Package}>
         {rows.length === 0 ? (
           <EmptyState icon={Package} title="No products found" description="Try adjusting your filters or create a new product." />
         ) : (
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto max-h-[80vh]">
             <table className="w-full text-xs text-left">
               <thead className="bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)] font-bold uppercase border-b border-[color:var(--border-subtle)]">
                 <tr>
@@ -474,12 +617,43 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                 </tr>
               </thead>
               <tbody className="divide-y divide-[color:var(--border-subtle)]">
-                {rows.map((p) => {
+                {rows.slice(0, 200).map((p) => {
                   const cat = categories.find((c) => c.id === p.categoryId);
-                  const displayStock = warehouseFilter === 'all' ? p.stock : (p.warehouses?.[warehouseFilter] || 0);
-                  const isLow = p.productType !== 'service' && Number(displayStock) <= Number(p.minStock ?? 5);
-                  const isOut = p.productType !== 'service' && Number(displayStock) <= 0;
+                  const isCompositeRow = p.productType === 'composite' || p.isComposite;
+                  const isComboRow = p.productType === 'combo';
+                  const producible = p.recipe?.producible ?? 0;
+                  const comboBuyable = isComboRow && p.comboItems && p.comboItems.length > 0
+                    ? Math.max(0, Math.floor(Math.min(...p.comboItems.map(item => {
+                        const material = productsById[item.productId];
+                        return material && Number(item.qty) > 0 ? (material.stock || 0) / Number(item.qty) : 0;
+                      }))))
+                    : 0;
+                    
+                  let displayStock = p.stock;
+                  if (warehouseFilter !== 'all') {
+                    if (p.warehouses) {
+                      displayStock = p.warehouses[warehouseFilter] || 0;
+                    } else {
+                      if (warehouseFilter === 'wh_main') displayStock = Math.max(0, (p.stock || 0) - 10);
+                      else if (warehouseFilter === 'wh_shop') displayStock = Math.min(p.stock || 0, 10);
+                      else displayStock = 0;
+                    }
+                  }
+                  
+                  const isLow = p.productType !== 'service' && (
+                    isCompositeRow ? producible <= 5 : 
+                    isComboRow ? comboBuyable <= 5 :
+                    Number(displayStock) <= Number(p.minStock ?? 5)
+                  );
+                  
+                  const isOut = p.productType !== 'service' && (
+                    isCompositeRow ? producible <= 0 : 
+                    isComboRow ? comboBuyable <= 0 :
+                    Number(displayStock) <= 0
+                  );
+                  
                   const typeInfo = PRODUCT_TYPE_LABELS[p.productType || 'standard'];
+                  const ingredientCount = p.recipe?.ingredients?.length ?? p.comboItems?.length ?? p.recipeItems?.length ?? 0;
 
                   return (
                     <tr key={p.id} className="hover:bg-[color:var(--bg-subtle)]/50 transition-colors">
@@ -504,7 +678,12 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
 
                       <td className="py-3 px-3">
                         <div className="font-medium text-[color:var(--text-primary)]">{cat?.name || '—'}</div>
-                        <Badge tone={typeInfo?.tone || 'neutral'}>{typeInfo?.label || 'Standard'}</Badge>
+                        <div className="flex flex-wrap items-center gap-1 mt-0.5">
+                          <Badge tone={typeInfo?.tone || 'neutral'}>{typeInfo?.label || 'Standard'}</Badge>
+                          {isCompositeRow && (
+                            <Badge tone="success">{ingredientCount} ingredient{ingredientCount === 1 ? '' : 's'}</Badge>
+                          )}
+                        </div>
                       </td>
 
                       <td className="py-3 px-3 font-mono">
@@ -541,6 +720,24 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                       <td className="py-3 px-3 text-center">
                         {p.productType === 'service' ? (
                           <Badge tone="info">N/A Service</Badge>
+                        ) : isCompositeRow ? (
+                          <span className={`inline-flex flex-col items-center px-2.5 py-1 rounded-xl text-xs font-bold ${
+                            isOut ? 'bg-red-500/15 text-red-600 border border-red-500/20' :
+                            isLow ? 'bg-amber-500/15 text-amber-600 border border-amber-500/20' :
+                            'bg-emerald-500/15 text-emerald-600 border border-emerald-500/20'
+                          }`}>
+                            <span>{producible} {p.unit}</span>
+                            <span className="text-[9px] uppercase">Can Produce</span>
+                          </span>
+                        ) : isComboRow ? (
+                          <span className={`inline-flex flex-col items-center px-2.5 py-1 rounded-xl text-xs font-bold ${
+                            isOut ? 'bg-red-500/15 text-red-600 border border-red-500/20' :
+                            isLow ? 'bg-amber-500/15 text-amber-600 border border-amber-500/20' :
+                            'bg-emerald-500/15 text-emerald-600 border border-emerald-500/20'
+                          }`}>
+                            <span>{comboBuyable} {p.unit}</span>
+                            <span className="text-[9px] uppercase">Buyable</span>
+                          </span>
                         ) : (
                           <span className={`inline-flex flex-col items-center px-2.5 py-1 rounded-xl text-xs font-bold ${
                             isOut ? 'bg-red-500/15 text-red-600 border border-red-500/20' :
@@ -548,8 +745,19 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                             'bg-emerald-500/15 text-emerald-600 border border-emerald-500/20'
                           }`}>
                             <span>{displayStock} {p.unit}</span>
-                            {isOut && <span className="text-[9px] text-red-500 uppercase">Out of Stock</span>}
-                            {isLow && !isOut && <span className="text-[9px] text-amber-600 uppercase">Low Stock</span>}
+                            {(() => {
+                               const isKg = p.unit?.toLowerCase() === 'kg';
+                               const isLtr = ['ltr', 'l', 'liter', 'liters', 'litre', 'litres'].includes(p.unit?.toLowerCase());
+                               const hasCustom = !!p.customSubUnitName && Number(p.customSubUnitFactor) > 0;
+                               if (isKg || isLtr) {
+                                  return <span className="text-[10px] opacity-75 font-medium">{Number(displayStock)*1000} {isKg ? 'g' : 'ml'}</span>;
+                               } else if (hasCustom) {
+                                  return <span className="text-[10px] opacity-75 font-medium">{Number(displayStock)*Number(p.customSubUnitFactor)} {p.customSubUnitName}</span>;
+                               }
+                               return null;
+                            })()}
+                            {isOut && <span className="text-[9px] text-red-500 uppercase mt-0.5">Out of Stock</span>}
+                            {isLow && !isOut && <span className="text-[9px] text-amber-600 uppercase mt-0.5">Low Stock</span>}
                           </span>
                         )}
                       </td>
@@ -644,6 +852,23 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                   </Select>
                 </Field>
               )}
+              {form.productType !== 'service' && String(form.unit).toLowerCase() === 'dozen' && (
+                <Field label="Quantity of 1 Dozen">
+                  <Input type="number" value={form.dozenQuantity} onChange={(e) => setForm({ ...form, dozenQuantity: Number(e.target.value) })} />
+                </Field>
+              )}
+              {form.productType !== 'service' && String(form.unit).toLowerCase() !== 'dozen' && String(form.unit).toLowerCase() !== 'kg' && !['ltr', 'l', 'liter', 'liters', 'litre', 'litres'].includes(String(form.unit).toLowerCase()) && (
+                <>
+                  <Field label="Custom Sub-Unit Name" hint="e.g. piece, slice (optional)">
+                    <Input value={form.customSubUnitName || ''} onChange={(e) => setForm({ ...form, customSubUnitName: e.target.value })} placeholder="Leave blank if none" />
+                  </Field>
+                  {form.customSubUnitName && (
+                    <Field label={`${form.customSubUnitName}(s) in 1 ${form.unit || 'unit'}`}>
+                      <Input type="number" step="any" value={form.customSubUnitFactor || ''} onChange={(e) => setForm({ ...form, customSubUnitFactor: Number(e.target.value) })} placeholder="e.g. 12" />
+                    </Field>
+                  )}
+                </>
+              )}
             </div>
 
             <div className="grid grid-cols-2 gap-3">
@@ -665,15 +890,46 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                   </Field>
                 </div>
               </div>
-            ) : (
+            ) : form.productType !== 'combo' && form.productType !== 'composite' ? (
               <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
                 <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">Multiple Selling Prices</h4>
                 <div className="grid grid-cols-4 gap-3">
-                  <Field label="Purchase Price (₹)">
-                    <Input type="number" step="0.01" value={form.purchasePrice} onChange={(e) => setForm({ ...form, purchasePrice: e.target.value })} />
+                  <Field label="Purchase Price (₹)" hint={form.productType === 'composite' ? 'Calculated from the recipe' : undefined}>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={
+                        form.productType === 'composite' && !form.useCustomPricing
+                          ? computeRecipeTotals(form.recipeItems, form.recipeYieldQty, products).unitCost.toFixed(2)
+                          : form.purchasePrice
+                      }
+                      onChange={(e) => setForm({ ...form, purchasePrice: e.target.value })}
+                      disabled={form.productType === 'composite' && !form.useCustomPricing}
+                      className={form.productType === 'composite' && !form.useCustomPricing ? 'opacity-70 cursor-not-allowed' : ''}
+                    />
                   </Field>
                   <Field label="Selling Price (₹) *">
-                    <Input type="number" step="0.01" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} required />
+                    <Input 
+                      type="number" 
+                      step="0.01" 
+                      value={
+                        form.productType === 'combo' && !form.useCustomPricing
+                          ? (() => {
+                              const rows = (form.comboItems || []).map(ing => {
+                                const material = (products || []).find(p => p.id === ing.productId);
+                                const qty = Number(ing.qty) || 0;
+                                const cost = material ? Number(material.price) || 0 : 0;
+                                return { lineCost: qty * cost };
+                              });
+                              return rows.reduce((sum, r) => sum + r.lineCost, 0).toFixed(2);
+                            })()
+                          : form.price
+                      } 
+                      onChange={(e) => setForm({ ...form, price: e.target.value })} 
+                      required 
+                      disabled={form.productType === 'combo' && !form.useCustomPricing}
+                      className={form.productType === 'combo' && !form.useCustomPricing ? 'opacity-70 cursor-not-allowed' : ''}
+                    />
                   </Field>
                   <Field label="MRP (₹)">
                     <Input type="number" step="0.01" value={form.mrp} onChange={(e) => setForm({ ...form, mrp: e.target.value })} />
@@ -682,26 +938,66 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                     <Input type="number" step="0.01" value={form.wholesalePrice} onChange={(e) => setForm({ ...form, wholesalePrice: e.target.value })} />
                   </Field>
                 </div>
+                {(form.productType === 'composite' || form.productType === 'combo') && (
+                  <div className="pt-2">
+                    <label className="flex items-center gap-2 cursor-pointer text-xs font-medium text-[color:var(--text-secondary)]">
+                      <input 
+                        type="checkbox" 
+                        checked={form.useCustomPricing} 
+                        onChange={(e) => setForm({ ...form, useCustomPricing: e.target.checked })}
+                        className="rounded border-[color:var(--border-strong)] text-indigo-600 focus:ring-indigo-500"
+                      />
+                      Enable Custom Pricing Override (Override auto-calculated {form.productType === 'composite' ? 'Purchase Price' : 'Selling Price'})
+                    </label>
+                  </div>
+                )}
               </div>
-            )}
+            ) : null}
 
-            {form.productType !== 'service' && (
+            {form.productType !== 'service' && form.productType !== 'composite' && form.productType !== 'combo' && (
               <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
-                <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">Warehouse Distribution & Minimum Stock</h4>
+                <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider flex items-center justify-between">
+                  <span>Warehouse Distribution & Minimum Stock</span>
+                  <span className="bg-indigo-100 text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300 px-2 py-0.5 rounded-full text-[9px]">Total: {form.stock || 0}</span>
+                </h4>
                 <div className="grid grid-cols-3 gap-3">
-                  <Field label="Main Warehouse Stock">
-                    <Input type="number" value={form.warehouses?.wh_main ?? 0} onChange={(e) => setForm({
-                      ...form,
-                      warehouses: { ...form.warehouses, wh_main: Number(e.target.value) },
-                      stock: Number(e.target.value) + Number(form.warehouses?.wh_shop || 0)
-                    })} />
+                  <Field label="Select Warehouse">
+                    <Select 
+                      value={form.primaryWarehouse || warehouses[0]?.id || ''}
+                      onChange={(e) => setForm({ ...form, primaryWarehouse: e.target.value })}
+                    >
+                      {(warehouses || []).map((w) => (
+                        <option key={w.id} value={w.id}>{w.name}</option>
+                      ))}
+                    </Select>
                   </Field>
-                  <Field label="Shop Counter Stock">
-                    <Input type="number" value={form.warehouses?.wh_shop ?? 0} onChange={(e) => setForm({
-                      ...form,
-                      warehouses: { ...form.warehouses, wh_shop: Number(e.target.value) },
-                      stock: Number(form.warehouses?.wh_main || 0) + Number(e.target.value)
-                    })} />
+                  <Field label="Stock in Selected Warehouse">
+                    <Input 
+                      type="number" 
+                      step="any"
+                      value={form.warehouses?.[form.primaryWarehouse || warehouses[0]?.id] ?? ''} 
+                      onChange={(e) => {
+                        const whId = form.primaryWarehouse || warehouses[0]?.id;
+                        if (!whId) return;
+                        const newStock = Number(e.target.value) || 0;
+                        const newWarehouses = { ...form.warehouses, [whId]: newStock };
+                        const totalStock = Object.values(newWarehouses).reduce((sum, val) => sum + (Number(val) || 0), 0);
+                        setForm({ ...form, warehouses: newWarehouses, stock: totalStock });
+                      }}
+                      disabled={form.productType === 'combo'}
+                      className={form.productType === 'combo' ? 'opacity-70 cursor-not-allowed' : ''}
+                    />
+                    {(() => {
+                        const isKg = String(form.unit).toLowerCase() === 'kg';
+                        const isLtr = ['ltr', 'l', 'liter', 'liters', 'litre', 'litres'].includes(String(form.unit).toLowerCase());
+                        const hasCustom = !!form.customSubUnitName && Number(form.customSubUnitFactor) > 0;
+                        if (isKg || isLtr) {
+                            return <div className="text-[10px] text-indigo-600 dark:text-indigo-400 mt-1 ml-1 font-medium">Auto-converted: {Number(form.stock || 0) * 1000} {isKg ? 'g' : 'ml'} total</div>
+                        } else if (hasCustom) {
+                            return <div className="text-[10px] text-indigo-600 dark:text-indigo-400 mt-1 ml-1 font-medium">Auto-converted: {Number(form.stock || 0) * Number(form.customSubUnitFactor)} {form.customSubUnitName} total</div>
+                        }
+                        return null;
+                    })()}
                   </Field>
                   <Field label="Minimum Alert Level">
                     <Input type="number" value={form.minStock} onChange={(e) => setForm({ ...form, minStock: e.target.value })} />
@@ -709,6 +1005,202 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                 </div>
               </div>
             )}
+
+            {form.productType === 'composite' && (
+              <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] text-[11px] text-[color:var(--text-muted)]">
+                This is a composite item — it has no stock of its own. Its availability is computed live from the raw materials in its recipe below ("Can produce").
+              </div>
+            )}
+
+            {form.productType === 'composite' && (
+              <div className="p-3 rounded-xl border border-emerald-300/50 dark:border-emerald-800/60 bg-emerald-50/40 dark:bg-emerald-950/20 space-y-3">
+                <div>
+                  <h4 className="text-xs font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Boxes className="h-3.5 w-3.5" /> Recipe — Raw Materials
+                  </h4>
+                  <p className="text-[11px] text-[color:var(--text-muted)] mt-0.5">
+                    Selling one {form.unit || 'unit'} of this product consumes these raw materials from stock. At least one material with a quantity is required.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 max-w-xs">
+                  <Field label="Batch Yields" hint={`Units of ${form.unit || 'unit'} produced per batch`}>
+                    <Input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={form.recipeYieldQty ?? 1}
+                      onChange={(e) => setForm({ ...form, recipeYieldQty: e.target.value })}
+                    />
+                  </Field>
+                </div>
+
+                <div className="space-y-2">
+                  {(form.recipeItems || []).length > 0 && (
+                    <div className="hidden md:grid grid-cols-12 gap-2 px-2 text-[10px] font-bold uppercase text-[color:var(--text-muted)]">
+                      <div className="col-span-5">Raw Material</div>
+                      <div className="col-span-2">Qty</div>
+                      <div className="col-span-1 text-center">Unit</div>
+                      <div className="col-span-2 text-right">Cost</div>
+                      <div className="col-span-1 text-right">Line Cost</div>
+                    </div>
+                  )}
+
+                  {(form.recipeItems || []).map((row, idx) => (
+                    <IngredientRow
+                      key={idx}
+                      row={row}
+                      index={idx}
+                      products={products}
+                      excludeIds={[editing?.id, ...(form.recipeItems || []).map((i) => i.productId)].filter(Boolean)}
+                      onChange={updateIngredient}
+                      onRemove={removeIngredient}
+                    />
+                  ))}
+
+                  <Button type="button" size="sm" variant="secondary" icon={Plus} onClick={addIngredient}>
+                    Add Raw Material
+                  </Button>
+                </div>
+
+                {(() => {
+                  const totals = computeRecipeTotals(form.recipeItems, form.recipeYieldQty, products);
+                  const sellingPrice = Number(form.price) || 0;
+                  const margin = sellingPrice - totals.unitCost;
+                  const marginPct = sellingPrice ? (margin / sellingPrice) * 100 : 0;
+                  return (
+                    <div className="pt-2 border-t border-emerald-300/40 dark:border-emerald-800/40 space-y-3">
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                        <StatBlock label="Batch Cost" value={money(totals.batchCost)} />
+                        <StatBlock label="Cost / Unit" value={money(totals.unitCost)} />
+                        <StatBlock label="Margin" value={money(margin)} tone={margin < 0 ? 'danger' : 'success'} />
+                        <StatBlock label="Margin %" value={`${marginPct.toFixed(1)}%`} tone={margin < 0 ? 'danger' : 'success'} />
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 pt-2">
+                        <Field label="Final Selling Price (₹) *">
+                          <Input 
+                            type="number" 
+                            step="1" 
+                            value={form.price}
+                            onChange={(e) => setForm({ ...form, price: e.target.value })} 
+                            required 
+                          />
+                        </Field>
+                      </div>
+                      <div className="text-xs font-bold text-[color:var(--text-secondary)]">
+                        Can produce:{' '}
+                        <span className={totals.producible <= 0 ? 'text-red-600' : totals.producible <= 5 ? 'text-amber-600' : 'text-emerald-600'}>
+                          {totals.producible} {form.unit || 'unit'}(s)
+                        </span>{' '}
+                        from current raw material stock.
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+            {form.productType === 'combo' && (
+              <div className="p-3 rounded-xl border border-indigo-300/50 dark:border-indigo-800/60 bg-indigo-50/40 dark:bg-indigo-950/20 space-y-3">
+                <div>
+                  <h4 className="text-xs font-bold text-indigo-700 dark:text-indigo-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Boxes className="h-3.5 w-3.5" /> Combo Products
+                  </h4>
+                  <p className="text-[11px] text-[color:var(--text-muted)] mt-0.5">
+                    Select existing products to include in this combo bundle.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  {(form.comboItems || []).length > 0 && (
+                    <div className="hidden md:grid grid-cols-12 gap-2 px-2 text-[10px] font-bold uppercase text-[color:var(--text-muted)]">
+                      <div className="col-span-5">Product</div>
+                      <div className="col-span-2">Qty</div>
+                      <div className="col-span-1 text-center">Unit</div>
+                      <div className="col-span-2 text-right">Value</div>
+                      <div className="col-span-1 text-right">Line Value</div>
+                    </div>
+                  )}
+
+                  {(form.comboItems || []).map((row, idx) => (
+                    <IngredientRow
+                      key={idx}
+                      row={row}
+                      index={idx}
+                      products={products}
+                      excludeIds={[editing?.id, ...(form.comboItems || []).map((i) => i.productId)].filter(Boolean)}
+                      onChange={updateComboItem}
+                      onRemove={removeComboItem}
+                    />
+                  ))}
+
+                  <Button type="button" size="sm" variant="secondary" icon={Plus} onClick={addComboItem}>
+                    Add Product to Combo
+                  </Button>
+                </div>
+
+                {(() => {
+                  const rows = (form.comboItems || []).map(ing => {
+                    const material = (products || []).find(p => p.id === ing.productId);
+                    const qty = Number(ing.qty) || 0;
+                    const cost = material ? Number(material.price) || 0 : 0;
+                    return { qty, cost, lineCost: qty * cost };
+                  }).filter(r => r.qty > 0);
+                  const totalComboPrice = rows.reduce((sum, r) => sum + r.lineCost, 0);
+                  const sellingPrice = form.useCustomPricing ? (Number(form.price) || 0) : totalComboPrice;
+                  const discount = totalComboPrice - sellingPrice;
+                  const discountPct = totalComboPrice ? (discount / totalComboPrice) * 100 : 0;
+                  
+                  return (
+                    <div className="pt-2 border-t border-indigo-300/40 dark:border-indigo-800/40 space-y-3">
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                        <StatBlock label="Items Total Value" value={money(totalComboPrice)} />
+                        <StatBlock label="Combo Selling Price" value={money(sellingPrice)} />
+                        <StatBlock label="Customer Savings" value={money(discount)} tone={discount < 0 ? 'danger' : 'success'} />
+                      </div>
+                      <div className="grid grid-cols-3 gap-3 pt-2">
+                        <Field label="Discount (%)">
+                          <Input 
+                            type="number" 
+                            step="1" 
+                            value={form.useCustomPricing ? parseFloat(discountPct.toFixed(2)) : ''}
+                            onChange={(e) => {
+                              let newPct = Number(e.target.value) || 0;
+                              if (newPct > 100) newPct = 100;
+                              const newDiscount = (totalComboPrice * newPct) / 100;
+                              setForm({ ...form, price: (totalComboPrice - newDiscount).toFixed(2), useCustomPricing: true });
+                            }} 
+                            placeholder="0"
+                          />
+                        </Field>
+                        <Field label="Discount Amount (₹)">
+                          <Input 
+                            type="number" 
+                            step="1" 
+                            value={form.useCustomPricing ? parseFloat(discount.toFixed(2)) : ''}
+                            onChange={(e) => {
+                              const newDiscount = Number(e.target.value) || 0;
+                              setForm({ ...form, price: (totalComboPrice - newDiscount).toFixed(2), useCustomPricing: true });
+                            }} 
+                            placeholder="0.00"
+                          />
+                        </Field>
+                        <Field label="Final Selling Price (₹) *">
+                          <Input 
+                            type="number" 
+                            step="1" 
+                            value={sellingPrice}
+                            onChange={(e) => setForm({ ...form, price: e.target.value, useCustomPricing: true })} 
+                            required 
+                          />
+                        </Field>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+
+
 
             <div className="grid grid-cols-2 gap-3">
               <Field label="HSN Code">
@@ -740,6 +1232,165 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
     </div>
   );
 }
+
+/* ------------------------------------------------------------------ *
+ * Recipe & Alternate Unit row widgets — used inside the Product form
+ * ------------------------------------------------------------------ */
+
+function StatBlock({ label, value, tone = 'neutral' }) {
+  const color = tone === 'danger' ? 'text-red-600' : tone === 'success' ? 'text-emerald-600' : 'text-[color:var(--text-primary)]';
+  return (
+    <div className="p-2 rounded-lg bg-[color:var(--bg-surface)] border border-[color:var(--border-subtle)]">
+      <div className="text-[9px] uppercase font-bold text-[color:var(--text-muted)]">{label}</div>
+      <div className={`text-sm font-bold tabular ${color}`}>{value}</div>
+    </div>
+  );
+}
+
+/** Searchable raw-material picker + qty for one recipe ingredient row. */
+function IngredientRow({ row, index, products, excludeIds, onChange, onRemove }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const material = (products || []).find((p) => p.id === row.productId);
+
+  const candidates = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return (products || [])
+      .filter((p) => p.productType !== 'composite' && !p.isComposite)
+      .filter((p) => p.id === row.productId || !excludeIds.includes(p.id))
+      .filter((p) => !needle || p.name.toLowerCase().includes(needle) || String(p.barcode || '').includes(needle))
+      .slice(0, 30);
+  }, [products, query, excludeIds, row.productId]);
+
+  const isKg = material?.unit?.toLowerCase() === 'kg';
+  const isLtr = ['ltr', 'l', 'liter', 'liters', 'litre', 'litres'].includes(material?.unit?.toLowerCase());
+  const hasCustom = !!material?.customSubUnitName && Number(material?.customSubUnitFactor) > 0;
+  
+  const hasSubUnit = isKg || isLtr || hasCustom;
+  const subUnitName = isKg ? 'g' : isLtr ? 'ml' : hasCustom ? material.customSubUnitName : null;
+  const subUnitFactor = isKg || isLtr ? 1000 : hasCustom ? Number(material.customSubUnitFactor) : 1;
+  
+  const [useSubUnit, setUseSubUnit] = useState(hasSubUnit);
+  
+  useEffect(() => {
+    setUseSubUnit(hasSubUnit);
+  }, [hasSubUnit]);
+
+  const cost = material ? Number(material.purchasePrice) || 0 : 0;
+  const qty = Number(row.qty) || 0;
+  const displayQty = useSubUnit ? qty * subUnitFactor : qty;
+
+  const [inputValue, setInputValue] = useState(displayQty === 0 ? '' : String(displayQty));
+
+  useEffect(() => {
+    // Only sync from above if the parsed input value differs from the true displayQty
+    // This allows typing "0." or "0.0" without it getting wiped out.
+    const parsed = Number(inputValue) || 0;
+    if (parsed !== displayQty && inputValue !== '') {
+      setInputValue(displayQty === 0 ? '' : String(displayQty));
+    }
+  }, [displayQty]);
+
+  const handleQtyChange = (val) => {
+    setInputValue(val);
+    const num = Number(val) || 0;
+    onChange(index, { qty: useSubUnit ? num / subUnitFactor : num });
+  };
+
+  return (
+    <div className="grid grid-cols-12 gap-2 items-center p-2 rounded-lg border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)]">
+      <div className="col-span-12 md:col-span-5 relative">
+        {material ? (
+          <div className="field-input flex items-center justify-between gap-2 !py-1.5">
+            <span className="truncate text-xs font-bold text-[color:var(--text-primary)]">{material.name}</span>
+            <button
+              type="button"
+              onClick={() => { onChange(index, { productId: '' }); setQuery(''); }}
+              className="shrink-0 text-[10px] font-bold text-indigo-600 hover:underline"
+            >
+              Change
+            </button>
+          </div>
+        ) : (
+          <>
+            <Input
+              value={query}
+              onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
+              onFocus={() => setOpen(true)}
+              onBlur={() => setTimeout(() => setOpen(false), 150)}
+              placeholder="Search raw material..."
+              className="text-xs"
+            />
+            {open && (
+              <div className="absolute z-20 mt-1 w-full max-h-48 overflow-y-auto rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] shadow-lg">
+                {candidates.length === 0 ? (
+                  <div className="px-3 py-2 text-xs text-[color:var(--text-muted)]">No matching products.</div>
+                ) : (
+                  candidates.map((p) => (
+                    <button
+                      type="button"
+                      key={p.id}
+                      onMouseDown={() => { onChange(index, { productId: p.id }); setQuery(''); setOpen(false); }}
+                      className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-xs hover:bg-[color:var(--bg-subtle)]"
+                    >
+                      <span className="font-medium text-[color:var(--text-primary)]">{p.name}</span>
+                      <span className="text-[color:var(--text-muted)]">{money(p.purchasePrice)}/{p.unit}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+      <div className="col-span-4 md:col-span-2">
+        <Input
+          type="number"
+          step="any"
+          min="0"
+          value={inputValue}
+          onChange={(e) => handleQtyChange(e.target.value)}
+          placeholder="Qty"
+          className="text-xs"
+        />
+      </div>
+      <div className="col-span-2 md:col-span-1 text-xs text-center font-medium">
+        {hasSubUnit ? (
+           <select 
+             value={useSubUnit ? 'sub' : 'base'} 
+             onChange={(e) => {
+               // When switching units, the displayed quantity will automatically update to reflect the same base amount
+               setUseSubUnit(e.target.value === 'sub');
+             }}
+             className="w-full bg-indigo-50 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800 rounded px-1 py-0.5 text-xs font-bold focus:ring-indigo-500 cursor-pointer"
+             title="Select unit for recipe"
+           >
+             <option value="sub">{subUnitName}</option>
+             <option value="base">{material.unit}</option>
+           </select>
+        ) : (
+           <span className="text-[color:var(--text-muted)]">{material?.unit || '—'}</span>
+        )}
+      </div>
+      <div className="col-span-3 md:col-span-2 text-xs text-right text-[color:var(--text-secondary)]">
+        {material ? money(cost) : '—'}
+      </div>
+      <div className="col-span-2 md:col-span-1 text-xs text-right font-bold text-[color:var(--text-primary)]">
+        {material ? money(qty * cost) : '—'}
+      </div>
+      <div className="col-span-1 text-right">
+        <button
+          type="button"
+          onClick={() => onRemove(index)}
+          className="p-1 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)] hover:text-red-600"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 
 /* ------------------------------------------------------------------ *
  * Categories Tab (Story 1)
@@ -950,8 +1601,17 @@ function WarehousesTab({ warehouses, products, showToast, onRefresh }) {
   const [whForm, setWhForm] = useState({ name: '', code: '', location: '' });
 
   const productObj = (products || []).find((p) => p.id === selectedProduct);
-  const sourceStock = productObj?.warehouses?.[sourceWh] ?? 0;
-  const targetStock = productObj?.warehouses?.[targetWh] ?? 0;
+  
+  let tempWarehouses = productObj?.warehouses;
+  if (productObj && !tempWarehouses) {
+    tempWarehouses = {
+      wh_main: Math.max(0, (productObj.stock || 0) - 10),
+      wh_shop: Math.min(productObj.stock || 0, 10)
+    };
+  }
+  
+  const sourceStock = tempWarehouses?.[sourceWh] ?? 0;
+  const targetStock = tempWarehouses?.[targetWh] ?? 0;
 
   const handleTransfer = async (e) => {
     e?.preventDefault();

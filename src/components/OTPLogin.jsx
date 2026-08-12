@@ -13,7 +13,13 @@ import {
 } from 'lucide-react';
 import { ADMIN_BE } from '../config/config';
 
-const ADMIN_BE_URL = `${ADMIN_BE}/auth`;
+const formatUrl = (url) => {
+  if (!url) return 'https://selsolve-updated-backend.vercel.app/api';
+  const clean = url.replace(/\/$/, '');
+  return clean.startsWith('http') ? clean : `https://${clean}`;
+};
+
+const ADMIN_BE_URL = `${formatUrl(ADMIN_BE)}/auth`;
 
 export default function OTPLogin({ onLoginSuccess }) {
   const [step, setStep] = useState(1);

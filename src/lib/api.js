@@ -1,9 +1,13 @@
 import axios from 'axios';
+import { ADMIN_BE } from '../config/config';
 
-export const API_BASE =
-  (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_POS_BE_URL)
-    ? import.meta.env.VITE_POS_BE_URL.replace(/\/$/, '')
-    : 'http://localhost:5001/api/pos';
+const formatUrl = (url) => {
+  if (!url) return 'https://selsolve-updated-backend.vercel.app/api';
+  const clean = url.replace(/\/$/, '');
+  return clean.startsWith('http') ? clean : `https://${clean}`;
+};
+
+export const API_BASE = `${formatUrl(ADMIN_BE)}/pos`;
 
 /**
  * Every request carries the tenant's JWT and database name so the backend can
@@ -29,6 +33,55 @@ client.interceptors.request.use((config) => {
 
   return config;
 });
+
+export const SESSION_KEYS = ['pos_token', 'pos_tenant', 'pos_user_name'];
+
+/**
+ * Codes the backend uses when the session itself is finished.
+ *
+ * A 403 on its own does not mean "signed out" — the server also answers 403 for
+ * a feature the shop's plan excludes, a permission the user lacks, or a wrong
+ * stock-edit password. Signing out on those would throw the cashier back to the
+ * login screen for simply opening a tab their plan does not cover, so the code
+ * is what decides, not the status.
+ */
+const SESSION_ENDED_CODES = new Set([
+  'NO_TOKEN',
+  'TOKEN_INVALID',
+  'TOKEN_EXPIRED',
+  'TOKEN_UNBOUND',
+  'TOKEN_STALE',
+  'TENANT_MISMATCH',
+  'TENANT_NOT_FOUND',
+  'TENANT_INACTIVE'
+]);
+
+let onSessionExpired = null;
+export const setSessionExpiredHandler = (fn) => {
+  onSessionExpired = fn;
+};
+
+const isSessionEnded = (err) => {
+  const status = err?.response?.status;
+  const code = err?.response?.data?.code;
+
+  if (code) return SESSION_ENDED_CODES.has(code);
+  // An unlabelled 401 is still an authentication failure; an unlabelled 403 is not.
+  return status === 401;
+};
+
+client.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    if (isSessionEnded(err)) {
+      SESSION_KEYS.forEach((k) => localStorage.removeItem(k));
+      if (onSessionExpired) {
+        onSessionExpired(err?.response?.data?.message || 'Your session has ended. Please sign in again.');
+      }
+    }
+    return Promise.reject(err);
+  }
+);
 
 /** Unwrap the { success, data, message } envelope the API always returns. */
 const unwrap = (res) => res.data?.data ?? res.data;

@@ -12,6 +12,7 @@
   :root {
     --bg-main: #f6f7fb;
     --bg-subtle: #eef1f7;
+    --bg-surface: #ffffff;
     --surface: #ffffff;
     --surface-raised: #ffffff;
     --border: #e3e8f0;
@@ -31,6 +32,7 @@
   .dark {
     --bg-main: #070b16;
     --bg-subtle: #0c1222;
+    --bg-surface: #0f1729;
     --surface: #0f1729;
     --surface-raised: #141d33;
     --border: #1e2a44;

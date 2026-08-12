@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Search, ChevronDown, Inbox, Loader2, Printer, Download } from 'lucide-react';
 import { money } from './api';
@@ -114,13 +114,96 @@ export const Textarea = React.forwardRef(({ className = '', rows = 3, ...rest },
 ));
 Textarea.displayName = 'Textarea';
 
-export function Select({ className = '', children, ...rest }) {
+export function Select({ className = '', children, value, onChange, ...rest }) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  // Parse children options
+  const options = [];
+  React.Children.forEach(children, child => {
+    if (child && child.type === 'option') {
+      options.push({ value: child.props.value, label: child.props.children });
+    } else if (child && Array.isArray(child)) {
+      child.forEach(c => {
+         if (c && c.type === 'option') {
+           options.push({ value: c.props.value, label: c.props.children });
+         }
+      })
+    }
+  });
+
+  const selectedOption = options.find(o => String(o.value) === String(value));
+  const selectedLabel = selectedOption ? selectedOption.label : 'Select...';
+
+  const filtered = options.filter(o => 
+    String(o.label || '').toLowerCase().includes(search.toLowerCase())
+  );
+
+  const handleSelect = (val) => {
+    if (onChange) {
+      onChange({ target: { value: val } });
+    }
+    setOpen(false);
+    setSearch('');
+  };
+
   return (
-    <div className="relative">
-      <select className={cx('field-input appearance-none pr-8', className)} {...rest}>
-        {children}
-      </select>
+    <div className={cx('relative', className)} ref={containerRef}>
+      <div 
+        className={cx('field-input pr-8 cursor-pointer flex items-center min-h-[36px]', rest.disabled && 'opacity-50 cursor-not-allowed')}
+        onClick={() => !rest.disabled && setOpen(!open)}
+      >
+        <span className="truncate">{selectedLabel}</span>
+      </div>
       <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[color:var(--text-muted)]" />
+      
+      {open && (
+        <div className="absolute z-50 mt-1 w-full rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] shadow-xl overflow-hidden">
+          <div className="p-2 border-b border-[color:var(--border-subtle)]">
+            <input 
+              type="text" 
+              className="w-full text-xs p-1.5 rounded-lg border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] text-[color:var(--text-primary)] placeholder-[color:var(--text-muted)] focus:outline-none focus:border-indigo-500" 
+              placeholder="Search..." 
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              onClick={e => e.stopPropagation()}
+              autoFocus
+            />
+          </div>
+          <div className="max-h-60 overflow-y-auto p-1">
+            {filtered.length === 0 ? (
+              <div className="p-2 text-center text-xs text-[color:var(--text-muted)]">No results found</div>
+            ) : (
+              filtered.map((opt, idx) => (
+                <div 
+                  key={idx}
+                  className={cx(
+                    'px-2.5 py-2 text-xs rounded-lg cursor-pointer transition-colors',
+                    String(opt.value) === String(value) ? 'bg-indigo-50 text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300 font-bold' : 'text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-subtle)] hover:text-[color:var(--text-primary)]'
+                  )}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleSelect(opt.value);
+                  }}
+                >
+                  {opt.label}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
