@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Search, ChevronDown, Inbox, Loader2, Printer, Download } from 'lucide-react';
+import { X, Search, ChevronDown, Inbox, Loader2, Printer, Download, Check } from 'lucide-react';
 import { money } from './api';
 
 const cx = (...parts) => parts.filter(Boolean).join(' ');
@@ -200,6 +200,121 @@ export function Select({ className = '', children, value, onChange, ...rest }) {
                   {opt.label}
                 </div>
               ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Checkbox-driven multi-select dropdown. `value` is an array of selected option values. */
+export function MultiSelect({ className = '', children, value, onChange, placeholder = 'Select...' }) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const containerRef = useRef(null);
+  const selected = Array.isArray(value) ? value : [];
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const options = [];
+  React.Children.forEach(children, (child) => {
+    if (child && child.type === 'option') {
+      options.push({ value: child.props.value, label: child.props.children });
+    }
+  });
+
+  const selectedLabels = options
+    .filter((o) => selected.some((v) => String(v) === String(o.value)))
+    .map((o) => o.label);
+
+  const filtered = options.filter((o) =>
+    String(o.label || '').toLowerCase().includes(search.toLowerCase())
+  );
+
+  const toggle = (val) => {
+    if (!onChange) return;
+    const exists = selected.some((v) => String(v) === String(val));
+    const next = exists ? selected.filter((v) => String(v) !== String(val)) : [...selected, val];
+    onChange({ target: { value: next } });
+  };
+
+  return (
+    <div className={cx('relative', className)} ref={containerRef}>
+      <div
+        className="field-input pr-8 cursor-pointer flex flex-wrap items-center gap-1 min-h-[36px]"
+        onClick={() => setOpen(!open)}
+      >
+        {selectedLabels.length === 0 ? (
+          <span className="truncate text-[color:var(--text-muted)]">{placeholder}</span>
+        ) : (
+          selectedLabels.map((label, idx) => (
+            <span
+              key={idx}
+              className="inline-flex items-center rounded-md bg-indigo-50 px-1.5 py-0.5 text-[11px] font-bold text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300"
+            >
+              {label}
+            </span>
+          ))
+        )}
+      </div>
+      <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[color:var(--text-muted)]" />
+
+      {open && (
+        <div className="absolute z-50 mt-1 w-full rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] shadow-xl overflow-hidden">
+          <div className="p-2 border-b border-[color:var(--border-subtle)]">
+            <input
+              type="text"
+              className="w-full text-xs p-1.5 rounded-lg border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] text-[color:var(--text-primary)] placeholder-[color:var(--text-muted)] focus:outline-none focus:border-indigo-500"
+              placeholder="Search..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onClick={(e) => e.stopPropagation()}
+              autoFocus
+            />
+          </div>
+          <div className="max-h-60 overflow-y-auto p-1">
+            {filtered.length === 0 ? (
+              <div className="p-2 text-center text-xs text-[color:var(--text-muted)]">No results found</div>
+            ) : (
+              filtered.map((opt, idx) => {
+                const isChecked = selected.some((v) => String(v) === String(opt.value));
+                return (
+                  <div
+                    key={idx}
+                    className={cx(
+                      'flex items-center gap-2 px-2.5 py-2 text-xs rounded-lg cursor-pointer transition-colors',
+                      isChecked
+                        ? 'bg-indigo-50 text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300 font-bold'
+                        : 'text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-subtle)] hover:text-[color:var(--text-primary)]'
+                    )}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggle(opt.value);
+                    }}
+                  >
+                    <span
+                      className={cx(
+                        'flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border',
+                        isChecked
+                          ? 'border-indigo-600 bg-indigo-600 text-white'
+                          : 'border-[color:var(--border-strong)]'
+                      )}
+                    >
+                      {isChecked && <Check className="h-2.5 w-2.5" />}
+                    </span>
+                    {opt.label}
+                  </div>
+                );
+              })
             )}
           </div>
         </div>
@@ -521,7 +636,7 @@ export function Modal({ open, onClose, title, subtitle, icon: Icon, size = 'md',
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/55 p-4 backdrop-blur-sm sm:items-center"
+          className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-slate-950/65 p-2 sm:p-4 backdrop-blur-md"
           onMouseDown={(e) => e.target === ref.current && onClose?.()}
           ref={ref}
         >
@@ -530,10 +645,11 @@ export function Modal({ open, onClose, title, subtitle, icon: Icon, size = 'md',
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.98 }}
             transition={{ duration: 0.16 }}
-            className={cx('surface-raised my-auto w-full rounded-2xl', MODAL_WIDTH[size], className)}
+            className={cx('surface-raised w-full rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[95vh]', MODAL_WIDTH[size], className)}
+            style={{ background: 'var(--surface-raised, #ffffff)' }}
           >
             <div
-              className="flex items-start justify-between gap-3 px-5 py-4"
+              className="flex items-start justify-between gap-3 px-5 py-4 shrink-0"
               style={{ borderBottom: '1px solid var(--border)' }}
             >
               <div className="min-w-0">
@@ -551,11 +667,11 @@ export function Modal({ open, onClose, title, subtitle, icon: Icon, size = 'md',
               </button>
             </div>
 
-            <div className="px-5 py-4">{children}</div>
+            <div className="px-5 py-4 flex-1 min-h-0 flex flex-col overflow-y-auto">{children}</div>
 
             {footer && (
               <div
-                className="flex items-center justify-end gap-2 px-5 py-3.5"
+                className="flex items-center justify-end gap-2 px-5 py-3.5 shrink-0"
                 style={{ borderTop: '1px solid var(--border)', background: 'var(--bg-subtle)' }}
               >
                 {footer}

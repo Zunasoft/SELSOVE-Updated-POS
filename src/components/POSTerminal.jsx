@@ -15,6 +15,138 @@ import {
 const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Credit (Udhar)'];
 const DISCOUNT_PRESETS = [0, 5, 10, 15, 20];
 
+export function getProductUnitOptions(product) {
+  if (!product) return [{ unit: 'pcs', factor: 1, price: 0, isBase: true }];
+  const baseUnit = String(product.unit || 'pcs').toLowerCase().trim();
+  const basePrice = Number(product.price) || 0;
+  const options = [
+    { unit: product.unit || 'pcs', factor: 1, price: basePrice, isBase: true }
+  ];
+
+  // 1. Custom sub-unit (e.g. g for kg, ml for ltr, pcs for box/dozen)
+  if (product.customSubUnitName && Number(product.customSubUnitFactor) > 0) {
+    const subName = product.customSubUnitName.trim();
+    const factorNum = Number(product.customSubUnitFactor);
+    const subPrice = product.customSubUnitPrice ? Number(product.customSubUnitPrice) : basePrice / factorNum;
+    options.push({
+      unit: subName,
+      factor: 1 / factorNum,
+      price: subPrice,
+      subFactor: factorNum,
+      isSub: true
+    });
+  }
+
+  // 2. Standard kg -> g
+  if (baseUnit === 'kg' && !options.some(o => o.unit.toLowerCase() === 'g')) {
+    options.push({
+      unit: 'g',
+      factor: 0.001,
+      price: basePrice / 1000,
+      subFactor: 1000,
+      isSub: true
+    });
+  } else if ((baseUnit === 'ltr' || baseUnit === 'litre' || baseUnit === 'liter') && !options.some(o => o.unit.toLowerCase() === 'ml')) {
+    options.push({
+      unit: 'ml',
+      factor: 0.001,
+      price: basePrice / 1000,
+      subFactor: 1000,
+      isSub: true
+    });
+  }
+
+  // 3. Alt units (e.g. boxes, cartons)
+  if (Array.isArray(product.altUnits)) {
+    product.altUnits.forEach((alt) => {
+      if (alt && alt.unit && !options.some(o => o.unit.toLowerCase() === String(alt.unit).toLowerCase())) {
+        const factor = Number(alt.factor) || 1;
+        const price = alt.price !== undefined && alt.price !== null && alt.price !== '' ? Number(alt.price) : basePrice * factor;
+        options.push({
+          unit: alt.unit,
+          factor,
+          price,
+          isAlt: true
+        });
+      }
+    });
+  }
+
+  return options;
+}
+
+export function getProductRemainingStock(product, cart = [], allProducts = []) {
+  if (!product) return { remaining: 0, text: '0', isLow: false, isOut: true };
+  const prodId = product.id;
+  const isComposite = product.isComposite || product.productType === 'composite';
+
+  // 1. Composite item: compute availability from recipe raw materials
+  if (isComposite) {
+    const ingredients = product.recipe?.ingredients || product.recipeItems || [];
+    if (ingredients.length > 0 && Array.isArray(allProducts) && allProducts.length > 0) {
+      let maxCanMake = Infinity;
+      ingredients.forEach((ing) => {
+        const raw = allProducts.find((p) => p.id === ing.productId);
+        if (!raw) return;
+        const ingStock = getProductRemainingStock(raw, cart, allProducts);
+        const reqQty = Number(ing.qty) || 1;
+        const canMakeThis = Math.floor(Math.max(0, ingStock.remaining) / reqQty);
+        if (canMakeThis < maxCanMake) maxCanMake = canMakeThis;
+      });
+      if (maxCanMake === Infinity) maxCanMake = 0;
+
+      // Subtract composite units already in cart
+      const inCartComposite = cart.reduce((sum, item) => {
+        if (item.id === prodId || item.name === product.name) {
+          return sum + (Number(item.qty) || 0);
+        }
+        return sum;
+      }, 0);
+
+      const remaining = Math.max(0, maxCanMake - inCartComposite);
+      const isOut = remaining <= 0;
+      const isLow = remaining <= 5;
+      const text = `${remaining} ${product.unit || 'portions'} left`;
+      return { remaining, text, isLow, isOut };
+    }
+  }
+
+  // 2. Raw Material / Standard Product: calculate in-cart deduction (direct sales + composite recipes consuming this product)
+  const inCartBase = cart.reduce((sum, item) => {
+    if (item.id === prodId || item.name === product.name) {
+      const factor = Number(item.unitFactor) || (String(item.unit).toLowerCase() === String(product.unit).toLowerCase() ? 1 : 1);
+      return sum + (Number(item.qty) || 0) * factor;
+    }
+    const isComp = item.isComposite || item.productType === 'composite';
+    if (isComp) {
+      const ingredients = item.recipe?.ingredients || item.recipeItems || [];
+      const matched = ingredients.find((ing) => ing.productId === prodId);
+      if (matched) {
+        const reqQty = Number(matched.qty) || 0;
+        const soldQty = Number(item.qty) || 0;
+        return sum + (reqQty * soldQty);
+      }
+    }
+    return sum;
+  }, 0);
+
+  const rawRemaining = Number(product.stock || 0) - inCartBase;
+  const remaining = Math.max(0, Math.round(rawRemaining * 10000) / 10000);
+  const isOut = remaining <= 0;
+  const isLow = remaining <= Number(product.minStock ?? 5);
+
+  const options = getProductUnitOptions(product);
+  const subOption = options.find((o) => o.isSub);
+
+  let text = `${remaining} ${product.unit}`;
+  if (subOption && subOption.subFactor && remaining > 0) {
+    const remainingSub = Math.round(remaining * subOption.subFactor * 100) / 100;
+    text = `${remaining} ${product.unit} (${remainingSub} ${subOption.unit})`;
+  }
+
+  return { remaining, text, isLow, isOut };
+}
+
 /**
  * The billing terminal — SOW Module 3.
  * Physical hardware is treated as a first-class input: the barcode scanner is a
@@ -40,7 +172,8 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
   const [note, setNote] = useState('');
 
   const [weightModal, setWeightModal] = useState(null);
-  const [weightInput, setWeightInput] = useState('1.000');
+  const [weightUnit, setWeightUnit] = useState('kg');
+  const [weightInput, setWeightInput] = useState('1');
   const [scaleReading, setScaleReading] = useState(false);
   const [liveWeight, setLiveWeight] = useState(0);
 
@@ -159,16 +292,27 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
 
   /* ------------------------- adding items ------------------------- */
 
+  /* ------------------------- adding items ------------------------- */
+
   const addToCart = useCallback(
     (product, qty = 1) => {
-      if (product.requiresWeight && qty === 1) {
+      const options = getProductUnitOptions(product);
+      const isWeighedOrSubUnit = product.requiresWeight || product.unit === 'kg' || product.unit === 'g' || product.unit === 'ltr' || product.customSubUnitName;
+
+      if (isWeighedOrSubUnit && qty === 1) {
         setWeightModal(product);
-        setWeightInput('1.000');
+        // Default to grams if product is kg so user can quickly type e.g. 500g
+        const hasGrams = options.some((o) => o.unit === 'g');
+        const defaultUnit = hasGrams ? 'g' : options[0]?.unit || product.unit || 'pcs';
+        setWeightUnit(defaultUnit);
+        setWeightInput(defaultUnit === 'g' ? '500' : '1');
         return;
       }
 
+      const defaultOpt = options[0] || { unit: product.unit || 'pcs', factor: 1, price: product.price };
+
       setCart((prev) => {
-        const idx = prev.findIndex((i) => i.id === product.id);
+        const idx = prev.findIndex((i) => i.id === product.id && i.unit === defaultOpt.unit);
         if (idx >= 0) {
           const next = [...prev];
           const merged = { ...next[idx], qty: Math.round((next[idx].qty + qty) * 1000) / 1000 };
@@ -176,7 +320,18 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
           next[idx] = merged;
           return next;
         }
-        return [...prev, { ...product, qty, total: Math.round(qty * product.price * 100) / 100 }];
+        return [
+          ...prev,
+          {
+            ...product,
+            qty,
+            unit: defaultOpt.unit,
+            saleUnit: defaultOpt.unit,
+            unitFactor: defaultOpt.factor || 1,
+            price: defaultOpt.price,
+            total: Math.round(qty * defaultOpt.price * 100) / 100
+          }
+        ];
       });
     },
     []
@@ -283,8 +438,14 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
       const res = await api.get('/hardware/weight');
       const grams = Number(res.weight) || 0;
       setLiveWeight(grams);
-      setWeightInput(grams.toFixed(3));
-      showToast(`Stable weight: ${grams.toFixed(3)} kg${res.simulated ? ' (simulated — scale not connected)' : ''}`);
+
+      if (weightUnit === 'g' || weightUnit === 'gm' || weightUnit === 'grams') {
+        setWeightInput(String(grams));
+      } else {
+        setWeightInput((grams / 1000).toFixed(3));
+      }
+
+      showToast(`Scale reading: ${grams} g (${(grams / 1000).toFixed(3)} kg)${res.simulated ? ' (simulated)' : ''}`);
     } catch (err) {
       showToast(api.message(err, 'Scale did not respond.'), 'error');
     } finally {
@@ -295,22 +456,69 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
   const confirmWeight = () => {
     const value = parseFloat(weightInput) || 0;
     if (value <= 0) {
-      showToast('Enter a weight greater than zero.', 'error');
+      showToast('Enter a quantity / weight greater than zero.', 'error');
       return;
     }
     const product = weightModal;
+    const options = getProductUnitOptions(product);
+    const selectedOpt = options.find((o) => o.unit.toLowerCase() === weightUnit.toLowerCase()) || options[0];
+    const unitPrice = selectedOpt.price;
+    const unitFactor = selectedOpt.factor || 1;
+    const lineTotal = Math.round(value * unitPrice * 100) / 100;
+
     setCart((prev) => {
-      const idx = prev.findIndex((i) => i.id === product.id);
+      const idx = prev.findIndex((i) => i.id === product.id && i.unit === selectedOpt.unit);
       if (idx >= 0) {
         const next = [...prev];
         const qty = Math.round((next[idx].qty + value) * 1000) / 1000;
         next[idx] = { ...next[idx], qty, total: Math.round(qty * next[idx].price * 100) / 100 };
         return next;
       }
-      return [...prev, { ...product, qty: value, total: Math.round(value * product.price * 100) / 100 }];
+      return [
+        ...prev,
+        {
+          ...product,
+          qty: value,
+          saleUnit: selectedOpt.unit,
+          unit: selectedOpt.unit,
+          unitFactor,
+          price: unitPrice,
+          total: lineTotal
+        }
+      ];
     });
+
     setWeightModal(null);
-    showToast(`${value} ${product.unit} of ${product.name} added.`);
+    showToast(`${value} ${selectedOpt.unit} of ${product.name} added (${money(lineTotal)}).`);
+  };
+
+  const switchCartItemUnit = (cartItemId, targetUnit) => {
+    setCart((prev) =>
+      prev.map((item) => {
+        if (item.id !== cartItemId) return item;
+        const product = products.find((p) => p.id === item.id) || item;
+        const options = getProductUnitOptions(product);
+        const currentOpt = options.find((o) => o.unit.toLowerCase() === String(item.unit).toLowerCase()) || { factor: item.unitFactor || 1, price: item.price };
+        const newOpt = options.find((o) => o.unit.toLowerCase() === String(targetUnit).toLowerCase()) || options[0];
+
+        // Base quantity currently in cart:
+        const currentBaseQty = (Number(item.qty) || 0) * (currentOpt.factor || 1);
+        // New quantity in target unit:
+        const newQty = newOpt.factor > 0 ? Math.round((currentBaseQty / newOpt.factor) * 1000) / 1000 : item.qty;
+        const newPrice = newOpt.price;
+        const total = Math.round(newQty * newPrice * 100) / 100;
+
+        return {
+          ...item,
+          unit: newOpt.unit,
+          saleUnit: newOpt.unit,
+          unitFactor: newOpt.factor,
+          price: newPrice,
+          qty: newQty,
+          total
+        };
+      })
+    );
   };
 
   const updateQty = (id, delta) =>
@@ -318,7 +526,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
       prev
         .map((i) => {
           if (i.id !== id) return i;
-          const step = 1;
+          const step = i.unit === 'g' || i.unit === 'ml' ? 50 : 1;
           const qty = Math.round(Math.max(0, i.qty + delta * step) * 1000) / 1000;
           return { ...i, qty, total: Math.round(qty * i.price * 100) / 100 };
         })
@@ -559,7 +767,9 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
         ) : (
           <div className="grid max-h-[calc(100vh-19rem)] grid-cols-2 gap-2.5 overflow-y-auto pr-1 sm:grid-cols-3 xl:grid-cols-4 pb-12">
             {filtered.slice(0, 150).map((p) => {
-              const out = p.stock <= 0;
+              const stockInfo = getProductRemainingStock(p, cart, products);
+              const out = stockInfo.isOut;
+              const isLow = stockInfo.isLow;
               return (
                 <motion.button
                   key={p.id}
@@ -588,13 +798,14 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
                       className={`tabular rounded-md px-1.5 py-0.5 text-[9.5px] font-bold ${
                         out
                           ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300'
-                          : Number(p.stock) <= Number(p.minStock ?? 5)
+                          : isLow
                             ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300'
                             : 'text-[color:var(--text-muted)]'
                       }`}
-                      style={!out && Number(p.stock) > Number(p.minStock ?? 5) ? { background: 'var(--bg-subtle)' } : undefined}
+                      style={!out && !isLow ? { background: 'var(--bg-subtle)' } : undefined}
+                      title={`Stock: ${stockInfo.text}`}
                     >
-                      {p.stock} {p.unit}
+                      {out ? 'Out of stock' : stockInfo.text}
                     </span>
                   </div>
                 </motion.button>
@@ -671,61 +882,90 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
                 hint="Scan a barcode or tap an item to start billing."
               />
             ) : (
-              cart.map((item) => (
-                <div
-                  key={item.id}
-                  className="flex items-center gap-2 rounded-xl px-2.5 py-2"
-                  style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-[12px] font-bold text-[color:var(--text-primary)]">{item.name}</div>
-                    <div className="flex items-center gap-1.5">
+              cart.map((item) => {
+                const prod = products.find((p) => p.id === item.id) || item;
+                const unitOpts = getProductUnitOptions(prod);
+                const stockInfo = getProductRemainingStock(prod, cart, products);
+
+                return (
+                  <div
+                    key={`${item.id}_${item.unit}`}
+                    className="flex flex-col gap-1.5 rounded-xl px-2.5 py-2"
+                    style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[12px] font-bold text-[color:var(--text-primary)]">{item.name}</div>
+                        <div className="text-[10px] text-[color:var(--text-muted)]">
+                          Stock left: <span className="font-semibold text-[color:var(--text-secondary)]">{stockInfo.text}</span>
+                        </div>
+                      </div>
+
+                      <div className="flex shrink-0 items-center gap-1">
+                        <button
+                          onClick={() => updateQty(item.id, -1)}
+                          className="rounded-md p-1 text-[color:var(--text-secondary)]"
+                          style={{ background: 'var(--surface)' }}
+                        >
+                          <Minus className="h-3 w-3" />
+                        </button>
+                        <button
+                          onClick={() => updateQty(item.id, 1)}
+                          className="rounded-md p-1 text-[color:var(--text-secondary)]"
+                          style={{ background: 'var(--surface)' }}
+                        >
+                          <Plus className="h-3 w-3" />
+                        </button>
+                        <Money value={item.total} decimals={false} className="w-16 text-right text-[12.5px] font-bold" />
+                        <button onClick={() => setCart(cart.filter((i) => !(i.id === item.id && i.unit === item.unit)))} className="p-1 text-rose-500">
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 pt-1 border-t border-[color:var(--border-subtle)] text-[11px]">
+                      <span className="text-[10.5px] text-[color:var(--text-muted)]">Rate:</span>
                       <input
                         type="number"
-                        step="0.01"
+                        step="0.0001"
                         value={item.price}
                         onChange={(e) => setLinePrice(item.id, e.target.value)}
-                        className="tabular w-16 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold"
+                        className="tabular w-20 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold"
                         style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
                       />
                       <span className="text-[10.5px] text-[color:var(--text-muted)]">×</span>
                       <input
                         type="number"
-                        step="1"
+                        step="any"
                         value={item.qty}
                         onChange={(e) => setLineQty(item.id, e.target.value)}
-                        className="tabular w-12 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold text-center"
+                        className="tabular w-16 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold text-center"
                         style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
                       />
-                      <span className="tabular text-[10.5px] text-[color:var(--text-muted)]">
-                        {item.unit}
-                        {item.taxRate ? ` · GST ${item.taxRate}%` : ''}
-                      </span>
+
+                      {unitOpts.length > 1 ? (
+                        <select
+                          value={item.unit}
+                          onChange={(e) => switchCartItemUnit(item.id, e.target.value)}
+                          className="tabular rounded-md px-1 py-0.5 text-[10.5px] font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 cursor-pointer"
+                        >
+                          {unitOpts.map((opt) => (
+                            <option key={opt.unit} value={opt.unit}>
+                              {opt.unit}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span className="tabular text-[10.5px] font-bold text-[color:var(--text-secondary)]">
+                          {item.unit}
+                        </span>
+                      )}
+
+                      {item.taxRate ? <span className="text-[10px] text-[color:var(--text-muted)] ml-auto">GST {item.taxRate}%</span> : null}
                     </div>
                   </div>
-
-                  <div className="flex shrink-0 items-center gap-1">
-                    <button
-                      onClick={() => updateQty(item.id, -1)}
-                      className="rounded-md p-1 text-[color:var(--text-secondary)]"
-                      style={{ background: 'var(--surface)' }}
-                    >
-                      <Minus className="h-3 w-3" />
-                    </button>
-                    <button
-                      onClick={() => updateQty(item.id, 1)}
-                      className="rounded-md p-1 text-[color:var(--text-secondary)]"
-                      style={{ background: 'var(--surface)' }}
-                    >
-                      <Plus className="h-3 w-3" />
-                    </button>
-                    <Money value={item.total} decimals={false} className="w-16 text-right text-[12.5px] font-bold" />
-                    <button onClick={() => setCart(cart.filter((i) => i.id !== item.id))} className="p-1 text-rose-500">
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
 
@@ -758,8 +998,8 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
       <Modal
         open={Boolean(weightModal)}
         onClose={() => setWeightModal(null)}
-        title={weightModal ? `Weigh — ${weightModal.name}` : ''}
-        subtitle={weightModal ? `${money(weightModal.price)} per ${weightModal.unit}` : ''}
+        title={weightModal ? `Quantity & Weight — ${weightModal.name}` : ''}
+        subtitle={weightModal ? `Base Price: ${money(weightModal.price)} per ${weightModal.unit}` : ''}
         icon={Scale}
         size="sm"
         footer={
@@ -771,27 +1011,111 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
           </>
         }
       >
-        <div className="space-y-3">
-          <Button icon={Scale} onClick={readScale} loading={scaleReading} className="w-full" variant="outline">
-            Read from weighing scale
-          </Button>
+        {weightModal && (() => {
+          const options = getProductUnitOptions(weightModal);
+          const currentOpt = options.find((o) => o.unit.toLowerCase() === weightUnit.toLowerCase()) || options[0];
+          const val = parseFloat(weightInput) || 0;
+          const lineAmount = Math.round(val * currentOpt.price * 100) / 100;
+          const stockInfo = getProductRemainingStock(weightModal, cart, products);
 
-          <Field label={`Weight (${weightModal?.unit || 'kg'})`}>
-            <Input
-              type="number"
-              step="0.001"
-              value={weightInput}
-              onChange={(e) => setWeightInput(e.target.value)}
-              className="tabular text-center text-[24px] font-bold"
-              autoFocus
-            />
-          </Field>
+          // Calculate remaining after this proposed sale
+          const baseQtyToAdd = val * (currentOpt.factor || 1);
+          const remainingAfter = Math.max(0, Math.round((stockInfo.remaining - baseQtyToAdd) * 1000) / 1000);
 
-          <div className="flex items-center justify-between rounded-xl px-3 py-2.5" style={{ background: 'var(--bg-subtle)' }}>
-            <span className="text-[11.5px] font-bold text-[color:var(--text-secondary)]">Line amount</span>
-            <Money value={(parseFloat(weightInput) || 0) * (weightModal?.price || 0)} className="text-[17px] font-bold" />
-          </div>
-        </div>
+          const subOpt = options.find(o => o.isSub);
+          let remainingAfterText = `${remainingAfter} ${weightModal.unit}`;
+          if (subOpt && subOpt.subFactor && remainingAfter > 0) {
+            remainingAfterText = `${remainingAfter} ${weightModal.unit} (${Math.round(remainingAfter * subOpt.subFactor * 100) / 100} ${subOpt.unit})`;
+          }
+
+          const handleUnitSwitch = (newUnit) => {
+            const newOpt = options.find((o) => o.unit.toLowerCase() === newUnit.toLowerCase()) || options[0];
+            const currentBase = (parseFloat(weightInput) || 0) * (currentOpt.factor || 1);
+            const convertedVal = newOpt.factor > 0 ? Math.round((currentBase / newOpt.factor) * 1000) / 1000 : weightInput;
+            setWeightUnit(newOpt.unit);
+            setWeightInput(String(convertedVal || (newOpt.unit === 'g' ? '500' : '1')));
+          };
+
+          return (
+            <div className="space-y-3">
+              {/* Unit selection tabs */}
+              {options.length > 1 && (
+                <div className="flex items-center gap-1.5 p-1 rounded-xl bg-[color:var(--bg-subtle)] border border-[color:var(--border-subtle)]">
+                  {options.map((opt) => (
+                    <button
+                      key={opt.unit}
+                      type="button"
+                      onClick={() => handleUnitSwitch(opt.unit)}
+                      className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                        weightUnit.toLowerCase() === opt.unit.toLowerCase()
+                          ? 'bg-indigo-600 text-white shadow-sm'
+                          : 'text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
+                      }`}
+                    >
+                      {opt.unit === 'g' ? 'Grams (g)' : opt.unit === 'kg' ? 'Kilograms (kg)' : opt.unit}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <Button icon={Scale} onClick={readScale} loading={scaleReading} className="w-full" variant="outline">
+                Read from weighing scale
+              </Button>
+
+              <Field label={`Enter Quantity (${weightUnit})`}>
+                <Input
+                  type="number"
+                  step="any"
+                  value={weightInput}
+                  onChange={(e) => setWeightInput(e.target.value)}
+                  className="tabular text-center text-[24px] font-bold"
+                  autoFocus
+                />
+              </Field>
+
+              {/* Quick presets */}
+              <div className="flex flex-wrap gap-1.5">
+                {(weightUnit === 'g' || weightUnit === 'gm' || weightUnit === 'grams'
+                  ? [100, 250, 500, 750, 1000, 2000]
+                  : weightUnit === 'kg'
+                  ? [0.25, 0.5, 1, 2, 5]
+                  : [1, 2, 5, 10, 12, 24]
+                ).map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => setWeightInput(String(preset))}
+                    className="px-2.5 py-1 rounded-lg border border-[color:var(--border-subtle)] bg-[color:var(--surface)] text-[11px] font-bold text-[color:var(--text-secondary)] hover:border-indigo-500 hover:text-indigo-600 transition-all"
+                  >
+                    {preset} {weightUnit}
+                  </button>
+                ))}
+              </div>
+
+              {/* Calculation & Remaining Stock summary */}
+              <div className="space-y-2 rounded-xl p-3 bg-[color:var(--bg-subtle)] border border-[color:var(--border-subtle)] text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-[color:var(--text-secondary)] font-medium">Unit Rate:</span>
+                  <span className="font-bold text-[color:var(--text-primary)]">
+                    {money(currentOpt.price)} / {weightUnit}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <span className="text-[color:var(--text-secondary)] font-medium">Line Amount:</span>
+                  <Money value={lineAmount} className="text-[17px] font-bold text-emerald-600 dark:text-emerald-400" />
+                </div>
+
+                <div className="pt-2 border-t border-[color:var(--border-subtle)] flex items-center justify-between text-[11px]">
+                  <span className="text-[color:var(--text-muted)] font-medium">Stock after this sale:</span>
+                  <span className="font-bold text-indigo-600 dark:text-indigo-400">
+                    {remainingAfterText}
+                  </span>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </Modal>
 
       <Modal

@@ -8,7 +8,7 @@ import {
 
 import api, { money, API_BASE, fmtDateTime } from '../lib/api';
 import {
-  Panel, SectionHeader, StatTile, Button, Modal, Field, Input, Select, Textarea,
+  Panel, SectionHeader, StatTile, Button, Modal, Field, Input, Select, MultiSelect, Textarea,
   Badge, Money, Spinner, EmptyState, SearchInput, SegmentedControl, DataTable
 } from '../lib/ui';
 import { exportReport } from '../lib/exporters';
@@ -36,9 +36,25 @@ const MOVEMENT_TONE = {
   RETURN: 'accent'
 };
 
+export function canonicalProductType(val) {
+  if (!val) return 'standard';
+  const clean = String(val).toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (clean.includes('both') || (clean.includes('raw') && (clean.includes('standard') || clean.includes('std') || clean.includes('product')))) {
+    return 'both';
+  }
+  if (clean.includes('service') || clean.includes('repair')) return 'service';
+  if (clean.includes('combo') || clean.includes('bundle')) return 'combo';
+  if (clean.includes('composite') || clean.includes('recipe')) return 'composite';
+  if (clean === 'raw' || clean === 'rawmaterial' || clean === 'rm' || clean.includes('raw')) {
+    return 'raw';
+  }
+  return 'standard';
+}
+
 const PRODUCT_TYPE_LABELS = {
-  standard: { label: 'Standard Item', tone: 'neutral' },
+  standard: { label: 'Standard Product', tone: 'neutral' },
   raw: { label: 'Raw Material', tone: 'warning' },
+  both: { label: 'Both Raw Material & Standard Product', tone: 'accent' },
   service: { label: 'Service', tone: 'info' },
   combo: { label: 'Combo Bundle', tone: 'accent' },
   composite: { label: 'Composite (Recipe)', tone: 'success' }
@@ -264,8 +280,16 @@ function DashboardTab({ summary, products, setTab }) {
  * Products Tab
  * ------------------------------------------------------------------ */
 
-function getDefaultSubUnit(unitName) {
+function getDefaultSubUnit(unitName, units = []) {
   const u = String(unitName || '').toLowerCase().trim();
+
+  // Look up from unit definitions (new object format)
+  const unitObj = units.find((def) => (def.name || def) === u);
+  if (unitObj && typeof unitObj === 'object' && unitObj.subUnit) {
+    return { name: unitObj.subUnit, factor: unitObj.factor || '' };
+  }
+
+  // Hardcoded fallback for backward compat
   if (u === 'kg') return { name: 'g', factor: 1000 };
   if (['ltr', 'l', 'liter', 'liters', 'litre', 'litres'].includes(u)) return { name: 'ml', factor: 1000 };
   if (u === 'dozen') return { name: 'pcs', factor: 12 };
@@ -280,7 +304,9 @@ const blankProduct = (categories) => ({
   printName: '',
   description: '',
   categoryId: categories[0]?.id || '',
+  categoryIds: categories[0]?.id ? [categories[0].id] : [],
   productType: 'standard',
+  productTypes: ['standard'],
   barcode: '',
   barcodes: '',
   hsn: '',
@@ -298,7 +324,6 @@ const blankProduct = (categories) => ({
   taxRate: 5,
   dozenQuantity: 12,
   recipeItems: [],
-  recipeYieldQty: 1,
   recipeNotes: '',
   comboItems: [],
   useCustomPricing: false,
@@ -310,11 +335,12 @@ const blankProduct = (categories) => ({
 });
 
 /**
- * Live cost/yield math for the recipe builder — mirrors the server's
+ * Live cost math for the recipe builder — mirrors the server's
  * `decorateRecipe` in modules/recipes.js so the numbers shown while editing
  * never surprise the user once the request round-trips.
+ * Each unit sold consumes exactly the listed raw material quantities (1:1).
  */
-function computeRecipeTotals(ingredients, yieldQty, products) {
+function computeRecipeTotals(ingredients, products) {
   const rows = (ingredients || [])
     .map((ing) => {
       const material = (products || []).find((p) => p.id === ing.productId);
@@ -324,17 +350,15 @@ function computeRecipeTotals(ingredients, yieldQty, products) {
     })
     .filter((r) => r.productId && r.qty > 0);
 
-  const batchCost = rows.reduce((sum, r) => sum + r.lineCost, 0);
-  const y = Number(yieldQty) > 0 ? Number(yieldQty) : 1;
-  const unitCost = batchCost / y;
+  const unitCost = rows.reduce((sum, r) => sum + r.lineCost, 0);
 
   const producible = rows.length
     ? Math.floor(
-        Math.min(...rows.map((r) => (r.qty > 0 ? ((r.material?.stock || 0) / r.qty) * y : 0)))
+        Math.min(...rows.map((r) => (r.qty > 0 ? (r.material?.stock || 0) / r.qty : 0)))
       )
     : 0;
 
-  return { rows, batchCost, unitCost, producible: Math.max(0, Number.isFinite(producible) ? producible : 0) };
+  return { rows, unitCost, producible: Math.max(0, Number.isFinite(producible) ? producible : 0) };
 }
 
 function ProductsTab({ products, categories, units, warehouses, showToast, onRefresh }) {
@@ -357,8 +381,22 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
   const rows = useMemo(() => {
     const needle = deferredQuery.trim().toLowerCase();
     return products.filter((p) => {
-      if (categoryId !== 'all' && p.categoryId !== categoryId) return false;
-      if (typeFilter !== 'all' && p.productType !== typeFilter) return false;
+      if (categoryId !== 'all') {
+        const belongs = Array.isArray(p.categoryIds) && p.categoryIds.length
+          ? p.categoryIds.includes(categoryId)
+          : p.categoryId === categoryId;
+        if (!belongs) return false;
+      }
+      if (typeFilter !== 'all') {
+        const primaryType = canonicalProductType(p.productType || (Array.isArray(p.productTypes) && p.productTypes.length > 1 ? 'both' : p.productTypes?.[0]));
+        if (typeFilter === 'standard') {
+          if (primaryType !== 'standard' && primaryType !== 'both' && !p.productTypes?.includes('standard')) return false;
+        } else if (typeFilter === 'raw') {
+          if (primaryType !== 'raw' && primaryType !== 'both' && !p.productTypes?.includes('raw')) return false;
+        } else if (primaryType !== typeFilter) {
+          return false;
+        }
+      }
       if (statusFilter === 'active' && p.isActive === false) return false;
       if (statusFilter === 'inactive' && p.isActive !== false) return false;
 
@@ -404,19 +442,29 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
   };
 
   const openEdit = (product) => {
-    const isKg = String(product.unit).toLowerCase() === 'kg';
-    const isLtr = ['ltr', 'l', 'liter', 'liters', 'litre', 'litres'].includes(String(product.unit).toLowerCase());
+    const def = getDefaultSubUnit(product.unit, units);
     const hasCustom = !!product.customSubUnitName && Number(product.customSubUnitFactor) > 0;
-    const enableMinor = product.enableMinorUnit !== undefined ? Boolean(product.enableMinorUnit) : (isKg || isLtr || hasCustom);
+    const enableMinor = product.enableMinorUnit !== undefined ? Boolean(product.enableMinorUnit) : (!!def.name || hasCustom);
 
-    const subName = product.customSubUnitName || (isKg ? 'g' : isLtr ? 'ml' : '');
-    const subFactor = product.customSubUnitFactor || (isKg || isLtr ? 1000 : '');
+    const subName = product.customSubUnitName || def.name || '';
+    const subFactor = product.customSubUnitFactor || def.factor || '';
     const subPrice = product.customSubUnitPrice || (subFactor && product.price ? (Number(product.price) / Number(subFactor)).toFixed(4) : '');
+
+    const rawType = product.productType || (Array.isArray(product.productTypes) && product.productTypes.length > 1 ? 'both' : product.productTypes?.[0]) || 'standard';
+    const primaryType = canonicalProductType(rawType);
+    const resolvedTypes = primaryType === 'both' ? ['standard', 'raw'] : [primaryType];
 
     setEditing(product);
     setForm({
       ...blankProduct(categories),
       ...product,
+      categoryIds: Array.isArray(product.categoryIds) && product.categoryIds.length
+        ? product.categoryIds
+        : product.categoryId
+        ? [product.categoryId]
+        : [],
+      productType: primaryType,
+      productTypes: resolvedTypes,
       regionalName: product.regionalName || product.printName || '',
       barcodes: Array.isArray(product.barcodes) ? product.barcodes.join(', ') : product.barcode || '',
       warehouses: product.warehouses || {},
@@ -432,7 +480,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
         : Array.isArray(product.recipe?.ingredients)
         ? product.recipe.ingredients.map((i) => ({ ...i }))
         : [],
-      recipeYieldQty: product.recipeYieldQty || product.recipe?.yieldQty || 1,
+
       recipeNotes: product.recipeNotes || product.recipe?.notes || '',
       useCustomPricing: product.useCustomPricing || false
     });
@@ -514,6 +562,11 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       return;
     }
 
+    if (!Array.isArray(form.categoryIds) || form.categoryIds.length === 0) {
+      showToast('Select at least one category.', 'error');
+      return;
+    }
+
     const isComposite = form.productType === 'composite';
     const isCombo = form.productType === 'combo';
 
@@ -568,12 +621,11 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       altUnits,
       comboItems: isCombo ? validComboItems : [],
       recipeItems: isComposite ? validIngredients : [],
-      recipeYieldQty: isComposite ? (Number(form.recipeYieldQty) > 0 ? Number(form.recipeYieldQty) : 1) : 1,
       recipeNotes: isComposite ? form.recipeNotes || '' : ''
     };
 
     if (isComposite && !form.useCustomPricing) {
-      payload.purchasePrice = computeRecipeTotals(form.recipeItems, form.recipeYieldQty, products).unitCost;
+      payload.purchasePrice = computeRecipeTotals(form.recipeItems, products).unitCost;
     }
     
     if (isCombo && !form.useCustomPricing) {
@@ -675,17 +727,18 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
               </thead>
               <tbody className="divide-y divide-[color:var(--border-subtle)]">
                 {rows.slice(0, 200).map((p) => {
-                  const cat = categories.find((c) => c.id === p.categoryId);
+                  const productCategoryNames = (Array.isArray(p.categoryIds) && p.categoryIds.length ? p.categoryIds : [p.categoryId])
+                    .map((id) => categories.find((c) => c.id === id)?.name)
+                    .filter(Boolean);
                   const isCompositeRow = p.productType === 'composite' || p.isComposite;
                   const isComboRow = p.productType === 'combo';
                   
                   const compositeIngredients = (p.recipe?.ingredients?.length ? p.recipe.ingredients : p.recipeItems) || [];
-                  const recipeYieldQty = Number(p.recipe?.yieldQty || p.recipeYieldQty) || 1;
 
                   const producible = isCompositeRow && compositeIngredients.length > 0
                     ? Math.max(0, Math.floor(Math.min(...compositeIngredients.map(item => {
                         const material = productsById[item.productId];
-                        return material && Number(item.qty) > 0 ? ((material.stock || 0) / Number(item.qty)) * recipeYieldQty : 0;
+                        return material && Number(item.qty) > 0 ? (material.stock || 0) / Number(item.qty) : 0;
                       }))))
                     : (p.recipe?.producible ?? 0);
 
@@ -719,7 +772,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                     Number(displayStock) <= 0
                   );
                   
-                  const typeInfo = PRODUCT_TYPE_LABELS[p.productType || 'standard'];
+                  const productTypesList = Array.isArray(p.productTypes) && p.productTypes.length ? p.productTypes : [p.productType || 'standard'];
                   const ingredientCount = isCompositeRow
                     ? (p.recipe?.ingredients?.length || p.recipeItems?.length || 0)
                     : isComboRow
@@ -748,9 +801,25 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                       </td>
 
                       <td className="py-3 px-3">
-                        <div className="font-medium text-[color:var(--text-primary)]">{cat?.name || '—'}</div>
+                        <div className="font-medium text-[color:var(--text-primary)]">
+                          {productCategoryNames.length ? productCategoryNames.join(', ') : '—'}
+                        </div>
                         <div className="flex flex-wrap items-center gap-1 mt-0.5">
-                          <Badge tone={typeInfo?.tone || 'neutral'}>{typeInfo?.label || 'Standard'}</Badge>
+                          {(() => {
+                            const typeKey = canonicalProductType(p.productType || (Array.isArray(p.productTypes) && p.productTypes.length > 1 ? 'both' : p.productTypes?.[0]));
+                            if (typeKey === 'both' || (Array.isArray(p.productTypes) && p.productTypes.includes('standard') && p.productTypes.includes('raw'))) {
+                              return (
+                                <>
+                                  <Badge tone="neutral">Standard Product</Badge>
+                                  <Badge tone="warning">Raw Material</Badge>
+                                </>
+                              );
+                            }
+                            const info = PRODUCT_TYPE_LABELS[typeKey] || PRODUCT_TYPE_LABELS.standard;
+                            return (
+                              <Badge tone={info.tone || 'neutral'}>{info.label || 'Standard Product'}</Badge>
+                            );
+                          })()}
                           {isCompositeRow && (
                             <Badge tone="success">{ingredientCount} ingredient{ingredientCount === 1 ? '' : 's'}</Badge>
                           )}
@@ -780,8 +849,9 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                           <td className="py-3 px-3 text-right font-bold text-[color:var(--text-primary)]">
                             <div>{money(p.price)} / {p.unit}</div>
                             {(() => {
-                              const subName = p.customSubUnitName || (p.unit?.toLowerCase() === 'kg' ? 'g' : ['ltr', 'l', 'liter', 'liters', 'litre', 'litres'].includes(p.unit?.toLowerCase()) ? 'ml' : '');
-                              const subFactor = Number(p.customSubUnitFactor) || (p.unit?.toLowerCase() === 'kg' || ['ltr', 'l', 'liter', 'liters', 'litre', 'litres'].includes(p.unit?.toLowerCase()) ? 1000 : 0);
+                              const def = getDefaultSubUnit(p.unit, units);
+                              const subName = p.customSubUnitName || def.name || '';
+                              const subFactor = Number(p.customSubUnitFactor) || (def.factor ? Number(def.factor) : 0);
                               const subPrice = p.customSubUnitPrice || (subFactor && p.price ? Number(p.price) / subFactor : 0);
                               if (subName && subFactor > 0 && subPrice > 0) {
                                 return (
@@ -909,21 +979,33 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
             </div>
 
             <div className="grid grid-cols-3 gap-3">
-              <Field label="Category">
-                <Select value={form.categoryId} onChange={(e) => setForm({ ...form, categoryId: e.target.value })}>
+              <Field label="Categories">
+                <MultiSelect
+                  value={form.categoryIds}
+                  onChange={(e) => setForm({ ...form, categoryIds: e.target.value, categoryId: e.target.value[0] || '' })}
+                  placeholder="Select categories..."
+                >
                   {categories.map((c) => (
                     <option key={c.id} value={c.id}>{c.name}</option>
                   ))}
-                </Select>
+                </MultiSelect>
               </Field>
 
               <Field label="Product Type">
-                <Select value={form.productType} onChange={(e) => setForm({ ...form, productType: e.target.value })}>
-                  <option value="standard">Standard Physical Item</option>
+                <Select
+                  value={canonicalProductType(form.productType || (Array.isArray(form.productTypes) && form.productTypes.length > 1 ? 'both' : form.productTypes?.[0]) || 'standard')}
+                  onChange={(e) => {
+                    const t = e.target.value;
+                    const types = t === 'both' ? ['standard', 'raw'] : [t];
+                    setForm({ ...form, productType: t, productTypes: types });
+                  }}
+                >
+                  <option value="standard">Standard Item</option>
                   <option value="raw">Raw Material</option>
+                  <option value="both">Both Raw Material & Standard Product</option>
                   <option value="service">Service (No stock level)</option>
                   <option value="combo">Combo Bundle</option>
-                  <option value="composite">Composite / Recipe</option>
+                  <option value="composite">Composite (Recipe)</option>
                 </Select>
               </Field>
 
@@ -933,7 +1015,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                     value={form.unit}
                     onChange={(e) => {
                       const newUnit = e.target.value;
-                      const def = getDefaultSubUnit(newUnit);
+                      const def = getDefaultSubUnit(newUnit, units);
                       const isStandardSub = !!def.name;
                       const priceNum = Number(form.price) || 0;
                       const subPrice = def.factor && priceNum ? (priceNum / def.factor).toFixed(4) : form.customSubUnitPrice;
@@ -947,9 +1029,19 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                       });
                     }}
                   >
-                    {units.map((u) => (
-                      <option key={u} value={u}>{u}</option>
-                    ))}
+                    {units.map((u) => {
+                      const name = typeof u === 'object' ? u.name : u;
+                      const sub = typeof u === 'object' && u.subUnit ? u.subUnit : null;
+                      const factor = typeof u === 'object' && u.factor ? u.factor : null;
+                      const label = sub && factor
+                        ? `${name} (1 ${name} = ${factor} ${sub})`
+                        : sub
+                        ? `${name} (→ ${sub})`
+                        : name;
+                      return (
+                        <option key={name} value={name}>{label}</option>
+                      );
+                    })}
                   </Select>
                 </Field>
               )}
@@ -972,7 +1064,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                       onChange={(e) => {
                         const enabled = e.target.checked;
                         if (enabled && !form.customSubUnitName) {
-                          const def = getDefaultSubUnit(form.unit);
+                          const def = getDefaultSubUnit(form.unit, units);
                           const priceNum = Number(form.price) || 0;
                           const subPrice = def.factor && priceNum ? (priceNum / def.factor).toFixed(4) : '';
                           setForm({
@@ -1022,7 +1114,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                         )}
                       </Field>
 
-                      <Field label={`1 ${form.unit || 'unit'} = [ ? ] ${form.customSubUnitName || 'sub-units'}`}>
+                      <Field label={`1 ${form.unit || 'unit'} contains (${form.customSubUnitName || 'sub-units'})`}>
                         <Input
                           type="number"
                           step="any"
@@ -1059,10 +1151,10 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                     {form.customSubUnitName && Number(form.customSubUnitFactor) > 0 && (
                       <div className="p-2.5 rounded-lg bg-indigo-100/70 dark:bg-indigo-900/40 text-[11px] text-indigo-900 dark:text-indigo-200 flex flex-wrap items-center justify-between gap-2 font-medium">
                         <div>
-                          💡 <strong>1 {form.unit}</strong> = <strong>{form.customSubUnitFactor} {form.customSubUnitName}</strong>
+                          <strong>1 {form.unit}</strong> = <strong>{form.customSubUnitFactor} {form.customSubUnitName}</strong>
                           {Number(form.price) > 0 && (
                             <span className="ml-2">
-                              | Main Price: <strong>{money(form.price)} / {form.unit}</strong> (<strong>₹{Number(form.customSubUnitPrice || (Number(form.price) / Number(form.customSubUnitFactor))).toFixed(4)} / {form.customSubUnitName}</strong>)
+                              | Price: <strong>{money(form.price)} / {form.unit}</strong> (<strong>₹{Number(form.customSubUnitPrice || (Number(form.price) / Number(form.customSubUnitFactor))).toFixed(4)} / {form.customSubUnitName}</strong>)
                             </span>
                           )}
                         </div>
@@ -1107,7 +1199,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                       step="0.01"
                       value={
                         form.productType === 'composite' && !form.useCustomPricing
-                          ? computeRecipeTotals(form.recipeItems, form.recipeYieldQty, products).unitCost.toFixed(2)
+                          ? computeRecipeTotals(form.recipeItems, products).unitCost.toFixed(2)
                           : form.purchasePrice
                       }
                       onChange={(e) => setForm({ ...form, purchasePrice: e.target.value })}
@@ -1230,17 +1322,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                   </p>
                 </div>
 
-                <div className="grid grid-cols-2 gap-3 max-w-xs">
-                  <Field label="Batch Yields" hint={`Units of ${form.unit || 'unit'} produced per batch`}>
-                    <Input
-                      type="number"
-                      min="1"
-                      step="1"
-                      value={form.recipeYieldQty ?? 1}
-                      onChange={(e) => setForm({ ...form, recipeYieldQty: e.target.value })}
-                    />
-                  </Field>
-                </div>
+
 
                 <div className="space-y-2">
                   {(form.recipeItems || []).length > 0 && (
@@ -1271,15 +1353,14 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                 </div>
 
                 {(() => {
-                  const totals = computeRecipeTotals(form.recipeItems, form.recipeYieldQty, products);
+                  const totals = computeRecipeTotals(form.recipeItems, products);
                   const sellingPrice = Number(form.price) || 0;
                   const margin = sellingPrice - totals.unitCost;
                   const marginPct = sellingPrice ? (margin / sellingPrice) * 100 : 0;
                   return (
                     <div className="pt-2 border-t border-emerald-300/40 dark:border-emerald-800/40 space-y-3">
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                        <StatBlock label="Batch Cost" value={money(totals.batchCost)} />
-                        <StatBlock label="Cost / Unit" value={money(totals.unitCost)} />
+                      <div className="grid grid-cols-3 gap-2">
+                        <StatBlock label="Material Cost" value={money(totals.unitCost)} />
                         <StatBlock label="Margin" value={money(margin)} tone={margin < 0 ? 'danger' : 'success'} />
                         <StatBlock label="Margin %" value={`${marginPct.toFixed(1)}%`} tone={margin < 0 ? 'danger' : 'success'} />
                       </div>
@@ -1667,7 +1748,7 @@ function CategoriesTab({ categories, products, showToast, onRefresh }) {
               <div className="text-2xl p-2 bg-[color:var(--bg-subtle)] rounded-xl">{cat.icon || '📦'}</div>
               <div>
                 <div className="font-bold text-sm text-[color:var(--text-primary)]">{cat.name}</div>
-                <div className="text-xs text-[color:var(--text-muted)]">{(products || []).filter(p => p.categoryId === cat.id).length} product(s) assigned</div>
+                <div className="text-xs text-[color:var(--text-muted)]">{(products || []).filter(p => Array.isArray(p.categoryIds) && p.categoryIds.length ? p.categoryIds.includes(cat.id) : p.categoryId === cat.id).length} product(s) assigned</div>
               </div>
             </div>
             <div className="flex items-center gap-1">
@@ -1713,21 +1794,45 @@ function UnitsTab({ units, showToast, onRefresh }) {
   const [unitList, setUnitList] = useState(units || []);
   const [showModal, setShowModal] = useState(false);
   const [editingUnit, setEditingUnit] = useState(null);
-  const [unitName, setUnitName] = useState('');
+  const [form, setForm] = useState({ name: '', subUnit: '', factor: '' });
 
   useEffect(() => {
     setUnitList(units || []);
   }, [units]);
 
+  const openAdd = () => {
+    setEditingUnit(null);
+    setForm({ name: '', subUnit: '', factor: '' });
+    setShowModal(true);
+  };
+
+  const openEdit = (u) => {
+    const unitObj = typeof u === 'object' ? u : { name: u, subUnit: '', factor: '' };
+    setEditingUnit(unitObj.name);
+    setForm({
+      name: unitObj.name || '',
+      subUnit: unitObj.subUnit || '',
+      factor: unitObj.factor || ''
+    });
+    setShowModal(true);
+  };
+
   const saveUnit = async (e) => {
     e?.preventDefault();
-    if (!unitName.trim()) return showToast('Unit name is required.', 'error');
+    if (!form.name.trim()) return showToast('Unit name is required.', 'error');
     try {
+      const payload = {
+        name: form.name.trim().toLowerCase(),
+        newName: form.name.trim().toLowerCase(),
+        subUnit: form.subUnit ? form.subUnit.trim().toLowerCase() : null,
+        factor: form.factor ? Number(form.factor) : null
+      };
+
       if (editingUnit) {
-        await api.put(`/units/${editingUnit}`, { newName: unitName });
+        await api.put(`/units/${encodeURIComponent(editingUnit)}`, payload);
         showToast('Unit updated successfully.');
       } else {
-        await api.post('/units', { name: unitName });
+        await api.post('/units', payload);
         showToast('Unit created successfully.');
       }
       setShowModal(false);
@@ -1740,7 +1845,7 @@ function UnitsTab({ units, showToast, onRefresh }) {
   const deleteUnit = async (name) => {
     if (!confirm(`Delete unit "${name}"?`)) return;
     try {
-      await api.del(`/units/${name}`);
+      await api.del(`/units/${encodeURIComponent(name)}`);
       showToast(`Unit "${name}" deleted.`);
       onRefresh();
     } catch (err) {
@@ -1750,36 +1855,101 @@ function UnitsTab({ units, showToast, onRefresh }) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
+      <div className="flex items-center justify-between bg-[color:var(--bg-surface)] p-3.5 rounded-2xl border border-[color:var(--border-subtle)]">
         <div>
           <h3 className="font-bold text-sm text-[color:var(--text-primary)]">Units of Measurement</h3>
-          <p className="text-xs text-[color:var(--text-muted)]">Configure selling & inventory units (pcs, kg, litre, box, etc.)</p>
+          <p className="text-xs text-[color:var(--text-muted)]">Configure selling units and conversions (e.g. 1 kg = 1000 g, 1 box = 24 pcs, 1 dozen = 12 pcs)</p>
         </div>
-        <Button icon={Plus} onClick={() => { setEditingUnit(null); setUnitName(''); setShowModal(true); }}>Add Unit</Button>
+        <Button icon={Plus} onClick={openAdd}>Add Unit</Button>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        {unitList.map((u) => (
-          <div key={u} className="p-3.5 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] flex items-center justify-between">
-            <span className="font-bold text-sm text-[color:var(--text-primary)] capitalize">{u}</span>
-            <div className="flex items-center gap-1">
-              <button onClick={() => { setEditingUnit(u); setUnitName(u); setShowModal(true); }} className="p-1 text-[color:var(--text-muted)] hover:text-indigo-600">
-                <Edit3 className="h-3.5 w-3.5" />
-              </button>
-              <button onClick={() => deleteUnit(u)} className="p-1 text-[color:var(--text-muted)] hover:text-red-600">
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+        {unitList.map((u) => {
+          const unitObj = typeof u === 'object' ? u : { name: u, subUnit: null, factor: null };
+          const name = unitObj.name;
+          const hasConversion = unitObj.subUnit && unitObj.factor;
+
+          return (
+            <div
+              key={name}
+              className="p-3.5 rounded-2xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] flex flex-col justify-between gap-2.5 shadow-sm hover:border-indigo-400/50 transition-all"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <span className="font-bold text-sm text-[color:var(--text-primary)] capitalize">{name}</span>
+                  {hasConversion ? (
+                    <div className="mt-1 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/50 px-2 py-0.5 rounded-md border border-indigo-200/50 dark:border-indigo-800/50 inline-block">
+                      1 {name} = {unitObj.factor} {unitObj.subUnit}
+                    </div>
+                  ) : unitObj.subUnit ? (
+                    <div className="mt-1 text-[11px] text-[color:var(--text-muted)]">
+                      Sub-unit: {unitObj.subUnit}
+                    </div>
+                  ) : (
+                    <div className="mt-1 text-[11px] text-[color:var(--text-muted)]">Base unit</div>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    onClick={() => openEdit(u)}
+                    className="p-1.5 rounded-lg text-[color:var(--text-muted)] hover:text-indigo-600 hover:bg-[color:var(--bg-subtle)] transition-colors"
+                    title="Edit Unit"
+                  >
+                    <Edit3 className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    onClick={() => deleteUnit(name)}
+                    className="p-1.5 rounded-lg text-[color:var(--text-muted)] hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition-colors"
+                    title="Delete Unit"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {showModal && (
-        <Modal open={true} title={editingUnit ? 'Edit Unit' : 'Create Unit'} icon={Sliders} onClose={() => setShowModal(false)}>
+        <Modal open={true} title={editingUnit ? `Edit Unit (${editingUnit})` : 'Create Unit'} icon={Sliders} onClose={() => setShowModal(false)}>
           <form onSubmit={saveUnit} className="space-y-4">
-            <Field label="Unit Name (e.g. Kg, Box, Litre, Bundle)">
-              <Input value={unitName} onChange={(e) => setUnitName(e.target.value)} required />
+            <Field label="Unit Name (e.g. kg, box, dozen, litre, pack)">
+              <Input
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                placeholder="e.g. box"
+                required
+              />
             </Field>
+
+            <div className="grid grid-cols-2 gap-3 p-3 rounded-xl bg-[color:var(--bg-subtle)] border border-[color:var(--border-subtle)]">
+              <Field label="Sub-Unit Name" hint="e.g. pcs, g, ml">
+                <Input
+                  value={form.subUnit}
+                  onChange={(e) => setForm({ ...form, subUnit: e.target.value })}
+                  placeholder="e.g. pcs"
+                />
+              </Field>
+
+              <Field label={`1 ${form.name || 'unit'} = how many ${form.subUnit || 'sub-units'}?`}>
+                <Input
+                  type="number"
+                  step="any"
+                  value={form.factor}
+                  onChange={(e) => setForm({ ...form, factor: e.target.value })}
+                  placeholder="e.g. 24"
+                />
+              </Field>
+            </div>
+
+            {form.name && form.subUnit && form.factor && (
+              <div className="text-xs font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 p-2.5 rounded-xl border border-emerald-200 dark:border-emerald-800">
+                Conversion: 1 {form.name} = {form.factor} {form.subUnit}
+              </div>
+            )}
+
             <div className="flex justify-end gap-2 pt-3 border-t border-[color:var(--border-subtle)]">
               <Button variant="secondary" onClick={() => setShowModal(false)}>Cancel</Button>
               <Button icon={Save} type="submit">Save Unit</Button>
@@ -2540,10 +2710,10 @@ function PricesheetTab({ products, showToast, onRefresh }) {
           title={`Manage Pricing: ${manageSheet.name}`}
           icon={Tag}
           size="fullscreen"
-          className="max-w-[96vw] w-[96vw] max-h-[92vh] h-[92vh] flex flex-col justify-between"
+          className="max-w-[96vw] w-[96vw] max-h-[92vh] h-[92vh] flex flex-col justify-between !bg-[color:var(--surface-raised,#ffffff)]"
           onClose={() => setManageSheet(null)}
         >
-          <div className="space-y-4 flex-1 flex flex-col min-h-0">
+          <div className="space-y-4 flex-1 flex flex-col min-h-0 w-full">
             <div className="p-3 rounded-xl bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs shrink-0">
               <div>
                 <div className="font-bold text-indigo-700 dark:text-indigo-400">Sheet-Level Discount (%)</div>
@@ -2564,17 +2734,17 @@ function PricesheetTab({ products, showToast, onRefresh }) {
               </div>
             </div>
 
-            <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+            <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--surface,#ffffff)]">
               <table className="w-full text-xs text-left">
-                <thead className="bg-[color:var(--bg-subtle)] text-[color:var(--text-primary)] font-bold uppercase sticky top-0 z-10">
+                <thead className="bg-slate-100 dark:bg-slate-800 text-[color:var(--text-primary)] font-bold uppercase sticky top-0 z-10 border-b border-[color:var(--border-subtle)] shadow-sm">
                   <tr>
-                    <th className="py-2.5 px-3">Product Name</th>
-                    <th className="py-2.5 px-3 text-right">Standard Price</th>
-                    <th className="py-2.5 px-3 text-right">Custom Discount (%)</th>
-                    <th className="py-2.5 px-3 text-right">Custom Price (₹)</th>
+                    <th className="py-2.5 px-3 bg-slate-100 dark:bg-slate-800">Product Name</th>
+                    <th className="py-2.5 px-3 text-right bg-slate-100 dark:bg-slate-800">Standard Price</th>
+                    <th className="py-2.5 px-3 text-right bg-slate-100 dark:bg-slate-800">Custom Discount (%)</th>
+                    <th className="py-2.5 px-3 text-right bg-slate-100 dark:bg-slate-800">Custom Price (₹)</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                <tbody className="divide-y divide-[color:var(--border-subtle)] bg-[color:var(--surface,#ffffff)]">
                   {rows.map(p => {
                     const isService = String(p.productType).toLowerCase() === 'service';
                     const stdPrice = Number(p.price) || 0;
@@ -2702,7 +2872,7 @@ function parseCSVContent(text) {
   };
 
   // Find real header row by matching common product table keywords
-  const headerKeywords = ['name', 'product', 'item', 'barcode', 'price', 'selling', 'unit', 'code', 'stock', 'qty', 'hsn'];
+  const headerKeywords = ['name', 'product', 'item', 'type', 'barcode', 'price', 'selling', 'unit', 'code', 'stock', 'qty', 'hsn'];
   let headerIdx = 0;
 
   for (let i = 0; i < Math.min(lines.length, 10); i++) {
@@ -2742,10 +2912,11 @@ function ImportExportTab({ products, categories, showToast, onRefresh }) {
 
   const downloadSampleCSV = () => {
     const csvContent =
-      "Product Name,Regional Name,Category,Unit,Barcode,Purchase Price,Selling Price,MRP,Wholesale Price,Current Stock,Min Stock,HSN,Tax Rate\n" +
-      "Organic Apples,ஆப்பிள்,Fruits,kg,89012345999,100,150,160,130,50,10,0808,5\n" +
-      "Amul Milk 1L,பால்,Dairy,ltr,89012345888,50,60,62,55,100,20,0401,0\n" +
-      "Hair Trim Service,ஹேர் கட்,Services,pcs,SERV001,0,100,100,100,0,0,,0\n";
+      "Product Name,Regional Name,Category,Product Type,Unit,Barcode,Purchase Price,Selling Price,MRP,Wholesale Price,Current Stock,Min Stock,HSN,Tax Rate\n" +
+      "Organic Apples,ஆப்பிள்,Fruits,standard,kg,89012345999,100,150,160,130,50,10,0808,5\n" +
+      "Raw Sugar (RM),சர்க்கரை,Raw Materials,raw,kg,89012345777,35,40,42,38,200,50,1701,5\n" +
+      "Amul Milk 1L,பால்,Dairy,standard,ltr,89012345888,50,60,62,55,100,20,0401,0\n" +
+      "Hair Trim Service,ஹேர் கட்,Services,service,pcs,SERV001,0,100,100,100,0,0,,0\n";
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -2800,6 +2971,8 @@ function ImportExportTab({ products, categories, showToast, onRefresh }) {
     const cols = [
       { key: 'name', label: 'Product Name' },
       { key: 'regionalName', label: 'Regional Name' },
+      { key: 'productType', label: 'Product Type' },
+      { key: 'category', label: 'Category' },
       { key: 'barcode', label: 'Barcode' },
       { key: 'unit', label: 'Unit' },
       { key: 'purchasePrice', label: 'Purchase Price' },
@@ -2808,7 +2981,18 @@ function ImportExportTab({ products, categories, showToast, onRefresh }) {
       { key: 'hsn', label: 'HSN Code' }
     ];
 
-    exportReport('csv', { title: 'Product Inventory Export', columns: cols, rows: products });
+    const exportRows = products.map((p) => {
+      const typeKey = canonicalProductType(p.productType || (Array.isArray(p.productTypes) && p.productTypes.length > 1 ? 'both' : p.productTypes?.[0]));
+      const typeLabel = PRODUCT_TYPE_LABELS[typeKey]?.label || 'Standard Product';
+      const cat = categories.find((c) => c.id === (Array.isArray(p.categoryIds) ? p.categoryIds[0] : p.categoryId));
+      return {
+        ...p,
+        category: cat?.name || p.categoryId || '—',
+        productType: typeLabel
+      };
+    });
+
+    exportReport('csv', { title: 'Product Inventory Export', columns: cols, rows: exportRows });
     showToast('Exported CSV file.');
   };
 

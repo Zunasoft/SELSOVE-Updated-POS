@@ -148,14 +148,21 @@ export default function App() {
     const handleKeyDown = (e) => {
       if (e.key === 'F11') {
         e.preventDefault();
-        toggleFullscreen();
+        if (activeTab === 'pos') toggleFullscreen();
       } else if (e.key === 'Escape') {
         toggleFullscreen(false);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isFullscreen]);
+  }, [isFullscreen, activeTab]);
+
+  // Auto-exit fullscreen when navigating away from POS Billing
+  useEffect(() => {
+    if (activeTab !== 'pos' && isFullscreen) {
+      toggleFullscreen(false);
+    }
+  }, [activeTab]);
 
   useEffect(() => {
     const savedToken = localStorage.getItem('pos_token');
@@ -350,14 +357,16 @@ export default function App() {
           </nav>
 
           <div className="flex shrink-0 items-center gap-2">
-            <button
-              onClick={() => toggleFullscreen()}
-              className="rounded-xl p-2 transition-colors hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-primary)]"
-              style={{ background: 'var(--bg-subtle)' }}
-              title={isFullscreen ? "Exit Full Screen (F11 / Esc)" : "Native Full Screen Mode (F11)"}
-            >
-              {isFullscreen ? <Minimize2 className="h-4 w-4 text-indigo-600 dark:text-indigo-400" /> : <Maximize2 className="h-4 w-4" />}
-            </button>
+            {activeTab === 'pos' && (
+              <button
+                onClick={() => toggleFullscreen()}
+                className="rounded-xl p-2 transition-colors hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-primary)]"
+                style={{ background: 'var(--bg-subtle)' }}
+                title={isFullscreen ? "Exit Full Screen (F11 / Esc)" : "Native Full Screen Mode (F11)"}
+              >
+                {isFullscreen ? <Minimize2 className="h-4 w-4 text-indigo-600 dark:text-indigo-400" /> : <Maximize2 className="h-4 w-4" />}
+              </button>
+            )}
 
             <button
               onClick={() => setIsDarkMode(!isDarkMode)}
