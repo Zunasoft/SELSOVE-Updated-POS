@@ -264,6 +264,16 @@ function DashboardTab({ summary, products, setTab }) {
  * Products Tab
  * ------------------------------------------------------------------ */
 
+function getDefaultSubUnit(unitName) {
+  const u = String(unitName || '').toLowerCase().trim();
+  if (u === 'kg') return { name: 'g', factor: 1000 };
+  if (['ltr', 'l', 'liter', 'liters', 'litre', 'litres'].includes(u)) return { name: 'ml', factor: 1000 };
+  if (u === 'dozen') return { name: 'pcs', factor: 12 };
+  if (['box', 'carton', 'case'].includes(u)) return { name: 'pcs', factor: 12 };
+  if (['m', 'meter', 'metre'].includes(u)) return { name: 'cm', factor: 100 };
+  return { name: '', factor: '' };
+}
+
 const blankProduct = (categories) => ({
   name: '',
   regionalName: '',
@@ -291,7 +301,12 @@ const blankProduct = (categories) => ({
   recipeYieldQty: 1,
   recipeNotes: '',
   comboItems: [],
-  useCustomPricing: false
+  useCustomPricing: false,
+  enableMinorUnit: false,
+  customSubUnitName: '',
+  customSubUnitFactor: '',
+  customSubUnitPrice: '',
+  customSubUnitBarcode: ''
 });
 
 /**
@@ -389,6 +404,15 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
   };
 
   const openEdit = (product) => {
+    const isKg = String(product.unit).toLowerCase() === 'kg';
+    const isLtr = ['ltr', 'l', 'liter', 'liters', 'litre', 'litres'].includes(String(product.unit).toLowerCase());
+    const hasCustom = !!product.customSubUnitName && Number(product.customSubUnitFactor) > 0;
+    const enableMinor = product.enableMinorUnit !== undefined ? Boolean(product.enableMinorUnit) : (isKg || isLtr || hasCustom);
+
+    const subName = product.customSubUnitName || (isKg ? 'g' : isLtr ? 'ml' : '');
+    const subFactor = product.customSubUnitFactor || (isKg || isLtr ? 1000 : '');
+    const subPrice = product.customSubUnitPrice || (subFactor && product.price ? (Number(product.price) / Number(subFactor)).toFixed(4) : '');
+
     setEditing(product);
     setForm({
       ...blankProduct(categories),
@@ -397,8 +421,17 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       barcodes: Array.isArray(product.barcodes) ? product.barcodes.join(', ') : product.barcode || '',
       warehouses: product.warehouses || {},
       dozenQuantity: product.dozenQuantity || 12,
+      enableMinorUnit: enableMinor,
+      customSubUnitName: subName,
+      customSubUnitFactor: subFactor,
+      customSubUnitPrice: subPrice,
+      customSubUnitBarcode: product.customSubUnitBarcode || '',
       comboItems: Array.isArray(product.comboItems) ? product.comboItems.map((i) => ({ ...i })) : [],
-      recipeItems: Array.isArray(product.recipeItems) ? product.recipeItems.map((i) => ({ ...i })) : [],
+      recipeItems: Array.isArray(product.recipeItems) && product.recipeItems.length > 0
+        ? product.recipeItems.map((i) => ({ ...i }))
+        : Array.isArray(product.recipe?.ingredients)
+        ? product.recipe.ingredients.map((i) => ({ ...i }))
+        : [],
       recipeYieldQty: product.recipeYieldQty || product.recipe?.yieldQty || 1,
       recipeNotes: product.recipeNotes || product.recipe?.notes || '',
       useCustomPricing: product.useCustomPricing || false
@@ -502,6 +535,24 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       return;
     }
 
+    const factorNum = Number(form.customSubUnitFactor);
+    let altUnits = Array.isArray(form.altUnits) ? [...form.altUnits] : [];
+
+    if (form.enableMinorUnit && form.customSubUnitName && factorNum > 0) {
+      const minorUnit = form.customSubUnitName.trim().toLowerCase();
+      const minorFactor = 1 / factorNum; // e.g. 1 g = 0.001 kg
+      const minorPrice = form.customSubUnitPrice ? Number(form.customSubUnitPrice) : (Number(form.price) / factorNum);
+      const minorBarcode = form.customSubUnitBarcode ? form.customSubUnitBarcode.trim() : '';
+
+      altUnits = altUnits.filter((u) => u.unit !== minorUnit);
+      altUnits.push({
+        unit: minorUnit,
+        factor: minorFactor,
+        price: minorPrice,
+        barcode: minorBarcode
+      });
+    }
+
     const payload = {
       ...form,
       printName: form.regionalName || form.printName,
@@ -509,6 +560,12 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
         .split(',')
         .map((b) => b.trim())
         .filter(Boolean),
+      enableMinorUnit: Boolean(form.enableMinorUnit),
+      customSubUnitName: form.enableMinorUnit ? form.customSubUnitName : '',
+      customSubUnitFactor: form.enableMinorUnit ? form.customSubUnitFactor : '',
+      customSubUnitPrice: form.enableMinorUnit ? form.customSubUnitPrice : '',
+      customSubUnitBarcode: form.enableMinorUnit ? form.customSubUnitBarcode : '',
+      altUnits,
       comboItems: isCombo ? validComboItems : [],
       recipeItems: isComposite ? validIngredients : [],
       recipeYieldQty: isComposite ? (Number(form.recipeYieldQty) > 0 ? Number(form.recipeYieldQty) : 1) : 1,
@@ -621,7 +678,17 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                   const cat = categories.find((c) => c.id === p.categoryId);
                   const isCompositeRow = p.productType === 'composite' || p.isComposite;
                   const isComboRow = p.productType === 'combo';
-                  const producible = p.recipe?.producible ?? 0;
+                  
+                  const compositeIngredients = (p.recipe?.ingredients?.length ? p.recipe.ingredients : p.recipeItems) || [];
+                  const recipeYieldQty = Number(p.recipe?.yieldQty || p.recipeYieldQty) || 1;
+
+                  const producible = isCompositeRow && compositeIngredients.length > 0
+                    ? Math.max(0, Math.floor(Math.min(...compositeIngredients.map(item => {
+                        const material = productsById[item.productId];
+                        return material && Number(item.qty) > 0 ? ((material.stock || 0) / Number(item.qty)) * recipeYieldQty : 0;
+                      }))))
+                    : (p.recipe?.producible ?? 0);
+
                   const comboBuyable = isComboRow && p.comboItems && p.comboItems.length > 0
                     ? Math.max(0, Math.floor(Math.min(...p.comboItems.map(item => {
                         const material = productsById[item.productId];
@@ -653,7 +720,11 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                   );
                   
                   const typeInfo = PRODUCT_TYPE_LABELS[p.productType || 'standard'];
-                  const ingredientCount = p.recipe?.ingredients?.length ?? p.comboItems?.length ?? p.recipeItems?.length ?? 0;
+                  const ingredientCount = isCompositeRow
+                    ? (p.recipe?.ingredients?.length || p.recipeItems?.length || 0)
+                    : isComboRow
+                    ? (p.comboItems?.length || 0)
+                    : 0;
 
                   return (
                     <tr key={p.id} className="hover:bg-[color:var(--bg-subtle)]/50 transition-colors">
@@ -707,7 +778,20 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                           </td>
 
                           <td className="py-3 px-3 text-right font-bold text-[color:var(--text-primary)]">
-                            {money(p.price)}
+                            <div>{money(p.price)} / {p.unit}</div>
+                            {(() => {
+                              const subName = p.customSubUnitName || (p.unit?.toLowerCase() === 'kg' ? 'g' : ['ltr', 'l', 'liter', 'liters', 'litre', 'litres'].includes(p.unit?.toLowerCase()) ? 'ml' : '');
+                              const subFactor = Number(p.customSubUnitFactor) || (p.unit?.toLowerCase() === 'kg' || ['ltr', 'l', 'liter', 'liters', 'litre', 'litres'].includes(p.unit?.toLowerCase()) ? 1000 : 0);
+                              const subPrice = p.customSubUnitPrice || (subFactor && p.price ? Number(p.price) / subFactor : 0);
+                              if (subName && subFactor > 0 && subPrice > 0) {
+                                return (
+                                  <div className="text-[10px] text-indigo-600 dark:text-indigo-400 font-normal">
+                                    ₹{Number(subPrice).toFixed(4)} / {subName}
+                                  </div>
+                                );
+                              }
+                              return null;
+                            })()}
                           </td>
 
                           <td className="py-3 px-3 text-right text-xs">
@@ -844,32 +928,155 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
               </Field>
 
               {form.productType !== 'service' && (
-                <Field label="Unit of Measurement">
-                  <Select value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })}>
+                <Field label="Main Unit of Measurement">
+                  <Select
+                    value={form.unit}
+                    onChange={(e) => {
+                      const newUnit = e.target.value;
+                      const def = getDefaultSubUnit(newUnit);
+                      const isStandardSub = !!def.name;
+                      const priceNum = Number(form.price) || 0;
+                      const subPrice = def.factor && priceNum ? (priceNum / def.factor).toFixed(4) : form.customSubUnitPrice;
+                      setForm({
+                        ...form,
+                        unit: newUnit,
+                        enableMinorUnit: isStandardSub ? true : form.enableMinorUnit,
+                        customSubUnitName: isStandardSub ? def.name : form.customSubUnitName,
+                        customSubUnitFactor: isStandardSub ? def.factor : form.customSubUnitFactor,
+                        customSubUnitPrice: isStandardSub ? subPrice : form.customSubUnitPrice
+                      });
+                    }}
+                  >
                     {units.map((u) => (
                       <option key={u} value={u}>{u}</option>
                     ))}
                   </Select>
                 </Field>
               )}
-              {form.productType !== 'service' && String(form.unit).toLowerCase() === 'dozen' && (
-                <Field label="Quantity of 1 Dozen">
-                  <Input type="number" value={form.dozenQuantity} onChange={(e) => setForm({ ...form, dozenQuantity: Number(e.target.value) })} />
-                </Field>
-              )}
-              {form.productType !== 'service' && String(form.unit).toLowerCase() !== 'dozen' && String(form.unit).toLowerCase() !== 'kg' && !['ltr', 'l', 'liter', 'liters', 'litre', 'litres'].includes(String(form.unit).toLowerCase()) && (
-                <>
-                  <Field label="Custom Sub-Unit Name" hint="e.g. piece, slice (optional)">
-                    <Input value={form.customSubUnitName || ''} onChange={(e) => setForm({ ...form, customSubUnitName: e.target.value })} placeholder="Leave blank if none" />
-                  </Field>
-                  {form.customSubUnitName && (
-                    <Field label={`${form.customSubUnitName}(s) in 1 ${form.unit || 'unit'}`}>
-                      <Input type="number" step="any" value={form.customSubUnitFactor || ''} onChange={(e) => setForm({ ...form, customSubUnitFactor: Number(e.target.value) })} placeholder="e.g. 12" />
-                    </Field>
-                  )}
-                </>
-              )}
             </div>
+
+            {/* Sub-Unit / Minor Unit Configuration Block */}
+            {form.productType !== 'service' && (
+              <div className="p-3.5 rounded-xl border border-indigo-200 dark:border-indigo-800/80 bg-indigo-50/40 dark:bg-indigo-950/30 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Sliders className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                    <h4 className="text-xs font-bold text-[color:var(--text-primary)] uppercase tracking-wider">
+                      Minor / Sub-Unit Configuration
+                    </h4>
+                  </div>
+                  <label className="flex items-center gap-2 cursor-pointer text-xs font-bold text-indigo-600 dark:text-indigo-400">
+                    <input
+                      type="checkbox"
+                      checked={form.enableMinorUnit}
+                      onChange={(e) => {
+                        const enabled = e.target.checked;
+                        if (enabled && !form.customSubUnitName) {
+                          const def = getDefaultSubUnit(form.unit);
+                          const priceNum = Number(form.price) || 0;
+                          const subPrice = def.factor && priceNum ? (priceNum / def.factor).toFixed(4) : '';
+                          setForm({
+                            ...form,
+                            enableMinorUnit: true,
+                            customSubUnitName: def.name || 'pcs',
+                            customSubUnitFactor: def.factor || 1,
+                            customSubUnitPrice: subPrice
+                          });
+                        } else {
+                          setForm({ ...form, enableMinorUnit: enabled });
+                        }
+                      }}
+                      className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+                    />
+                    Enable Sub-Unit (e.g. g for kg, ml for ltr, pcs for dozen/box)
+                  </label>
+                </div>
+
+                {form.enableMinorUnit && (
+                  <div className="space-y-3 pt-2 border-t border-indigo-200/60 dark:border-indigo-800/60">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      <Field label="Minor Unit Name *" hint="e.g. g, gm, grams, ml, pcs">
+                        <Input
+                          value={form.customSubUnitName || ''}
+                          onChange={(e) => setForm({ ...form, customSubUnitName: e.target.value })}
+                          placeholder="e.g. g"
+                        />
+                        {String(form.unit).toLowerCase() === 'kg' && (
+                          <div className="flex items-center gap-1 mt-1 text-[10px]">
+                            <span className="text-[color:var(--text-muted)]">Presets:</span>
+                            {['g', 'gm', 'grams'].map((name) => (
+                              <button
+                                key={name}
+                                type="button"
+                                onClick={() => setForm({ ...form, customSubUnitName: name })}
+                                className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${
+                                  form.customSubUnitName === name
+                                    ? 'bg-indigo-600 text-white border-indigo-600'
+                                    : 'bg-[color:var(--bg-subtle)] text-[color:var(--text-secondary)] border-[color:var(--border-subtle)] hover:border-indigo-400'
+                                }`}
+                              >
+                                {name}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </Field>
+
+                      <Field label={`1 ${form.unit || 'unit'} = [ ? ] ${form.customSubUnitName || 'sub-units'}`}>
+                        <Input
+                          type="number"
+                          step="any"
+                          value={form.customSubUnitFactor || ''}
+                          onChange={(e) => {
+                            const factor = Number(e.target.value) || 0;
+                            const priceNum = Number(form.price) || 0;
+                            const subPrice = factor > 0 && priceNum ? (priceNum / factor).toFixed(4) : form.customSubUnitPrice;
+                            setForm({ ...form, customSubUnitFactor: e.target.value, customSubUnitPrice: subPrice });
+                          }}
+                          placeholder="e.g. 1000"
+                        />
+                      </Field>
+
+                      <Field label={`Price per 1 ${form.customSubUnitName || 'sub-unit'} (₹)`}>
+                        <Input
+                          type="number"
+                          step="any"
+                          value={form.customSubUnitPrice || ''}
+                          onChange={(e) => setForm({ ...form, customSubUnitPrice: e.target.value })}
+                          placeholder="Auto-calculated"
+                        />
+                      </Field>
+
+                      <Field label="Minor Unit Barcode">
+                        <Input
+                          value={form.customSubUnitBarcode || ''}
+                          onChange={(e) => setForm({ ...form, customSubUnitBarcode: e.target.value })}
+                          placeholder="Optional sub-unit barcode"
+                        />
+                      </Field>
+                    </div>
+
+                    {form.customSubUnitName && Number(form.customSubUnitFactor) > 0 && (
+                      <div className="p-2.5 rounded-lg bg-indigo-100/70 dark:bg-indigo-900/40 text-[11px] text-indigo-900 dark:text-indigo-200 flex flex-wrap items-center justify-between gap-2 font-medium">
+                        <div>
+                          💡 <strong>1 {form.unit}</strong> = <strong>{form.customSubUnitFactor} {form.customSubUnitName}</strong>
+                          {Number(form.price) > 0 && (
+                            <span className="ml-2">
+                              | Main Price: <strong>{money(form.price)} / {form.unit}</strong> (<strong>₹{Number(form.customSubUnitPrice || (Number(form.price) / Number(form.customSubUnitFactor))).toFixed(4)} / {form.customSubUnitName}</strong>)
+                            </span>
+                          )}
+                        </div>
+                        {Number(form.stock) > 0 && (
+                          <div className="font-bold text-emerald-700 dark:text-emerald-400">
+                            Total Stock: {form.stock} {form.unit} ({Number(form.stock) * Number(form.customSubUnitFactor)} {form.customSubUnitName})
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-3">
               <Field label="Primary Barcode">
@@ -1589,34 +1796,36 @@ function UnitsTab({ units, showToast, onRefresh }) {
  * ------------------------------------------------------------------ */
 
 function WarehousesTab({ warehouses, products, showToast, onRefresh }) {
-  const [selectedProduct, setSelectedProduct] = useState('');
   const [sourceWh, setSourceWh] = useState(warehouses[0]?.id || 'wh_main');
   const [targetWh, setTargetWh] = useState(warehouses[1]?.id || 'wh_shop');
-  const [transferQty, setTransferQty] = useState('10');
   const [transferReason, setTransferReason] = useState('Shop counter restock');
+  const [transferItems, setTransferItems] = useState([{ productId: '', quantity: '10' }]);
   const [loading, setLoading] = useState(false);
 
   const [editingWh, setEditingWh] = useState(null);
   const [showWhModal, setShowWhModal] = useState(false);
   const [whForm, setWhForm] = useState({ name: '', code: '', location: '' });
 
-  const productObj = (products || []).find((p) => p.id === selectedProduct);
-  
-  let tempWarehouses = productObj?.warehouses;
-  if (productObj && !tempWarehouses) {
-    tempWarehouses = {
-      wh_main: Math.max(0, (productObj.stock || 0) - 10),
-      wh_shop: Math.min(productObj.stock || 0, 10)
-    };
-  }
-  
-  const sourceStock = tempWarehouses?.[sourceWh] ?? 0;
-  const targetStock = tempWarehouses?.[targetWh] ?? 0;
+  const addTransferItem = () => {
+    setTransferItems((prev) => [...prev, { productId: '', quantity: '1' }]);
+  };
+
+  const updateTransferItem = (index, patch) => {
+    setTransferItems((prev) => {
+      const next = [...prev];
+      next[index] = { ...next[index], ...patch };
+      return next;
+    });
+  };
+
+  const removeTransferItem = (index) => {
+    setTransferItems((prev) => prev.filter((_, i) => i !== index));
+  };
 
   const handleTransfer = async (e) => {
     e?.preventDefault();
-    if (!selectedProduct || !sourceWh || !targetWh) {
-      showToast('Select product, source, and target warehouse.', 'error');
+    if (!sourceWh || !targetWh) {
+      showToast('Select source and target warehouses.', 'error');
       return;
     }
     if (sourceWh === targetWh) {
@@ -1624,17 +1833,28 @@ function WarehousesTab({ warehouses, products, showToast, onRefresh }) {
       return;
     }
 
+    const validItems = transferItems
+      .filter((i) => i.productId && Number(i.quantity) > 0)
+      .map((i) => ({ productId: i.productId, quantity: Number(i.quantity) }));
+
+    if (validItems.length === 0) {
+      showToast('Please add at least one product with a valid quantity to transfer.', 'error');
+      return;
+    }
+
     setLoading(true);
     try {
       const res = await api.post('/inventory/transfer', {
-        productId: selectedProduct,
         sourceWarehouseId: sourceWh,
         targetWarehouseId: targetWh,
-        quantity: transferQty,
+        productId: validItems[0]?.productId,
+        quantity: validItems[0]?.quantity,
+        items: validItems,
         reason: transferReason
       });
 
       showToast(res.message || 'Stock transferred successfully.');
+      setTransferItems([{ productId: '', quantity: '10' }]);
       onRefresh();
     } catch (err) {
       showToast(api.message(err, 'Stock transfer failed.'), 'error');
@@ -1721,67 +1941,120 @@ function WarehousesTab({ warehouses, products, showToast, onRefresh }) {
         ))}
       </div>
 
-      {/* Stock Transfer Calculator */}
+      {/* Multi-Product Stock Transfer Panel */}
       <div className="lg:col-span-2 space-y-3">
-        <Panel title="Warehouse to Shop Stock Transfer" icon={ArrowRightLeft}>
+        <Panel title="Multi-Product Warehouse Stock Transfer" icon={ArrowRightLeft}>
           <form onSubmit={handleTransfer} className="space-y-4">
-            <Field label="Select Product to Transfer">
-              <Select value={selectedProduct} onChange={(e) => setSelectedProduct(e.target.value)} required>
-                <option value="">-- Choose Product --</option>
-                {products
-                  .filter((p) => p.productType !== 'service' && (p.warehouses?.[sourceWh] || 0) > 0)
-                  .map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name} (Stock: {p.warehouses?.[sourceWh] || 0} {p.unit})
-                    </option>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Source Warehouse">
+                <Select value={sourceWh} onChange={(e) => setSourceWh(e.target.value)}>
+                  {(warehouses || []).map((w) => (
+                    <option key={w.id} value={w.id}>{w.name}</option>
                   ))}
-              </Select>
+                </Select>
+              </Field>
+
+              <Field label="Destination Warehouse">
+                <Select value={targetWh} onChange={(e) => setTargetWh(e.target.value)}>
+                  {(warehouses || []).map((w) => (
+                    <option key={w.id} value={w.id}>{w.name}</option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
+
+            {/* Transfer Items Manifest */}
+            <div className="space-y-3 p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)]">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">
+                  Transfer Items Manifest ({transferItems.length})
+                </h4>
+                <Button type="button" size="sm" variant="secondary" icon={Plus} onClick={addTransferItem}>
+                  Add Product
+                </Button>
+              </div>
+
+              <div className="space-y-2">
+                {transferItems.map((item, idx) => {
+                  const prod = (products || []).find((p) => p.id === item.productId);
+                  const sourceStock = prod?.warehouses?.[sourceWh] ?? (sourceWh === 'wh_shop' ? prod?.stock || 0 : Math.max(0, (prod?.stock || 0) - 10));
+                  const targetStock = prod?.warehouses?.[targetWh] ?? (targetWh === 'wh_shop' ? prod?.stock || 0 : Math.max(0, (prod?.stock || 0) - 10));
+
+                  const selectedProductIds = transferItems.map((i, iIdx) => iIdx !== idx && i.productId).filter(Boolean);
+
+                  return (
+                    <div key={idx} className="grid grid-cols-12 gap-2 items-center p-2.5 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)]">
+                      <div className="col-span-6 md:col-span-5">
+                        <Select
+                          value={item.productId}
+                          onChange={(e) => updateTransferItem(idx, { productId: e.target.value })}
+                          required
+                        >
+                          <option value="">-- Choose Product --</option>
+                          {(products || [])
+                            .filter((p) => p.productType !== 'service' && (!selectedProductIds.includes(p.id) || p.id === item.productId))
+                            .map((p) => {
+                              const stk = p.warehouses?.[sourceWh] ?? 0;
+                              return (
+                                <option key={p.id} value={p.id}>
+                                  {p.name} (Available: {stk} {p.unit})
+                                </option>
+                              );
+                            })}
+                        </Select>
+                      </div>
+
+                      <div className="col-span-3 md:col-span-3 text-xs">
+                        {prod ? (
+                          <div className="flex flex-col">
+                            <span className="font-bold text-indigo-600 dark:text-indigo-400">Src: {sourceStock} {prod.unit}</span>
+                            <span className="text-[10px] text-[color:var(--text-muted)]">Dst: {targetStock} {prod.unit}</span>
+                          </div>
+                        ) : (
+                          <span className="text-[color:var(--text-muted)]">—</span>
+                        )}
+                      </div>
+
+                      <div className="col-span-2 md:col-span-3">
+                        <Input
+                          type="number"
+                          min="1"
+                          max={prod ? sourceStock || 99999 : 99999}
+                          value={item.quantity}
+                          onChange={(e) => updateTransferItem(idx, { quantity: e.target.value })}
+                          placeholder="Qty"
+                          required
+                        />
+                      </div>
+
+                      <div className="col-span-1 text-right">
+                        {transferItems.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => removeTransferItem(idx)}
+                            className="p-1.5 rounded-lg text-red-500 hover:bg-red-500/10 transition-colors"
+                            title="Remove Item"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <Field label="Transfer Reason / Reference">
+              <Input
+                value={transferReason}
+                onChange={(e) => setTransferReason(e.target.value)}
+                placeholder="e.g. Counter restock / Morning shipment"
+              />
             </Field>
 
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Source Location">
-                <Select value={sourceWh} onChange={(e) => setSourceWh(e.target.value)}>
-                  {warehouses.map((w) => (
-                    <option key={w.id} value={w.id}>{w.name}</option>
-                  ))}
-                </Select>
-              </Field>
-
-              <Field label="Destination Location">
-                <Select value={targetWh} onChange={(e) => setTargetWh(e.target.value)}>
-                  {warehouses.map((w) => (
-                    <option key={w.id} value={w.id}>{w.name}</option>
-                  ))}
-                </Select>
-              </Field>
-            </div>
-
-            {productObj && (
-              <div className="p-3 rounded-xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 flex items-center justify-around text-xs">
-                <div>
-                  <div className="text-[color:var(--text-muted)] font-medium">Source Stock ({warehouses.find((w) => w.id === sourceWh)?.name})</div>
-                  <div className="text-lg font-bold text-indigo-600">{sourceStock} {productObj.unit}</div>
-                </div>
-                <ArrowRightLeft className="h-5 w-5 text-indigo-500" />
-                <div>
-                  <div className="text-[color:var(--text-muted)] font-medium">Destination Stock ({warehouses.find((w) => w.id === targetWh)?.name})</div>
-                  <div className="text-lg font-bold text-indigo-600">{targetStock} {productObj.unit}</div>
-                </div>
-              </div>
-            )}
-
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Transfer Quantity">
-                <Input type="number" min="1" max={sourceStock || 9999} value={transferQty} onChange={(e) => setTransferQty(e.target.value)} required />
-              </Field>
-
-              <Field label="Transfer Reason / Ref">
-                <Input value={transferReason} onChange={(e) => setTransferReason(e.target.value)} placeholder="e.g. Morning counter refill" />
-              </Field>
-            </div>
-
-            <Button icon={ArrowRightLeft} type="submit" disabled={loading || !selectedProduct} className="w-full">
-              {loading ? 'Processing Transfer...' : 'Execute Stock Transfer'}
+            <Button icon={ArrowRightLeft} type="submit" disabled={loading} className="w-full">
+              {loading ? 'Executing Stock Transfer...' : `Execute Multi-Product Transfer (${transferItems.filter(i => i.productId && Number(i.quantity) > 0).length} Product(s))`}
             </Button>
           </form>
         </Panel>
@@ -1931,7 +2204,7 @@ function HistoryTab({ products }) {
             <tbody className="divide-y divide-[color:var(--border-subtle)] font-mono">
               {filtered.map((m) => (
                 <tr key={m.id}>
-                  <td className="py-2.5 px-3 font-sans text-[color:var(--text-secondary)]">{fmtDateTime(m.date)}</td>
+                  <td className="py-2.5 px-3 font-sans text-[color:var(--text-secondary)]">{m.dateTime || fmtDateTime(m.timestamp || m.date)}</td>
                   <td className="py-2.5 px-3 font-sans font-bold text-[color:var(--text-primary)]">{m.productName}</td>
                   <td className="py-2.5 px-3 font-sans">
                     <Badge tone={MOVEMENT_TONE[m.type] || 'neutral'}>{m.type}</Badge>
@@ -1965,11 +2238,13 @@ function PricesheetTab({ products, showToast, onRefresh }) {
   const [priceSheets, setPriceSheets] = useState([]);
   const [showSheetModal, setShowSheetModal] = useState(false);
   const [editingSheet, setEditingSheet] = useState(null);
-  const [sheetForm, setSheetForm] = useState({ name: '', code: '', customerType: 'Retail', isActive: true });
+  const [sheetForm, setSheetForm] = useState({ name: '', code: '', customerType: 'Retail', defaultDiscountPercent: 0, isActive: true });
   
   // Custom Pricing State
   const [manageSheet, setManageSheet] = useState(null);
+  const [sheetDiscount, setSheetDiscount] = useState(0);
   const [pricingMap, setPricingMap] = useState({});
+  const [discountMap, setDiscountMap] = useState({});
 
   const fetchPriceSheets = () => {
     api.get('/price-sheets').then((res) => setPriceSheets(Array.isArray(res) ? res : res?.data || [])).catch(() => {});
@@ -2001,13 +2276,19 @@ function PricesheetTab({ products, showToast, onRefresh }) {
   // Price Sheet CRUD Methods
   const openAddSheet = () => {
     setEditingSheet(null);
-    setSheetForm({ name: '', code: '', customerType: 'Retail', isActive: true });
+    setSheetForm({ name: '', code: '', customerType: 'Retail', defaultDiscountPercent: 0, isActive: true });
     setShowSheetModal(true);
   };
 
   const openEditSheet = (s) => {
     setEditingSheet(s);
-    setSheetForm({ name: s.name, code: s.code, customerType: s.customerType, isActive: s.isActive });
+    setSheetForm({
+      name: s.name,
+      code: s.code,
+      customerType: s.customerType || 'Retail',
+      defaultDiscountPercent: s.defaultDiscountPercent || 0,
+      isActive: s.isActive !== false
+    });
     setShowSheetModal(true);
   };
 
@@ -2015,11 +2296,15 @@ function PricesheetTab({ products, showToast, onRefresh }) {
     e?.preventDefault();
     if (!sheetForm.name) return showToast('Sheet name required', 'error');
     try {
+      const payload = {
+        ...sheetForm,
+        defaultDiscountPercent: Number(sheetForm.defaultDiscountPercent) || 0
+      };
       if (editingSheet) {
-        await api.put(`/price-sheets/${editingSheet.id}`, sheetForm);
+        await api.put(`/price-sheets/${editingSheet.id}`, payload);
         showToast('Price sheet updated.');
       } else {
-        await api.post('/price-sheets', sheetForm);
+        await api.post('/price-sheets', payload);
         showToast('Price sheet created.');
       }
       setShowSheetModal(false);
@@ -2052,18 +2337,24 @@ function PricesheetTab({ products, showToast, onRefresh }) {
   // Custom Pricing Methods
   const openManagePricing = (s) => {
     setManageSheet(s);
-    setPricingMap({ ...s.pricingMap });
+    setSheetDiscount(s.defaultDiscountPercent || 0);
+    setPricingMap({ ...(s.pricingMap || {}) });
+    setDiscountMap({ ...(s.discountMap || {}) });
   };
 
   const saveCustomPricing = async () => {
     setLoading(true);
     try {
-      await api.put(`/price-sheets/${manageSheet.id}`, { pricingMap });
-      showToast('Custom pricing updated.');
+      await api.put(`/price-sheets/${manageSheet.id}`, {
+        defaultDiscountPercent: Number(sheetDiscount) || 0,
+        pricingMap,
+        discountMap
+      });
+      showToast('Custom pricing & discounts updated.');
       setManageSheet(null);
       fetchPriceSheets();
     } catch (err) {
-      showToast(api.message(err, 'Failed to save custom pricing.'), 'error');
+      showToast(api.message(err, 'Failed to save pricing.'), 'error');
     } finally {
       setLoading(false);
     }
@@ -2075,13 +2366,13 @@ function PricesheetTab({ products, showToast, onRefresh }) {
       <div className="flex gap-2 border-b border-[color:var(--border-subtle)] pb-2">
         <button
           onClick={() => setSubTab('matrix')}
-          className={`px-4 py-2 text-sm font-bold rounded-t-lg ${subTab === 'matrix' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-[color:var(--text-muted)] hover:text-[color:var(--text-primary)]'}`}
+          className={`px-4 py-2 text-sm font-bold rounded-t-lg ${subTab === 'matrix' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-[color:var(--text-primary)] hover:text-indigo-600'}`}
         >
           Global Price Matrix
         </button>
         <button
           onClick={() => setSubTab('sheets')}
-          className={`px-4 py-2 text-sm font-bold rounded-t-lg ${subTab === 'sheets' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-[color:var(--text-muted)] hover:text-[color:var(--text-primary)]'}`}
+          className={`px-4 py-2 text-sm font-bold rounded-t-lg ${subTab === 'sheets' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-[color:var(--text-primary)] hover:text-indigo-600'}`}
         >
           Custom Price Sheets
         </button>
@@ -2092,7 +2383,7 @@ function PricesheetTab({ products, showToast, onRefresh }) {
           <div className="flex items-center justify-between bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
             <div>
               <h3 className="font-bold text-sm text-[color:var(--text-primary)]">Global Pricing Grid</h3>
-              <p className="text-xs text-[color:var(--text-muted)]">Quickly update standard retail, purchase, MRP, and wholesale pricing across all items.</p>
+              <p className="text-xs text-[color:var(--text-secondary)] font-medium">Quickly update standard retail, purchase, MRP, and wholesale pricing across all items.</p>
             </div>
             <Button icon={Save} onClick={saveGlobalPrices} disabled={loading}>{loading ? 'Saving...' : 'Save All Price Changes'}</Button>
           </div>
@@ -2100,7 +2391,7 @@ function PricesheetTab({ products, showToast, onRefresh }) {
           <Panel title="Product Price Matrix" icon={IndianRupee}>
             <div className="overflow-x-auto">
               <table className="w-full text-xs text-left">
-                <thead className="bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-muted)] uppercase border-b border-[color:var(--border-subtle)]">
+                <thead className="bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-primary)] uppercase border-b border-[color:var(--border-subtle)]">
                   <tr>
                     <th className="py-2.5 px-3">Product Name</th>
                     <th className="py-2.5 px-3">Category</th>
@@ -2116,11 +2407,11 @@ function PricesheetTab({ products, showToast, onRefresh }) {
                     return (
                       <tr key={r.id}>
                         <td className="py-2 px-3 font-bold text-[color:var(--text-primary)]">{r.name}</td>
-                        <td className="py-2 px-3 text-[color:var(--text-muted)]">{r.category} {isService && <Badge tone="info" className="ml-1">Service</Badge>}</td>
+                        <td className="py-2 px-3 font-medium text-[color:var(--text-primary)]">{r.category} {isService && <Badge tone="info" className="ml-1">Service</Badge>}</td>
                         {isService ? (
                           <td colSpan={4} className="py-2 px-3">
                             <div className="flex items-center justify-end gap-3 bg-[color:var(--bg-subtle)]/30 rounded-lg p-1.5 border border-[color:var(--border-subtle)] mr-2">
-                              <span className="text-sm uppercase font-bold text-[color:var(--text-muted)] tracking-wider">Service Price:</span>
+                              <span className="text-sm uppercase font-bold text-[color:var(--text-primary)] tracking-wider">Service Price:</span>
                               <Input type="number" step="0.01" value={r.price} onChange={(e) => updatePrice(r.id, 'price', e.target.value)} className="w-32 text-right font-bold bg-white dark:bg-black" />
                             </div>
                           </td>
@@ -2155,7 +2446,7 @@ function PricesheetTab({ products, showToast, onRefresh }) {
           <div className="flex items-center justify-between bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
             <div>
               <h3 className="font-bold text-sm text-[color:var(--text-primary)]">Custom Price Sheets</h3>
-              <p className="text-xs text-[color:var(--text-muted)]">Create tailored price lists for VIPs, specific regions, or customer groups.</p>
+              <p className="text-xs text-[color:var(--text-secondary)] font-medium">Create tailored price lists with global and per-item discounts for customer groups.</p>
             </div>
             <Button icon={Plus} onClick={openAddSheet}>Create Price Sheet</Button>
           </div>
@@ -2165,33 +2456,38 @@ function PricesheetTab({ products, showToast, onRefresh }) {
               <div key={s.id} className="p-4 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] flex flex-col gap-3">
                 <div className="flex items-start justify-between">
                   <div>
-                    <div className="font-bold text-sm text-[color:var(--text-primary)] flex items-center gap-2">
+                    <div className="font-bold text-sm text-[color:var(--text-primary)] flex flex-wrap items-center gap-1.5">
                       {s.name}
                       <Badge tone={s.isActive ? 'success' : 'neutral'}>{s.isActive ? 'Active' : 'Inactive'}</Badge>
+                      {(s.defaultDiscountPercent || 0) > 0 && (
+                        <Badge tone="accent">{s.defaultDiscountPercent}% Discount</Badge>
+                      )}
                     </div>
-                    <div className="text-xs text-[color:var(--text-muted)] mt-1">{s.code} • {s.customerType}</div>
+                    <div className="text-xs font-semibold text-[color:var(--text-primary)] mt-1">{s.code} • {s.customerType}</div>
                   </div>
                   <div className="flex gap-1">
-                    <button onClick={() => toggleSheetActive(s)} className="p-1 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)]">
+                    <button onClick={() => toggleSheetActive(s)} className="p-1 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-primary)]">
                       {s.isActive ? <XCircle className="h-4 w-4" /> : <CheckCircle className="h-4 w-4" />}
                     </button>
-                    <button onClick={() => openEditSheet(s)} className="p-1 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)] hover:text-indigo-600">
+                    <button onClick={() => openEditSheet(s)} className="p-1 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-primary)] hover:text-indigo-600">
                       <Edit3 className="h-4 w-4" />
                     </button>
-                    <button onClick={() => deleteSheet(s.id)} className="p-1 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)] hover:text-red-600">
+                    <button onClick={() => deleteSheet(s.id)} className="p-1 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-primary)] hover:text-red-600">
                       <Trash2 className="h-4 w-4" />
                     </button>
                   </div>
                 </div>
-                <div className="mt-auto pt-3 border-t border-[color:var(--border-subtle)] flex justify-between items-center">
-                  <span className="text-xs font-medium text-[color:var(--text-secondary)]">{Object.keys(s.pricingMap || {}).length} custom prices</span>
+                <div className="mt-auto pt-3 border-t border-[color:var(--border-subtle)] flex justify-between items-center text-xs">
+                  <span className="font-bold text-[color:var(--text-primary)]">
+                    {Object.keys(s.pricingMap || {}).length + Object.keys(s.discountMap || {}).length} custom overrides
+                  </span>
                   <Button size="sm" variant="secondary" onClick={() => openManagePricing(s)}>Manage Pricing</Button>
                 </div>
               </div>
             ))}
             {priceSheets.length === 0 && (
               <div className="col-span-full">
-                <EmptyState icon={FileSpreadsheet} title="No Price Sheets" description="Create a price sheet to assign custom prices to your products." />
+                <EmptyState icon={FileSpreadsheet} title="No Price Sheets" description="Create a price sheet to assign custom prices and discounts to your products." />
               </div>
             )}
           </div>
@@ -2218,6 +2514,17 @@ function PricesheetTab({ products, showToast, onRefresh }) {
                 </Select>
               </Field>
             </div>
+            <Field label="Default Sheet Discount (%)" hint="Applies to all products on this sheet unless customized per product.">
+              <Input
+                type="number"
+                step="0.1"
+                min="0"
+                max="100"
+                value={sheetForm.defaultDiscountPercent}
+                onChange={(e) => setSheetForm({ ...sheetForm, defaultDiscountPercent: e.target.value })}
+                placeholder="e.g. 10"
+              />
+            </Field>
             <div className="flex justify-end gap-2 pt-3 border-t border-[color:var(--border-subtle)]">
               <Button variant="secondary" onClick={() => setShowSheetModal(false)}>Cancel</Button>
               <Button icon={Save} type="submit">Save Price Sheet</Button>
@@ -2228,46 +2535,119 @@ function PricesheetTab({ products, showToast, onRefresh }) {
 
       {/* Manage Custom Pricing Drawer / Modal */}
       {manageSheet && (
-        <Modal open={true} title={`Manage Pricing: ${manageSheet.name}`} icon={Tag} onClose={() => setManageSheet(null)}>
-          <div className="space-y-4">
-            <p className="text-xs text-[color:var(--text-muted)]">Set custom prices for this sheet. Leave blank to use the standard global price.</p>
-            <div className="max-h-[60vh] overflow-y-auto pr-2">
+        <Modal
+          open={true}
+          title={`Manage Pricing: ${manageSheet.name}`}
+          icon={Tag}
+          size="fullscreen"
+          className="max-w-[96vw] w-[96vw] max-h-[92vh] h-[92vh] flex flex-col justify-between"
+          onClose={() => setManageSheet(null)}
+        >
+          <div className="space-y-4 flex-1 flex flex-col min-h-0">
+            <div className="p-3 rounded-xl bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs shrink-0">
+              <div>
+                <div className="font-bold text-indigo-700 dark:text-indigo-400">Sheet-Level Discount (%)</div>
+                <div className="text-[11px] text-indigo-900 dark:text-indigo-200 font-medium">This discount percentage automatically applies across all items in this sheet.</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max="100"
+                  value={sheetDiscount}
+                  onChange={(e) => setSheetDiscount(e.target.value)}
+                  className="w-24 text-right font-bold bg-white dark:bg-black"
+                  placeholder="0"
+                />
+                <span className="font-bold text-indigo-600">%</span>
+              </div>
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-y-auto pr-1">
               <table className="w-full text-xs text-left">
-                <thead className="bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)] font-bold uppercase sticky top-0 z-10">
+                <thead className="bg-[color:var(--bg-subtle)] text-[color:var(--text-primary)] font-bold uppercase sticky top-0 z-10">
                   <tr>
-                    <th className="py-2 px-3">Product Name</th>
-                    <th className="py-2 px-3 text-right">Standard Price</th>
-                    <th className="py-2 px-3 text-right">Custom Price (₹)</th>
+                    <th className="py-2.5 px-3">Product Name</th>
+                    <th className="py-2.5 px-3 text-right">Standard Price</th>
+                    <th className="py-2.5 px-3 text-right">Custom Discount (%)</th>
+                    <th className="py-2.5 px-3 text-right">Custom Price (₹)</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[color:var(--border-subtle)]">
                   {rows.map(p => {
                     const isService = String(p.productType).toLowerCase() === 'service';
+                    const stdPrice = Number(p.price) || 0;
+                    const sheetPct = Number(sheetDiscount) || 0;
+                    const calcDefaultPrice = stdPrice > 0 ? (stdPrice * (1 - sheetPct / 100)) : 0;
+                    
+                    const hasCustomDiscount = discountMap[p.id] !== undefined && discountMap[p.id] !== '';
+                    const hasCustomPrice = pricingMap[p.id] !== undefined && pricingMap[p.id] !== '';
+                    const isOverridden = hasCustomDiscount || hasCustomPrice;
+
                     return (
-                      <tr key={p.id} className={pricingMap[p.id] ? 'bg-indigo-50/50 dark:bg-indigo-900/10' : ''}>
-                        <td className="py-2 px-3 font-medium text-[color:var(--text-primary)]">
-                          {p.name} {isService && <Badge tone="info" className="ml-2">Service</Badge>}
+                      <tr key={p.id} className={isOverridden ? 'bg-indigo-50/40 dark:bg-indigo-950/30' : ''}>
+                        <td className="py-2 px-3">
+                          <div className="font-bold text-[color:var(--text-primary)]">
+                            {p.name} {isService && <Badge tone="info" className="ml-1">Service</Badge>}
+                          </div>
+                          <div className="text-[10px] text-[color:var(--text-secondary)] font-semibold flex items-center gap-1.5 mt-0.5">
+                            <span>{p.category}</span>
+                            {isOverridden ? (
+                              <Badge tone="success">Custom Override</Badge>
+                            ) : sheetPct > 0 ? (
+                              <Badge tone="accent">{sheetPct}% Sheet Discount Applied</Badge>
+                            ) : (
+                              <Badge tone="neutral">Standard Price</Badge>
+                            )}
+                          </div>
                         </td>
-                        <td className="py-2 px-3 text-right text-[color:var(--text-muted)]">
-                          {isService ? <span className="text-sm uppercase font-bold tracking-wider mr-1">Service Price:</span> : ''}
-                          {money(p.price)}
+
+                        <td className="py-2 px-3 text-right text-[color:var(--text-primary)] font-bold font-mono">
+                          {money(stdPrice)}
                         </td>
+
+                        <td className="py-2 px-3 text-right">
+                          <Input
+                            type="number"
+                            step="0.1"
+                            placeholder={sheetPct > 0 ? `${sheetPct}% (Default)` : '0%'}
+                            value={discountMap[p.id] !== undefined ? discountMap[p.id] : ''}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              if (val === '' || val === null) {
+                                setDiscountMap(prev => { const n = { ...prev }; delete n[p.id]; return n; });
+                                setPricingMap(prev => { const n = { ...prev }; delete n[p.id]; return n; });
+                              } else {
+                                const pct = Number(val) || 0;
+                                const calcPrice = stdPrice > 0 ? Number((stdPrice * (1 - pct / 100)).toFixed(2)) : 0;
+                                setDiscountMap(prev => ({ ...prev, [p.id]: val }));
+                                setPricingMap(prev => ({ ...prev, [p.id]: calcPrice }));
+                              }
+                            }}
+                            className="w-24 text-right ml-auto"
+                          />
+                        </td>
+
                         <td className="py-2 px-3 text-right">
                           <Input
                             type="number"
                             step="0.01"
-                            placeholder="Standard"
-                            value={pricingMap[p.id] || ''}
+                            placeholder={calcDefaultPrice > 0 ? calcDefaultPrice.toFixed(2) : 'Standard'}
+                            value={pricingMap[p.id] !== undefined ? pricingMap[p.id] : ''}
                             onChange={(e) => {
                               const val = e.target.value;
-                              setPricingMap(prev => {
-                                const next = { ...prev };
-                                if (!val) delete next[p.id];
-                                else next[p.id] = Number(val);
-                                return next;
-                              });
+                              if (val === '' || val === null) {
+                                setPricingMap(prev => { const n = { ...prev }; delete n[p.id]; return n; });
+                                setDiscountMap(prev => { const n = { ...prev }; delete n[p.id]; return n; });
+                              } else {
+                                const priceVal = Number(val) || 0;
+                                const calcPct = stdPrice > 0 ? Number((((stdPrice - priceVal) / stdPrice) * 100).toFixed(2)) : 0;
+                                setPricingMap(prev => ({ ...prev, [p.id]: val }));
+                                setDiscountMap(prev => ({ ...prev, [p.id]: calcPct }));
+                              }
                             }}
-                            className="w-24 text-right ml-auto"
+                            className="w-28 text-right font-bold ml-auto"
                           />
                         </td>
                       </tr>
@@ -2276,9 +2656,10 @@ function PricesheetTab({ products, showToast, onRefresh }) {
                 </tbody>
               </table>
             </div>
-            <div className="flex justify-end gap-2 pt-3 border-t border-[color:var(--border-subtle)]">
+
+            <div className="flex justify-end gap-2 pt-3 border-t border-[color:var(--border-subtle)] shrink-0 mt-auto">
               <Button variant="secondary" onClick={() => setManageSheet(null)}>Cancel</Button>
-              <Button icon={Save} onClick={saveCustomPricing} disabled={loading}>{loading ? 'Saving...' : 'Save Pricing'}</Button>
+              <Button icon={Save} onClick={saveCustomPricing} disabled={loading}>{loading ? 'Saving...' : 'Save Pricing & Discounts'}</Button>
             </div>
           </div>
         </Modal>
@@ -2291,15 +2672,80 @@ function PricesheetTab({ products, showToast, onRefresh }) {
  * Import / Export Tab (Stories 8 & 16)
  * ------------------------------------------------------------------ */
 
+function parseCSVContent(text) {
+  const cleanText = text.replace(/^\uFEFF/, '');
+  const lines = cleanText.split(/\r?\n/).filter((l) => l.trim() !== '');
+  if (lines.length < 1) return [];
+
+  const parseLine = (line) => {
+    const res = [];
+    let cur = '';
+    let inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') {
+        if (inQ && line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQ = !inQ;
+        }
+      } else if (c === ',' && !inQ) {
+        res.push(cur.trim());
+        cur = '';
+      } else {
+        cur += c;
+      }
+    }
+    res.push(cur.trim());
+    return res;
+  };
+
+  // Find real header row by matching common product table keywords
+  const headerKeywords = ['name', 'product', 'item', 'barcode', 'price', 'selling', 'unit', 'code', 'stock', 'qty', 'hsn'];
+  let headerIdx = 0;
+
+  for (let i = 0; i < Math.min(lines.length, 10); i++) {
+    const parsedCols = parseLine(lines[i]).map((h) => h.replace(/^\uFEFF/, '').trim().toLowerCase());
+    if (parsedCols.length > 1) {
+      const matchCount = parsedCols.filter((col) =>
+        headerKeywords.some((kw) => col.includes(kw))
+      ).length;
+      if (matchCount >= 2) {
+        headerIdx = i;
+        break;
+      }
+    }
+  }
+
+  const headers = parseLine(lines[headerIdx]).map((h) => h.replace(/^\uFEFF/, '').trim());
+  const rows = [];
+
+  for (let i = headerIdx + 1; i < lines.length; i++) {
+    const values = parseLine(lines[i]);
+    // Skip row if completely empty or all values are blank
+    if (values.length === 0 || values.every((v) => !v || v.trim() === '')) continue;
+    const rowObj = {};
+    headers.forEach((h, idx) => {
+      rowObj[h] = values[idx] !== undefined ? values[idx] : '';
+    });
+    rows.push(rowObj);
+  }
+
+  return rows;
+}
+
 function ImportExportTab({ products, categories, showToast, onRefresh }) {
   const [fileText, setFileText] = useState('');
   const [importSummary, setImportSummary] = useState(null);
   const [loading, setLoading] = useState(false);
 
   const downloadSampleCSV = () => {
-    const csvContent = "name,regionalName,categoryId,productType,unit,barcode,purchasePrice,price,mrp,wholesalePrice,stock,minStock,hsn,taxRate\n" +
-      "Organic Apples,ஆப்பிள்,cat_1,standard,kg,89012345999,100,150,160,130,50,10,0808,5\n" +
-      "Hair Trim Service,ஹேர் கட்,,service,pcs,SERV001,0,100,100,100,0,0,,0\n";
+    const csvContent =
+      "Product Name,Regional Name,Category,Unit,Barcode,Purchase Price,Selling Price,MRP,Wholesale Price,Current Stock,Min Stock,HSN,Tax Rate\n" +
+      "Organic Apples,ஆப்பிள்,Fruits,kg,89012345999,100,150,160,130,50,10,0808,5\n" +
+      "Amul Milk 1L,பால்,Dairy,ltr,89012345888,50,60,62,55,100,20,0401,0\n" +
+      "Hair Trim Service,ஹேர் கட்,Services,pcs,SERV001,0,100,100,100,0,0,,0\n";
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -2310,46 +2756,44 @@ function ImportExportTab({ products, categories, showToast, onRefresh }) {
     URL.revokeObjectURL(url);
   };
 
-  const handleFileUpload = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (evt) => setFileText(evt.target.result);
-    reader.readAsText(file);
-  };
+  const autoProcessImport = async (text) => {
+    if (!text || !text.trim()) return showToast('Selected CSV file is empty.', 'error');
 
-  const processImport = async () => {
-    if (!fileText.trim()) return showToast('Please select a valid CSV file first.', 'error');
-
-    const lines = fileText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    if (lines.length < 2) return showToast('CSV file is empty or missing data rows.', 'error');
-
-    const headers = lines[0].split(',').map((h) => h.trim());
-    const parsedProducts = [];
-
-    for (let i = 1; i < lines.length; i++) {
-      const cols = lines[i].split(',').map((c) => c.replace(/^"|"$/g, '').trim());
-      if (cols.length < 2) continue;
-
-      const rowObj = {};
-      headers.forEach((h, idx) => {
-        rowObj[h] = cols[idx] || '';
-      });
-
-      parsedProducts.push(rowObj);
-    }
+    const parsedProducts = parseCSVContent(text);
+    if (parsedProducts.length === 0) return showToast('CSV file is empty or missing data rows.', 'error');
 
     setLoading(true);
+    showToast(`Processing CSV with ${parsedProducts.length} items...`);
+
     try {
       const res = await api.post('/products/bulk-import', { products: parsedProducts });
-      setImportSummary(res.summary || { importedCount: res.count, failedCount: 0, errors: [] });
-      showToast(res.message || 'Import processed.');
+      const summary = res.summary || {
+        importedCount: res.data?.length || 0,
+        updatedCount: 0,
+        failedCount: 0,
+        errors: []
+      };
+      setImportSummary(summary);
+      showToast(res.message || 'Bulk CSV Import & Update completed!');
       onRefresh();
     } catch (err) {
       showToast(api.message(err, 'Bulk import failed.'), 'error');
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const content = evt.target.result;
+      setFileText(content);
+      autoProcessImport(content);
+    };
+    reader.readAsText(file);
+    e.target.value = ''; // Reset file input
   };
 
   const handleExportCSV = () => {
@@ -2390,30 +2834,52 @@ function ImportExportTab({ products, categories, showToast, onRefresh }) {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       {/* Excel / CSV Import Section */}
-      <Panel title="Bulk Excel / CSV Product Import" icon={Upload}>
+      <Panel title="Auto Bulk Product & Stock CSV Import" icon={Upload}>
         <div className="space-y-4">
           <div className="p-3 rounded-xl bg-[color:var(--bg-subtle)] border border-[color:var(--border-subtle)] text-xs space-y-2">
-            <div className="font-bold text-[color:var(--text-primary)]">Import Instructions:</div>
-            <p className="text-[color:var(--text-muted)]">Upload a CSV file containing columns for name, regionalName, price, barcode, purchasePrice, stock, etc.</p>
+            <div className="font-bold text-[color:var(--text-primary)]">Instant Auto-Import & Update:</div>
+            <p className="text-[color:var(--text-secondary)] font-medium">Selecting a CSV file will automatically create new items or update existing items (matching barcode or name), stock balances, categories, and pricing instantly.</p>
             <Button icon={Download} size="sm" variant="secondary" onClick={downloadSampleCSV}>
               Download Sample CSV Template
             </Button>
           </div>
 
-          <Field label="Choose CSV File">
-            <input type="file" accept=".csv" onChange={handleFileUpload} className="block w-full text-xs text-[color:var(--text-primary)] file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-indigo-600 file:text-white hover:file:bg-indigo-700" />
+          <Field label="Upload CSV File (Auto-Imports & Updates Instantly)">
+            <input
+              type="file"
+              accept=".csv"
+              onChange={handleFileUpload}
+              disabled={loading}
+              className="block w-full text-xs text-[color:var(--text-primary)] file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-indigo-600 file:text-white hover:file:bg-indigo-700 disabled:opacity-50"
+            />
           </Field>
 
-          <Button icon={Upload} onClick={processImport} disabled={loading || !fileText}>
-            {loading ? 'Processing Import...' : 'Import Products'}
-          </Button>
+          {loading && (
+            <div className="p-3 rounded-xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 text-xs font-bold text-indigo-700 dark:text-indigo-300 animate-pulse">
+              ⏳ Auto-importing items, stock balances, and categories from CSV...
+            </div>
+          )}
 
           {importSummary && (
             <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-2 text-xs">
               <div className="font-bold text-emerald-600">Import Summary:</div>
-              <div>Successfully imported: {importSummary.importedCount} product(s)</div>
+              <div className="grid grid-cols-2 gap-2 text-[color:var(--text-primary)] font-medium">
+                <div>✨ New Created: <span className="font-bold text-emerald-600">{importSummary.importedCount || 0}</span></div>
+                <div>🔄 Updated: <span className="font-bold text-indigo-600">{importSummary.updatedCount || 0}</span></div>
+              </div>
               {importSummary.failedCount > 0 && (
-                <div className="text-red-500 font-medium">Validation errors: {importSummary.failedCount} row(s) skipped</div>
+                <div className="mt-2 space-y-1">
+                  <div className="text-amber-600 dark:text-amber-400 font-bold">
+                    ⚠️ Validation Warnings: {importSummary.failedCount} row(s) skipped
+                  </div>
+                  <div className="max-h-28 overflow-y-auto space-y-1 p-2 rounded bg-amber-50 dark:bg-amber-950/40 text-[11px] font-mono text-amber-800 dark:text-amber-200">
+                    {importSummary.errors.map((err, idx) => (
+                      <div key={idx}>
+                        Row {err.row}: <strong>{err.name}</strong> — {err.message}
+                      </div>
+                    ))}
+                  </div>
+                </div>
               )}
             </div>
           )}
@@ -2423,18 +2889,18 @@ function ImportExportTab({ products, categories, showToast, onRefresh }) {
       {/* Inventory Export Section */}
       <Panel title="Export Inventory Reports" icon={FileSpreadsheet}>
         <div className="space-y-4">
-          <p className="text-xs text-[color:var(--text-muted)]">Export catalog data, valuation, and stock levels to Excel CSV or print-ready PDF format.</p>
+          <p className="text-xs text-[color:var(--text-secondary)] font-medium">Export catalog data, valuation, and stock levels to Excel CSV or print-ready PDF format.</p>
           <div className="grid grid-cols-2 gap-3">
             <button onClick={handleExportCSV} className="p-4 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] hover:border-indigo-500 text-left transition-all">
               <FileSpreadsheet className="h-6 w-6 text-emerald-600 mb-2" />
               <div className="font-bold text-sm text-[color:var(--text-primary)]">Export to Excel (CSV)</div>
-              <div className="text-xs text-[color:var(--text-muted)]">UTF-8 encoded CSV with regional text support</div>
+              <div className="text-xs text-[color:var(--text-secondary)] font-medium">UTF-8 encoded CSV with regional text support</div>
             </button>
 
             <button onClick={handleExportPDF} className="p-4 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] hover:border-indigo-500 text-left transition-all">
               <Printer className="h-6 w-6 text-indigo-600 mb-2" />
               <div className="font-bold text-sm text-[color:var(--text-primary)]">Export to PDF</div>
-              <div className="text-xs text-[color:var(--text-muted)]">Print-formatted PDF inventory report</div>
+              <div className="text-xs text-[color:var(--text-secondary)] font-medium">Print-formatted PDF inventory report</div>
             </button>
           </div>
         </div>
