@@ -233,56 +233,130 @@ function BillingTaxTab({ billing, tax, saveSection, showToast }) {
 
   return (
     <div className="space-y-4">
+      {/* 1. Billing Defaults Panel */}
       <Panel className="space-y-4">
-        <div className="label-eyebrow">Billing</div>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          <Field label="Invoice prefix">
-            <Input value={bForm.invoicePrefix || ''} onChange={(e) => setBForm({ ...bForm, invoicePrefix: e.target.value })} />
-          </Field>
-          <Field label="Next invoice no.">
-            <Input type="number" value={bForm.nextInvoiceNo ?? ''} onChange={(e) => setBForm({ ...bForm, nextInvoiceNo: e.target.value })} />
-          </Field>
-          <Field label="Currency symbol">
-            <Input value={bForm.currency || ''} onChange={(e) => setBForm({ ...bForm, currency: e.target.value })} />
-          </Field>
+        <div className="flex items-center justify-between border-b pb-2" style={{ borderColor: 'var(--border)' }}>
+          <div className="label-eyebrow">Billing & Currency</div>
+          <span className="text-[11px] text-[color:var(--text-muted)]">General POS cash counter rules</span>
         </div>
+        
         <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Terms & conditions">
-            <Textarea rows={3} value={bForm.termsText || ''} onChange={(e) => setBForm({ ...bForm, termsText: e.target.value })} />
+          <Field label="Currency symbol">
+            <Input value={bForm.currency || ''} onChange={(e) => setBForm({ ...bForm, currency: e.target.value })} placeholder="₹" />
           </Field>
-          <Field label="Receipt footer text">
-            <Textarea rows={3} value={bForm.footerText || ''} onChange={(e) => setBForm({ ...bForm, footerText: e.target.value })} />
+          <Field label="Max bill discount (%)">
+            <Input type="number" min="0" max="100" value={bForm.maxDiscountPercent ?? ''} onChange={(e) => setBForm({ ...bForm, maxDiscountPercent: e.target.value })} placeholder="100" />
           </Field>
         </div>
-        <div className="grid gap-1 sm:grid-cols-3">
-          <Toggle label="Show GST breakup" checked={Boolean(bForm.showGstBreakup)} onChange={(v) => setBForm({ ...bForm, showGstBreakup: v })} />
-          <Toggle label="Round off total" checked={Boolean(bForm.roundOff)} onChange={(v) => setBForm({ ...bForm, roundOff: v })} />
-          <Toggle label="Print after checkout" checked={Boolean(bForm.printAfterCheckout)} onChange={(v) => setBForm({ ...bForm, printAfterCheckout: v })} />
+
+        <div className="grid gap-2 sm:grid-cols-2">
+          <Toggle
+            label="Round off grand total"
+            hint="Automatically rounds decimal totals to the nearest integer rupee"
+            checked={Boolean(bForm.roundOff)}
+            onChange={(v) => setBForm({ ...bForm, roundOff: v })}
+          />
+          <Toggle
+            label="Print receipt after checkout"
+            hint="Triggers automatic print dialog when checkout is completed"
+            checked={Boolean(bForm.printAfterCheckout)}
+            onChange={(v) => setBForm({ ...bForm, printAfterCheckout: v })}
+          />
         </div>
-        <div className="flex justify-end">
+      </Panel>
+
+      {/* 2. Invoice Section (in rows) */}
+      <Panel className="space-y-4">
+        <div className="flex items-center justify-between border-b pb-2" style={{ borderColor: 'var(--border)' }}>
+          <div className="label-eyebrow">Invoice Section</div>
+          <span className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400">Format & Sequence</span>
+        </div>
+
+        {/* Row 1: Numbering & Series */}
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Field label="Invoice prefix" hint="e.g. INV- or BILL-">
+            <Input value={bForm.invoicePrefix || ''} onChange={(e) => setBForm({ ...bForm, invoicePrefix: e.target.value })} placeholder="INV-" />
+          </Field>
+          <Field label="Next invoice no." hint="Auto-incremented on bill generation">
+            <Input type="number" value={bForm.nextInvoiceNo ?? ''} onChange={(e) => setBForm({ ...bForm, nextInvoiceNo: e.target.value })} placeholder="1" />
+          </Field>
+          <Field label="Invoice headline title" hint="Printed on top of tax invoice">
+            <Input value={bForm.invoiceTitle || ''} onChange={(e) => setBForm({ ...bForm, invoiceTitle: e.target.value })} placeholder="TAX INVOICE" />
+          </Field>
+        </div>
+
+        {/* Row 2: Terms & Notes */}
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Terms & Conditions (Footer note)" hint="Printed at bottom of invoices">
+            <Textarea rows={3} value={bForm.termsText || ''} onChange={(e) => setBForm({ ...bForm, termsText: e.target.value })} placeholder="1. Goods once sold will not be taken back. 2. Subject to local jurisdiction." />
+          </Field>
+          <Field label="Customer Greeting / Receipt Footer" hint="Thank you note for customer">
+            <Textarea rows={3} value={bForm.footerText || ''} onChange={(e) => setBForm({ ...bForm, footerText: e.target.value })} placeholder="Thank you for your business! Visit again." />
+          </Field>
+        </div>
+
+        {/* Row 3: Display Toggles in Rows */}
+        <div className="space-y-2 border-t pt-3" style={{ borderColor: 'var(--border-subtle)' }}>
+          <div className="text-[11px] font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">
+            Invoice Layout & Display Options
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Toggle
+              label="Show GST breakdown & rate slabs"
+              hint="Displays CGST, SGST, and IGST breakdown rows on invoices"
+              checked={Boolean(bForm.showGstBreakup !== false)}
+              onChange={(v) => setBForm({ ...bForm, showGstBreakup: v })}
+            />
+            <Toggle
+              label="Show cashier name on invoice"
+              hint="Includes the counter operator / cashier name"
+              checked={Boolean(bForm.showCashier !== false)}
+              onChange={(v) => setBForm({ ...bForm, showCashier: v })}
+            />
+            <Toggle
+              label="Show total amount in words"
+              hint="Prints words format (e.g. Five Hundred Rupees Only) on A4 tax invoices"
+              checked={Boolean(bForm.showWordsTotal !== false)}
+              onChange={(v) => setBForm({ ...bForm, showWordsTotal: v })}
+            />
+            <Toggle
+              label="Show authorized signature block"
+              hint="Displays signature box at bottom right of tax invoices"
+              checked={Boolean(bForm.showSignature !== false)}
+              onChange={(v) => setBForm({ ...bForm, showSignature: v })}
+            />
+          </div>
+        </div>
+
+        <div className="flex justify-end pt-2">
           <Button variant="primary" onClick={saveBilling} loading={savingBilling}>
-            Save Billing Settings
+            Save Invoice & Billing Settings
           </Button>
         </div>
       </Panel>
 
+      {/* 3. Tax Settings Panel */}
       <Panel className="space-y-4">
-        <div className="label-eyebrow">Tax</div>
+        <div className="flex items-center justify-between border-b pb-2" style={{ borderColor: 'var(--border)' }}>
+          <div className="label-eyebrow">Tax & GST Configuration</div>
+          <span className="text-[11px] text-[color:var(--text-muted)]">GST slabs and calculation rules</span>
+        </div>
+
         <Toggle label="Enable GST" checked={Boolean(tForm.enableGst)} onChange={(v) => setTForm({ ...tForm, enableGst: v })} />
         <div className="grid gap-3 sm:grid-cols-3">
           <Field label="Tax mode">
             <Select value={tForm.taxMode || 'EXCLUSIVE'} onChange={(e) => setTForm({ ...tForm, taxMode: e.target.value })}>
-              <option value="EXCLUSIVE">Exclusive</option>
-              <option value="INCLUSIVE">Inclusive</option>
+              <option value="EXCLUSIVE">Exclusive (Tax added on top of price)</option>
+              <option value="INCLUSIVE">Inclusive (Price includes tax)</option>
             </Select>
           </Field>
           <Field label="Default tax rate (%)">
-            <Input type="number" value={tForm.defaultTaxRate ?? ''} onChange={(e) => setTForm({ ...tForm, defaultTaxRate: e.target.value })} />
+            <Input type="number" value={tForm.defaultTaxRate ?? ''} onChange={(e) => setTForm({ ...tForm, defaultTaxRate: e.target.value })} placeholder="18" />
           </Field>
           <Field label="GST scheme">
             <Select value={tForm.gstScheme || 'REGULAR'} onChange={(e) => setTForm({ ...tForm, gstScheme: e.target.value })}>
-              <option value="REGULAR">Regular</option>
-              <option value="COMPOSITION">Composition</option>
+              <option value="REGULAR">Regular GST</option>
+              <option value="COMPOSITION">Composition Scheme</option>
             </Select>
           </Field>
         </div>

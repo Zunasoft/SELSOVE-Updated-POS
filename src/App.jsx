@@ -3,13 +3,14 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   ShoppingCart, Package, Users, BarChart3, LogOut, Database, CheckCircle2,
   XCircle, Sun, Moon, Truck, Landmark, Settings as SettingsIcon, Menu, X, LayoutDashboard,
-  Maximize2, Minimize2
+  Maximize2, Minimize2, Receipt
 } from 'lucide-react';
 
 import api, { setSessionExpiredHandler, SESSION_KEYS } from './lib/api';
 import OTPLogin from './components/OTPLogin';
 import ShopDashboard from './components/ShopDashboard';
 import POSTerminal from './components/POSTerminal';
+import InvoicesManager from './components/InvoicesManager';
 import InventoryManager from './components/InventoryManager';
 import CustomerVendorLedger from './components/CustomerVendorLedger';
 import PurchaseManager from './components/PurchaseManager';
@@ -20,6 +21,7 @@ import AccountsModule from './components/accounts/AccountsModule';
 const TABS = [
   { id: 'dashboard', label: 'Shop Dashboard', short: 'Home', icon: LayoutDashboard },
   { id: 'pos', label: 'POS Billing', short: 'Billing', icon: ShoppingCart },
+  { id: 'invoices', label: 'Invoices', short: 'Invoices', icon: Receipt },
   { id: 'inventory', label: 'Products & Stock', short: 'Stock', icon: Package },
   { id: 'purchases', label: 'Purchases', short: 'Purchase', icon: Truck },
   { id: 'customers', label: 'Customers & Vendors', short: 'Parties', icon: Users },
@@ -33,6 +35,7 @@ const TABS = [
 const TAB_FEATURE_MAP = {
   dashboard: 'dashboard',
   pos: 'billing',
+  invoices: 'billing',
   inventory: 'products',
   purchases: 'purchases',
   customers: 'customers',
@@ -262,6 +265,7 @@ export default function App() {
   const screens = {
     dashboard: <ShopDashboard {...shared} onNavigate={handleTabClick} />,
     pos: <POSTerminal {...shared} settings={settings} />,
+    invoices: <InvoicesManager {...shared} onNavigate={handleTabClick} />,
     inventory: (
       <InventoryManager
         {...shared}
