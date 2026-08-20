@@ -137,9 +137,29 @@ export const fmtDateTime = (value) =>
       })
     : '—';
 
-export const todayISO = () => new Date().toISOString().slice(0, 10);
+/**
+ * Local calendar date, not `toISOString()`'s UTC date. The backend buckets
+ * every order/expense/report row by its own local calendar day (see
+ * `dayKey` in accounting/engine.js), so a client east of UTC that instead
+ * sent the UTC date would — for a few hours after its own local midnight —
+ * ask reports for "today" while actually meaning "yesterday", silently
+ * losing that window's own sales from every date-ranged report/tile.
+ */
+const localDateParts = (d) => ({
+  y: d.getFullYear(),
+  m: String(d.getMonth() + 1).padStart(2, '0'),
+  day: String(d.getDate()).padStart(2, '0')
+});
 
-export const monthStartISO = () => `${new Date().toISOString().slice(0, 7)}-01`;
+export const todayISO = () => {
+  const { y, m, day } = localDateParts(new Date());
+  return `${y}-${m}-${day}`;
+};
+
+export const monthStartISO = () => {
+  const { y, m } = localDateParts(new Date());
+  return `${y}-${m}-01`;
+};
 
 export const financialYearStartISO = () => {
   const now = new Date();

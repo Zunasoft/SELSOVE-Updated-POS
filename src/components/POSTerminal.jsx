@@ -2,8 +2,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState, useDeferredVa
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Search, ShoppingCart, Trash2, Plus, Minus, Printer, Scale, Barcode,
-  QrCode, PauseCircle, X, Receipt, User, Lock, Unlock, ArrowDownToLine,
-  ArrowUpFromLine, LayoutGrid, Star, RotateCcw, Wallet, CheckCircle2
+  QrCode, PauseCircle, X, Receipt, User, UserPlus, Lock, Unlock, ArrowDownToLine,
+  ArrowUpFromLine, LayoutGrid, Star, RotateCcw, Wallet, CheckCircle2,
+  Flame, ArrowUpDown, Clock, History, Zap, FileCheck
 } from 'lucide-react';
 
 import api, { money, fmtDateTime, fmtDate } from '../lib/api';
@@ -75,43 +76,63 @@ export function getProductUnitOptions(product) {
   return options;
 }
 
-export function getProductRemainingStock(product, cart = [], allProducts = []) {
+export function getProductRemainingStock(product, cart = [], allProducts = [], depth = 0) {
   if (!product) return { remaining: 0, text: '0', isLow: false, isOut: true };
+  if (product.productType === 'service') {
+    return { remaining: Infinity, text: 'Unlimited', isLow: false, isOut: false };
+  }
+
   const prodId = product.id;
   const isComposite = product.isComposite || product.productType === 'composite';
+  const isCombo = product.productType === 'combo';
 
   // 1. Composite item: compute availability from recipe raw materials
-  if (isComposite) {
+  if (isComposite && depth === 0) {
     const ingredients = product.recipe?.ingredients || product.recipeItems || [];
     if (ingredients.length > 0 && Array.isArray(allProducts) && allProducts.length > 0) {
       let maxCanMake = Infinity;
-      ingredients.forEach((ing) => {
+      for (const ing of ingredients) {
         const raw = allProducts.find((p) => p.id === ing.productId);
-        if (!raw) return;
-        const ingStock = getProductRemainingStock(raw, cart, allProducts);
+        if (!raw) continue;
+        const ingStock = getProductRemainingStock(raw, cart, allProducts, depth + 1);
         const reqQty = Number(ing.qty) || 1;
         const canMakeThis = Math.floor(Math.max(0, ingStock.remaining) / reqQty);
         if (canMakeThis < maxCanMake) maxCanMake = canMakeThis;
-      });
+      }
       if (maxCanMake === Infinity) maxCanMake = 0;
 
-      // Subtract composite units already in cart
-      const inCartComposite = cart.reduce((sum, item) => {
-        if (item.id === prodId || item.name === product.name) {
-          return sum + (Number(item.qty) || 0);
-        }
-        return sum;
-      }, 0);
-
-      const remaining = Math.max(0, maxCanMake - inCartComposite);
+      const remaining = maxCanMake;
       const isOut = remaining <= 0;
-      const isLow = remaining <= 5;
+      const isLow = remaining <= Number(product.minStock ?? 5);
       const text = `${remaining} ${product.unit || 'portions'} left`;
       return { remaining, text, isLow, isOut };
     }
   }
 
-  // 2. Raw Material / Standard Product: calculate in-cart deduction (direct sales + composite recipes consuming this product)
+  // 2. Combo bundle: compute availability from constituent product stock
+  if (isCombo && depth === 0) {
+    const comboItems = product.comboItems || [];
+    if (comboItems.length > 0 && Array.isArray(allProducts) && allProducts.length > 0) {
+      let maxCanMake = Infinity;
+      for (const item of comboItems) {
+        const raw = allProducts.find((p) => p.id === item.productId);
+        if (!raw) continue;
+        const ingStock = getProductRemainingStock(raw, cart, allProducts, depth + 1);
+        const reqQty = Number(item.qty) || 1;
+        const canMakeThis = Math.floor(Math.max(0, ingStock.remaining) / reqQty);
+        if (canMakeThis < maxCanMake) maxCanMake = canMakeThis;
+      }
+      if (maxCanMake === Infinity) maxCanMake = 0;
+
+      const remaining = maxCanMake;
+      const isOut = remaining <= 0;
+      const isLow = remaining <= Number(product.minStock ?? 5);
+      const text = `${remaining} ${product.unit || 'combos'} left`;
+      return { remaining, text, isLow, isOut };
+    }
+  }
+
+  // 3. Raw Material / Standard Product: calculate in-cart deduction (direct sales + composite recipes + combos consuming this product)
   const inCartBase = cart.reduce((sum, item) => {
     if (item.id === prodId || item.name === product.name) {
       const factor = Number(item.unitFactor) || (String(item.unit).toLowerCase() === String(product.unit).toLowerCase() ? 1 : 1);
@@ -121,6 +142,16 @@ export function getProductRemainingStock(product, cart = [], allProducts = []) {
     if (isComp) {
       const ingredients = item.recipe?.ingredients || item.recipeItems || [];
       const matched = ingredients.find((ing) => ing.productId === prodId);
+      if (matched) {
+        const reqQty = Number(matched.qty) || 0;
+        const soldQty = Number(item.qty) || 0;
+        return sum + (reqQty * soldQty);
+      }
+    }
+    const isCb = item.productType === 'combo';
+    if (isCb) {
+      const cItems = item.comboItems || [];
+      const matched = cItems.find((ci) => ci.productId === prodId);
       if (matched) {
         const reqQty = Number(matched.qty) || 0;
         const soldQty = Number(item.qty) || 0;
@@ -243,12 +274,17 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
   const [settings, setSettings] = useState(appSettings);
   const [session, setSession] = useState(null);
   const [heldBills, setHeldBills] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
 
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [sortBy, setSortBy] = useState('default');
+  const [recentBilledIds, setRecentBilledIds] = useState([]);
   const [cart, setCart] = useState([]);
   const [customerId, setCustomerId] = useState('');
+  const [showAddCustomer, setShowAddCustomer] = useState(false);
+  const [roundOffOverride, setRoundOffOverride] = useState(null);
   const [discountPercent, setDiscountPercent] = useState(0);
   const [tableId, setTableId] = useState('');
   const [note, setNote] = useState('');
@@ -263,6 +299,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
   const [paymentMode, setPaymentMode] = useState('Cash');
   const [cashTendered, setCashTendered] = useState('');
   const [redeemPoints, setRedeemPoints] = useState(0);
+  const [checkingOut, setCheckingOut] = useState(false);
   const [receipt, setReceipt] = useState(null);
   const [showHeld, setShowHeld] = useState(false);
   const [showSession, setShowSession] = useState(false);
@@ -274,22 +311,17 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
   const scanBuffer = useRef('');
   const scanTimer = useRef(null);
 
-  const fetchRecent = useCallback(async () => {
-    try {
-      const rec = await api.get('/orders', { limit: 5 });
-      setRecentInvoices(rec || []);
-    } catch (_) {}
-  }, []);
-
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (isInitial = false) => {
+    if (isInitial) setInitialLoading(true);
+    else setSyncing(true);
     try {
       const [data, rec] = await Promise.all([
         api.get('/init'),
-        api.get('/orders', { limit: 5 }).catch(() => [])
+        api.get('/orders', { limit: 20 }).catch(() => [])
       ]);
       setCategories(data.categories || []);
       setProducts(data.products || []);
+      setRecentBilledIds(data.recentBilledIds || []);
       setCustomers(data.customers || []);
       setVendors(data.vendors || []);
       setPriceSheets(data.priceSheets || []);
@@ -297,16 +329,26 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
       setHeldBills(data.heldBills || []);
       setTables(data.tables || []);
       setSettings(data.settings || null);
-      setRecentInvoices(rec || []);
+
+      const ordersList = Array.isArray(rec) ? rec : [];
+      setRecentInvoices((prev) => {
+        const map = new Map();
+        ordersList.forEach((o) => { if (o && o.orderId) map.set(o.orderId, o); });
+        (prev || []).forEach((o) => { if (o && o.orderId && !map.has(o.orderId)) map.set(o.orderId, o); });
+        return Array.from(map.values())
+          .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
+          .slice(0, 20);
+      });
     } catch (err) {
       showToast(api.message(err, 'Could not load the terminal.'), 'error');
     } finally {
-      setLoading(false);
+      setInitialLoading(false);
+      setSyncing(false);
     }
   }, [showToast]);
 
   useEffect(() => {
-    load();
+    load(true);
   }, [load]);
 
   // Customer-Specific Pricing & Price Sheet Auto-Application (REQ-01 & REQ-02)
@@ -341,8 +383,14 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
   const taxInclusive = settings?.tax?.taxMode === 'INCLUSIVE';
   const gstEnabled = settings?.tax?.enableGst !== false;
 
+  const isRoundOff = useMemo(() => {
+    if (roundOffOverride !== null) return roundOffOverride;
+    const b = settings?.billing || {};
+    return Boolean(b.roundOff || b.roundOffTotal || b.roundOffGrandTotal);
+  }, [roundOffOverride, settings]);
+
   const totals = useMemo(() => {
-    const lineValue = (item) => item.qty * item.price;
+    const lineValue = (item) => (Number(item.qty) || 0) * (Number(item.price) || 0);
 
     const subtotal = cart.reduce((s, i) => {
       const gross = lineValue(i);
@@ -361,16 +409,18 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
         }, 0);
 
     const beforeRound = subtotal - discountAmount + tax;
-    const grand = settings?.billing?.roundOff ? Math.round(beforeRound) : Math.round(beforeRound * 100) / 100;
+    const grand = isRoundOff ? Math.round(beforeRound) : Math.round(beforeRound * 100) / 100;
+    const roundOff = Math.round((grand - beforeRound) * 100) / 100;
 
     return {
       subtotal: Math.round(subtotal * 100) / 100,
       discountAmount: Math.round(discountAmount * 100) / 100,
       tax: Math.round(tax * 100) / 100,
-      roundOff: Math.round((grand - beforeRound) * 100) / 100,
+      beforeRound: Math.round(beforeRound * 100) / 100,
+      roundOff,
       grand
     };
-  }, [cart, discountPercent, taxInclusive, gstEnabled, settings]);
+  }, [cart, discountPercent, taxInclusive, gstEnabled, isRoundOff]);
 
   /* ------------------------- loyalty redemption ------------------------- */
   const loyalty = useMemo(() => {
@@ -395,7 +445,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
     };
   }, [settings, customer, totals.grand, redeemPoints]);
 
-  const payable = Math.round((totals.grand - loyalty.amount) * 100) / 100;
+  const payable = isRoundOff ? Math.round(totals.grand - loyalty.amount) : Math.round((totals.grand - loyalty.amount) * 100) / 100;
 
   useEffect(() => {
     setRedeemPoints(0);
@@ -410,9 +460,9 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
       const cust = customers.find((c) => c.id === customerId);
       const pricing = resolveProductPricing(product, cust, priceSheets);
       const options = getProductUnitOptions({ ...product, price: pricing.price });
-      const isWeighedOrSubUnit = product.requiresWeight || product.unit === 'kg' || product.unit === 'g' || product.unit === 'ltr' || product.customSubUnitName;
+      const isScaleWeighed = Boolean(product.requiresWeight);
 
-      if (isWeighedOrSubUnit && qty === 1) {
+      if (isScaleWeighed && qty === 1) {
         setWeightModal({ ...product, price: pricing.price });
         const hasGrams = options.some((o) => o.unit === 'g');
         const defaultUnit = hasGrams ? 'g' : options[0]?.unit || product.unit || 'pcs';
@@ -427,28 +477,35 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
         const idx = prev.findIndex((i) => i.id === product.id && i.unit === defaultOpt.unit);
         if (idx >= 0) {
           const next = [...prev];
-          const merged = { ...next[idx], qty: Math.round((next[idx].qty + qty) * 1000) / 1000 };
-          merged.total = Math.round(merged.qty * merged.price * 100) / 100;
+          const mergedQty = Math.round((next[idx].qty + qty) * 1000) / 1000;
+          const merged = { ...next[idx], qty: mergedQty, total: Math.round(mergedQty * next[idx].price * 100) / 100 };
           next[idx] = merged;
+          showToast(`Updated ${product.name} (qty: ${mergedQty})`);
           return next;
         }
+        showToast(`Added ${product.name} to bill (qty: ${qty})`);
         return [
           ...prev,
           {
             ...product,
+            id: product.id,
+            name: product.name,
+            printName: product.printName || product.name,
+            barcode: product.barcode || '',
             qty,
             unit: defaultOpt.unit,
             saleUnit: defaultOpt.unit,
             unitFactor: defaultOpt.factor || 1,
             price: defaultOpt.price,
             total: Math.round(qty * defaultOpt.price * 100) / 100,
+            taxRate: product.taxRate || 0,
             pricingRule: pricing.ruleSource,
             itemDiscountPercent: pricing.discountPercent
           }
         ];
       });
     },
-    [customerId, customers, priceSheets]
+    [customerId, customers, priceSheets, showToast]
   );
 
   const removeFromCart = useCallback((product, qty = 1) => {
@@ -676,16 +733,20 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
         .filter((i) => i.qty > 0)
     );
 
+  // Rate/qty are free-typed in the cart, and nothing downstream re-checks their
+  // sign before checkout — verified live that a negative qty slips straight
+  // through to the backend, credits stock instead of debiting it, and posts a
+  // negative "COMPLETED" sale. Clamp both to non-negative here, at the source.
   const setLinePrice = (id, price) =>
     setCart((prev) =>
-      prev.map((i) => (i.id === id ? { ...i, price: Number(price) || 0, total: Math.round(i.qty * (Number(price) || 0) * 100) / 100 } : i))
+      prev.map((i) => (i.id === id ? { ...i, price: Math.max(0, Number(price) || 0), total: Math.round(i.qty * Math.max(0, Number(price) || 0) * 100) / 100 } : i))
     );
 
   const setLineQty = (id, val) =>
     setCart((prev) =>
       prev.map((i) => {
         if (i.id !== id) return i;
-        const newQty = val === '' ? '' : Number(val);
+        const newQty = val === '' ? '' : Math.max(0, Number(val) || 0);
         const safeQty = Number(newQty) || 0;
         return { ...i, qty: newQty, total: Math.round(safeQty * i.price * 100) / 100 };
       })
@@ -719,6 +780,38 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
     }
   };
 
+  const saveAsQuotation = async () => {
+    if (cart.length === 0) return;
+    try {
+      const res = await api.post('/quotations', {
+        customerId: customer?.id || null,
+        customerName: customer?.name || 'Walk-in Customer',
+        customerPhone: customer?.phone || 'N/A',
+        customerGstin: customer?.gstin || '',
+        customerAddress: customer?.address || '',
+        items: cart.map((i) => ({
+          productId: i.id,
+          name: i.name,
+          barcode: i.barcode || '',
+          qty: Number(i.qty) || 1,
+          unit: i.unit || 'pcs',
+          price: Number(i.price) || 0,
+          taxRate: Number(i.taxRate) || 0,
+          total: Number(i.total) || (Number(i.qty) || 1) * (Number(i.price) || 0)
+        })),
+        subtotal: totals.subtotal,
+        tax: totals.tax,
+        discount: totals.discountAmount,
+        roundOff: isRoundOff ? totals.roundOff : 0,
+        total: totals.grand,
+        notes: note || ''
+      });
+      showToast(res.message || 'Quotation created successfully!', 'success');
+    } catch (err) {
+      showToast(api.message(err, 'Could not save quotation.'), 'error');
+    }
+  };
+
   const resumeBill = async (bill) => {
     setCart(bill.items);
     setCustomerId(bill.customerId || '');
@@ -738,6 +831,11 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
 
   const checkout = async () => {
     if (cart.length === 0) return;
+    // Guard against a double-tap/double-click firing two POST /orders for the
+    // same bill — verified live that nothing else stops this: two identical
+    // requests each create their own order, deduct stock and post accounting
+    // entries independently, since the backend has no dedup/idempotency check.
+    if (checkingOut) return;
     if (paymentMode === 'Credit (Udhar)' && !customer) {
       showToast('Select a customer for a credit sale.', 'error');
       return;
@@ -752,6 +850,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
       }
     }
 
+    setCheckingOut(true);
     try {
       const res = await api.post('/orders', {
         customerId: customer?.id || null,
@@ -761,6 +860,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
         subtotal: totals.subtotal,
         tax: totals.tax,
         discount: totals.discountAmount,
+        roundOff: totals.roundOff,
         total: totals.grand,
         redeemPoints: loyalty.points || 0,
         items: cart,
@@ -773,33 +873,109 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
       clearCart();
       setCashTendered('');
       setRedeemPoints(0);
-      load();
+
+      if (res.data) {
+        setRecentInvoices((prev) => [res.data, ...(prev || []).filter((o) => o.orderId !== res.data.orderId)].slice(0, 20));
+        const itemIds = (res.data.items || []).map((i) => i.id || i.productId).filter(Boolean);
+        setRecentBilledIds((prev) => Array.from(new Set([...itemIds, ...(prev || [])])));
+      }
+
       (res.warnings || []).forEach((w) => showToast(w, 'error'));
       showToast(res.message);
+
+      // The tenant middleware now flushes every write to MongoDB before this
+      // request's response is sent (verified live: an immediate, zero-delay
+      // direct DB read and an immediate GET /orders both saw the new order
+      // right after the POST resolved) — so there is nothing left to wait
+      // out. Refresh right away: this also brings stock levels, the session
+      // drawer balance and held bills back in sync without the multi-second
+      // gap during which the grid used to show stale stock.
+      load();
 
       if (settings?.billing?.printAfterCheckout) setTimeout(() => window.print(), 400);
     } catch (err) {
       showToast(api.message(err, 'Checkout failed.'), 'error');
+    } finally {
+      setCheckingOut(false);
     }
   };
 
   const deferredSearchQuery = useDeferredValue(searchQuery);
 
+  const recentBilledProducts = useMemo(() => {
+    const seen = new Set();
+    const list = [];
+
+    (recentInvoices || []).forEach((order) => {
+      (order.items || []).forEach((item) => {
+        const prod = products.find((p) => p.id === item.id || p.name === item.name);
+        if (prod && !seen.has(prod.id)) {
+          seen.add(prod.id);
+          list.push(prod);
+        }
+      });
+    });
+
+    (recentBilledIds || []).forEach((idOrName) => {
+      const prod = products.find((p) => p.id === idOrName || p.name === idOrName);
+      if (prod && !seen.has(prod.id)) {
+        seen.add(prod.id);
+        list.push(prod);
+      }
+    });
+
+    return list;
+  }, [recentInvoices, recentBilledIds, products]);
+
+  const recentBilledIdSet = useMemo(() => {
+    return new Set(recentBilledProducts.map((p) => p.id));
+  }, [recentBilledProducts]);
+
   const filtered = useMemo(() => {
     const needle = deferredSearchQuery.trim().toLowerCase();
-    return products.filter((p) => {
-      if (selectedCategory !== 'all' && p.categoryId !== selectedCategory) return false;
-      if (!needle) return true;
-      return (
-        p.name.toLowerCase().includes(needle) ||
-        (p.regionalName || p.printName || '').toLowerCase().includes(needle) ||
-        p.id.toLowerCase().includes(needle) ||
-        (p.barcodes || [p.barcode]).some((b) => String(b).includes(needle))
-      );
-    });
-  }, [products, selectedCategory, deferredSearchQuery]);
+    let list = products;
 
-  if (loading) return <Spinner label="Opening the billing terminal…" />;
+    if (selectedCategory === 'recent-billed') {
+      list = recentBilledProducts.length > 0 ? recentBilledProducts : products;
+    } else if (selectedCategory !== 'all') {
+      list = list.filter((p) => (p.categoryIds || [p.categoryId]).includes(selectedCategory));
+    }
+
+    if (needle) {
+      list = list.filter(
+        (p) =>
+          p.name.toLowerCase().includes(needle) ||
+          (p.regionalName || p.printName || '').toLowerCase().includes(needle) ||
+          p.id.toLowerCase().includes(needle) ||
+          (p.barcodes || [p.barcode]).some((b) => String(b).includes(needle))
+      );
+    }
+
+    if (sortBy === 'default' || sortBy === 'recent-billed' || selectedCategory === 'recent-billed') {
+      if (recentBilledProducts.length > 0) {
+        const orderMap = new Map(recentBilledProducts.map((p, idx) => [p.id, idx]));
+        list = [...list].sort((a, b) => {
+          const idxA = orderMap.has(a.id) ? orderMap.get(a.id) : 999999;
+          const idxB = orderMap.has(b.id) ? orderMap.get(b.id) : 999999;
+          return idxA - idxB;
+        });
+      }
+    } else if (sortBy === 'price-asc') {
+      list = [...list].sort((a, b) => Number(a.price || 0) - Number(b.price || 0));
+    } else if (sortBy === 'price-desc') {
+      list = [...list].sort((a, b) => Number(b.price || 0) - Number(a.price || 0));
+    } else if (sortBy === 'name') {
+      list = [...list].sort((a, b) => a.name.localeCompare(b.name));
+    } else if (sortBy === 'stock') {
+      list = [...list].sort((a, b) => Number(a.stock || 0) - Number(b.stock || 0));
+    }
+
+    return list;
+  }, [products, selectedCategory, deferredSearchQuery, recentBilledProducts, sortBy]);
+
+  const currentCustomer = useMemo(() => customers.find((c) => c.id === customerId) || null, [customers, customerId]);
+
+  if (initialLoading) return <Spinner label="Opening the billing terminal…" />;
 
   const sessionOpen = session?.status === 'open';
 
@@ -819,12 +995,8 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && filtered.length >= 1) {
-                  if (scanMode === 'REMOVE') {
-                    removeFromCart(filtered[0], 1);
-                  } else {
-                    addToCart(filtered[0], 1);
-                    playScanSound('add');
-                  }
+                  addToCart(filtered[0], 1);
+                  playScanSound('add');
                   setSearchQuery('');
                 }
               }}
@@ -885,6 +1057,20 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
             )}
           </div>
 
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value)}
+            className="flex shrink-0 items-center rounded-xl px-2.5 py-2 text-[11.5px] font-bold transition-colors cursor-pointer outline-none"
+            style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
+            title="Sort items in catalog"
+          >
+            <option value="default">🕒 Recently Billed</option>
+            <option value="name">🔤 Name (A-Z)</option>
+            <option value="price-asc">💵 Price: Low to High</option>
+            <option value="price-desc">💎 Price: High to Low</option>
+            <option value="stock">📦 Stock Level</option>
+          </select>
+
           <Badge tone={settings?.hardware?.barcodeScanner?.enabled !== false ? 'success' : 'neutral'}>
             <Barcode className="h-3 w-3" />
             {settings?.hardware?.barcodeScanner?.enabled !== false ? 'Scanner Armed' : 'Scanner Off'}
@@ -942,8 +1128,9 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
           >
             All items ({products.length})
           </button>
+
           {categories.map((cat) => {
-            const count = products.filter((p) => p.categoryId === cat.id).length;
+            const count = products.filter((p) => (p.categoryIds || [p.categoryId]).includes(cat.id)).length;
             return (
               <button
                 key={cat.id}
@@ -964,16 +1151,19 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
 
         {filtered.length === 0 ? (
           <Panel>
-            <EmptyState title="No items match" hint="Clear the search or pick another category." />
+            <EmptyState
+              title={selectedCategory === 'recent-billed' ? 'No recently billed items' : 'No items match'}
+              hint={selectedCategory === 'recent-billed' ? 'Products you bill will automatically appear here.' : 'Clear the search or pick another category.'}
+            />
           </Panel>
         ) : (
           <div className="grid max-h-[calc(100vh-19rem)] grid-cols-2 gap-2.5 overflow-y-auto pr-1 sm:grid-cols-3 xl:grid-cols-4 pb-12">
-            {filtered.slice(0, 150).map((p) => {
+            {filtered.slice(0, 150).map((p, index) => {
               const stockInfo = getProductRemainingStock(p, cart, products);
               const out = stockInfo.isOut;
               const isLow = stockInfo.isLow;
-              const cust = customers.find((c) => c.id === customerId);
-              const pricing = resolveProductPricing(p, cust, priceSheets);
+              const pricing = resolveProductPricing(p, currentCustomer, priceSheets);
+              const isRecent = recentBilledIdSet.has(p.id) && (selectedCategory === 'recent-billed' || index < 8);
 
               return (
                 <motion.button
@@ -990,7 +1180,18 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
                       <span className="tabular truncate text-[9.5px] font-bold text-[color:var(--text-muted)]">
                         {p.barcode}
                       </span>
-                      {p.requiresWeight && <Scale className="h-3 w-3 shrink-0 text-cyan-600 dark:text-cyan-400" />}
+                      <div className="flex items-center gap-1 shrink-0">
+                        {isRecent && (
+                          <span
+                            className="flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-bold bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border border-amber-200 dark:border-amber-900"
+                            title="Recently billed product"
+                          >
+                            <Clock className="h-2.5 w-2.5" />
+                            Recent
+                          </span>
+                        )}
+                        {p.requiresWeight && <Scale className="h-3 w-3 shrink-0 text-cyan-600 dark:text-cyan-400" />}
+                      </div>
                     </div>
                     <div className="mt-1 line-clamp-2 text-[12px] font-bold leading-snug text-[color:var(--text-primary)] group-hover:text-[color:var(--accent)]">
                       {p.name}
@@ -1049,33 +1250,54 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-2">
-            <Field label="Customer">
-              <Select value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
-                <option value="">Walk-in Customer</option>
-                {customers.map((c) => {
-                  const hasCustom = c.customPrices && Object.keys(c.customPrices).length > 0;
-                  return (
-                    <option key={c.id} value={c.id}>
-                      {c.name} {hasCustom ? '★ Custom Price' : ''} {c.outstanding > 0 ? `· due ${money(c.outstanding, { decimals: false })}` : ''}
-                    </option>
-                  );
-                })}
-              </Select>
-            </Field>
+          <div className="grid grid-cols-12 gap-2.5">
+            <div className="col-span-7 min-w-0">
+              <Field label="Customer" className="min-w-0">
+                <div className="flex items-center gap-1.5 min-w-0 w-full">
+                  <div className="flex-1 min-w-0">
+                    <Select
+                      value={customerId}
+                      onChange={(e) => setCustomerId(e.target.value)}
+                      className="w-full"
+                    >
+                      <option value="">Walk-in Customer</option>
+                      {customers.map((c) => {
+                        const hasCustom = c.customPrices && Object.keys(c.customPrices).length > 0;
+                        return (
+                          <option key={c.id} value={c.id}>
+                            {c.name}{c.phone ? ` (${c.phone})` : ''}{hasCustom ? ' ★ Custom' : ''}{c.outstanding > 0 ? ` · due ${money(c.outstanding, { decimals: false })}` : ''}
+                          </option>
+                        );
+                      })}
+                    </Select>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    icon={UserPlus}
+                    onClick={() => setShowAddCustomer(true)}
+                    title="Add New Customer"
+                    className="shrink-0 h-[36px] w-[36px] p-0 flex items-center justify-center rounded-xl border border-[color:var(--border)] hover:border-indigo-500 hover:text-indigo-600 bg-[color:var(--bg-subtle)]"
+                  />
+                </div>
+              </Field>
+            </div>
 
-            <Field label={`Discount % (max ${maxDiscount}%)`}>
-              <Select
-                value={discountPercent}
-                onChange={(e) => setDiscountPercent(Math.min(maxDiscount, Number(e.target.value)))}
-              >
-                {DISCOUNT_PRESETS.filter((d) => d <= maxDiscount).map((d) => (
-                  <option key={d} value={d}>
-                    {d === 0 ? 'No discount' : `${d}% off`}
-                  </option>
-                ))}
-              </Select>
-            </Field>
+            <div className="col-span-5 min-w-0">
+              <Field label={`Discount % (max ${maxDiscount}%)`} className="min-w-0">
+                <Select
+                  value={discountPercent}
+                  onChange={(e) => setDiscountPercent(Math.min(maxDiscount, Number(e.target.value)))}
+                  className="w-full"
+                >
+                  {DISCOUNT_PRESETS.filter((d) => d <= maxDiscount).map((d) => (
+                    <option key={d} value={d}>
+                      {d === 0 ? 'No disc' : `${d}% off`}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
           </div>
 
           {customer && (
@@ -1200,19 +1422,41 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
               <Row label={`Discount (${discountPercent}%)`} value={-totals.discountAmount} tone="success" />
             )}
             {gstEnabled && <Row label="GST" value={totals.tax} />}
-            {totals.roundOff !== 0 && <Row label="Round off" value={totals.roundOff} />}
-            <div className="flex items-center justify-between border-t pt-2" style={{ borderColor: 'var(--border)' }}>
+
+            <div className="flex items-center justify-between py-1 border-y border-[color:var(--border-subtle)] my-1">
+              <label className="flex items-center gap-2 cursor-pointer select-none text-[11.5px] font-bold text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]">
+                <input
+                  type="checkbox"
+                  checked={isRoundOff}
+                  onChange={(e) => setRoundOffOverride(e.target.checked)}
+                  className="rounded border-[color:var(--border)] text-indigo-600 focus:ring-indigo-500 w-3.5 h-3.5 cursor-pointer accent-indigo-600"
+                />
+                <span>Round off to ₹</span>
+              </label>
+              {isRoundOff && totals.roundOff !== 0 ? (
+                <span className={`font-mono font-bold text-[11.5px] ${totals.roundOff > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                  {totals.roundOff > 0 ? `+₹${totals.roundOff.toFixed(2)}` : `-₹${Math.abs(totals.roundOff).toFixed(2)}`}
+                </span>
+              ) : (
+                <span className="font-mono text-[11px] text-[color:var(--text-muted)]">₹0.00</span>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between pt-1" style={{ borderColor: 'var(--border)' }}>
               <span className="text-[13px] font-bold text-[color:var(--text-primary)]">Grand Total</span>
               <Money value={totals.grand} className="text-[20px] font-bold text-[color:var(--accent)]" />
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-2">
-            <Button icon={PauseCircle} onClick={holdBill} disabled={cart.length === 0}>
-              Hold Bill
+          <div className="grid grid-cols-3 gap-1.5">
+            <Button icon={PauseCircle} onClick={holdBill} disabled={cart.length === 0} title="Hold running bill" className="px-2 text-xs">
+              Hold
             </Button>
-            <Button variant="primary" size="lg" onClick={() => setShowCheckout(true)} disabled={cart.length === 0}>
-              Checkout
+            <Button variant="secondary" icon={FileCheck} onClick={saveAsQuotation} disabled={cart.length === 0} title="Save items as Quotation" className="px-2 text-xs">
+              Quote
+            </Button>
+            <Button variant="primary" size="lg" onClick={() => setShowCheckout(true)} disabled={cart.length === 0} className="px-2">
+              Pay
             </Button>
           </div>
         </Panel>
@@ -1244,10 +1488,10 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
             </div>
           ) : (
             <div className="divide-y divide-[color:var(--border-subtle)]">
-              {recentInvoices.slice(0, 4).map((inv) => (
+              {recentInvoices.slice(0, 5).map((inv) => (
                 <div
                   key={inv.orderId}
-                  className="flex items-center justify-between py-2 text-xs hover:bg-[color:var(--bg-subtle)] px-2 rounded-xl transition-colors group cursor-pointer"
+                  className="flex items-center justify-between py-2 text-xs hover:bg-[color:var(--bg-subtle)] px-2.5 rounded-xl transition-colors group cursor-pointer border border-transparent hover:border-[color:var(--border)]"
                   onClick={() => setReceipt(inv)}
                 >
                   <div className="min-w-0 flex-1 pr-2">
@@ -1260,7 +1504,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
                       </span>
                     </div>
                     <div className="truncate text-[11px] font-semibold text-[color:var(--text-primary)]">
-                      {inv.customerName || 'Walk-in'}
+                      {inv.customerName || 'Walk-in'} · <span className="font-normal text-[color:var(--text-muted)]">{(inv.items || []).length} item{(inv.items || []).length === 1 ? '' : 's'}</span>
                     </div>
                   </div>
 
@@ -1280,11 +1524,10 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
 
                     <button
                       type="button"
-                      title="Reprint Receipt"
+                      title="View / Print Receipt"
                       onClick={(e) => {
                         e.stopPropagation();
                         setReceipt(inv);
-                        setTimeout(() => window.print(), 200);
                       }}
                       className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 transition-colors"
                     >
@@ -1432,8 +1675,8 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
         size="md"
         footer={
           <>
-            <Button onClick={() => setShowCheckout(false)}>Cancel</Button>
-            <Button variant="success" icon={CheckCircle2} onClick={checkout}>
+            <Button onClick={() => setShowCheckout(false)} disabled={checkingOut}>Cancel</Button>
+            <Button variant="success" icon={CheckCircle2} onClick={checkout} loading={checkingOut} disabled={checkingOut}>
               Confirm Payment
             </Button>
           </>
@@ -1645,6 +1888,16 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
       />
 
       <RecentBillsModal open={showRecent} onClose={() => setShowRecent(false)} onReprint={setReceipt} showToast={showToast} />
+
+      <QuickCustomerModal
+        open={showAddCustomer}
+        onClose={() => setShowAddCustomer(false)}
+        onCreated={(newCust) => {
+          setCustomers((prev) => [newCust, ...(prev || [])]);
+          setCustomerId(newCust.id);
+        }}
+        showToast={showToast}
+      />
     </div>
   );
 }
@@ -1749,6 +2002,9 @@ function ReceiptModal({ receipt, settings, tenant, onClose }) {
           <ReceiptRow label="Subtotal" value={receipt.subtotal} />
           {receipt.discount > 0 && <ReceiptRow label="Discount" value={-receipt.discount} />}
           {receipt.tax > 0 && <ReceiptRow label="GST" value={receipt.tax} />}
+          {receipt.roundOff !== undefined && receipt.roundOff !== 0 && (
+            <ReceiptRow label="Round off" value={receipt.roundOff} />
+          )}
           {receipt.loyaltyRedeemed > 0 && (
             <ReceiptRow label={`Points redeemed (${receipt.pointsRedeemed})`} value={-receipt.loyaltyRedeemed} />
           )}
@@ -2766,16 +3022,21 @@ function TablesModal({ open, tables, selectedId, onSelect, onClose, showToast, o
 function RecentBillsModal({ open, onClose, onReprint, showToast }) {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState('');
+
+  const fetchOrders = useCallback(() => {
+    setLoading(true);
+    api
+      .get('/orders', { limit: 100 })
+      .then((data) => setOrders(data || []))
+      .catch((err) => showToast(api.message(err), 'error'))
+      .finally(() => setLoading(false));
+  }, [showToast]);
 
   useEffect(() => {
     if (!open) return;
-    setLoading(true);
-    api
-      .get('/orders', { limit: 60 })
-      .then(setOrders)
-      .catch((err) => showToast(api.message(err), 'error'))
-      .finally(() => setLoading(false));
-  }, [open]);
+    fetchOrders();
+  }, [open, fetchOrders]);
 
   const voidBill = async (order) => {
     if (!window.confirm(`Void ${order.orderId}? Stock will be restored and the accounting entries reversed.`)) return;
@@ -2788,48 +3049,241 @@ function RecentBillsModal({ open, onClose, onReprint, showToast }) {
     }
   };
 
+  const filteredOrders = useMemo(() => {
+    if (!search.trim()) return orders;
+    const q = search.toLowerCase();
+    return orders.filter(
+      (o) =>
+        (o.orderId || '').toLowerCase().includes(q) ||
+        (o.customerName || '').toLowerCase().includes(q) ||
+        (o.customerPhone || '').includes(q) ||
+        (o.paymentMethod || '').toLowerCase().includes(q)
+    );
+  }, [orders, search]);
+
   return (
-    <Modal open={open} onClose={onClose} title="Recent Bills" subtitle="Reprint a receipt or void a mistaken bill." icon={Receipt} size="xl">
-      {loading ? (
-        <Spinner />
-      ) : (
-        <DataTable
-          maxHeight="56vh"
-          dense
-          columns={[
-            { key: 'orderId', label: 'Invoice', width: 150, render: (o) => <span className="tabular font-bold">{o.orderId}</span> },
-            { key: 'date', label: 'When', width: 150, render: (o) => fmtDateTime(o.date) },
-            { key: 'customerName', label: 'Customer', render: (o) => <span className="font-semibold">{o.customerName}</span> },
-            { key: 'paymentMethod', label: 'Mode', width: 120, render: (o) => <Badge>{o.paymentMethod}</Badge> },
-            { key: 'total', label: 'Total', align: 'right', width: 120, render: (o) => <Money value={o.total} className="font-bold" /> },
-            {
-              key: 'status',
-              label: 'Status',
-              width: 90,
-              render: (o) => <Badge tone={o.status === 'VOID' ? 'danger' : 'success'}>{o.status === 'VOID' ? 'Void' : 'OK'}</Badge>
-            },
-            {
-              key: 'actions',
-              label: '',
-              align: 'right',
-              width: 150,
-              render: (o) => (
-                <div className="flex justify-end gap-1">
-                  <Button size="sm" variant="ghost" icon={Printer} onClick={() => onReprint(o)}>
-                    Reprint
-                  </Button>
-                  {o.status !== 'VOID' && (
-                    <Button size="sm" variant="ghost" icon={X} onClick={() => voidBill(o)} className="text-rose-500" />
-                  )}
-                </div>
-              )
-            }
-          ]}
-          rows={orders}
-          rowKey={(o) => o.orderId}
-          empty={<EmptyState icon={Receipt} title="No bills yet today" />}
-        />
-      )}
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Recent Bills"
+      subtitle="Reprint a receipt or void a mistaken bill."
+      icon={Receipt}
+      size="xl"
+    >
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="relative flex-1">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[color:var(--text-muted)]" />
+            <input
+              type="text"
+              placeholder="Search by invoice #, customer, phone…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="field-input text-xs"
+              style={{ paddingLeft: '2.1rem' }}
+            />
+            {search && (
+              <button
+                onClick={() => setSearch('')}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+          <Button size="sm" icon={RotateCcw} onClick={fetchOrders} loading={loading}>
+            Refresh
+          </Button>
+        </div>
+
+        {loading ? (
+          <Spinner />
+        ) : (
+          <DataTable
+            maxHeight="52vh"
+            dense
+            columns={[
+              { key: 'orderId', label: 'Invoice', width: 140, render: (o) => <span className="tabular font-bold text-indigo-600 dark:text-indigo-400">{o.orderId}</span> },
+              { key: 'date', label: 'When', width: 120, render: (o) => fmtDateTime(o.date) },
+              { key: 'customerName', label: 'Customer', width: 140, render: (o) => <span className="font-semibold">{o.customerName || 'Walk-in'}</span> },
+              {
+                key: 'items',
+                label: 'Products Bought',
+                render: (o) => {
+                  const summary = (o.items || [])
+                    .map((it) => `${it.name || it.printName || 'Item'} × ${it.qty}${it.unit ? ` ${it.unit}` : ''}`)
+                    .join(', ');
+                  return (
+                    <div className="max-w-[260px] truncate text-[11px] font-mono text-[color:var(--text-secondary)]" title={summary}>
+                      {summary || `${(o.items || []).length} items`}
+                    </div>
+                  );
+                }
+              },
+              { key: 'paymentMethod', label: 'Mode', width: 100, render: (o) => <Badge>{o.paymentMethod}</Badge> },
+              { key: 'total', label: 'Total', align: 'right', width: 110, render: (o) => <Money value={o.total} className="font-bold" /> },
+              {
+                key: 'status',
+                label: 'Status',
+                width: 80,
+                render: (o) => <Badge tone={o.status === 'VOID' ? 'danger' : 'success'}>{o.status === 'VOID' ? 'Void' : 'OK'}</Badge>
+              },
+              {
+                key: 'actions',
+                label: '',
+                align: 'right',
+                width: 150,
+                render: (o) => (
+                  <div className="flex justify-end gap-1">
+                    <Button size="sm" variant="ghost" icon={Printer} onClick={() => onReprint(o)}>
+                      Reprint
+                    </Button>
+                    {o.status !== 'VOID' && (
+                      <Button size="sm" variant="ghost" icon={X} onClick={() => voidBill(o)} className="text-rose-500" />
+                    )}
+                  </div>
+                )
+              }
+            ]}
+            rows={filteredOrders}
+            rowKey={(o) => o.orderId}
+            empty={<EmptyState icon={Receipt} title="No bills found" hint="Completed bills will appear here." />}
+          />
+        )}
+      </div>
     </Modal>
   );
 }
+
+function QuickCustomerModal({ open, onClose, onCreated, showToast }) {
+  const [name, setName] = useState('');
+  const [phone, setPhone] = useState('');
+  const [email, setEmail] = useState('');
+  const [address, setAddress] = useState('');
+  const [group, setGroup] = useState('Retail');
+  const [creditLimit, setCreditLimit] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setName('');
+      setPhone('');
+      setEmail('');
+      setAddress('');
+      setGroup('Retail');
+      setCreditLimit('');
+    }
+  }, [open]);
+
+  const handleSubmit = async (e) => {
+    if (e) e.preventDefault();
+    if (!name.trim()) {
+      showToast('Please enter the customer name.', 'error');
+      return;
+    }
+    if (!phone.trim()) {
+      showToast('Please enter the mobile number.', 'error');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const res = await api.post('/customers', {
+        name: name.trim(),
+        phone: phone.trim(),
+        email: email.trim(),
+        address: address.trim(),
+        group,
+        creditLimit: Number(creditLimit) || 0
+      });
+
+      const newCustomer = res.data;
+      showToast(`Customer "${newCustomer.name}" created and selected!`);
+      onCreated(newCustomer);
+      onClose();
+    } catch (err) {
+      showToast(api.message(err, 'Failed to create customer.'), 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Add New Customer"
+      subtitle="Register customer details to link with this bill."
+      icon={UserPlus}
+      size="md"
+      footer={
+        <>
+          <Button onClick={onClose} disabled={saving}>Cancel</Button>
+          <Button variant="primary" icon={UserPlus} onClick={handleSubmit} loading={saving}>
+            Save & Select Customer
+          </Button>
+        </>
+      }
+    >
+      <form onSubmit={handleSubmit} className="space-y-3.5">
+        <Field label="Customer Name *" hint="Full name of customer">
+          <Input
+            autoFocus
+            placeholder="e.g. Rahul Sharma"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            required
+          />
+        </Field>
+
+        <Field label="Mobile Number *" hint="10-digit phone number for receipts & SMS">
+          <Input
+            type="tel"
+            placeholder="e.g. 9876543210"
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+            required
+          />
+        </Field>
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Customer Group">
+            <Select value={group} onChange={(e) => setGroup(e.target.value)}>
+              <option value="Retail">Retail</option>
+              <option value="Wholesale">Wholesale</option>
+              <option value="VIP">VIP</option>
+              <option value="Corporate">Corporate</option>
+            </Select>
+          </Field>
+
+          <Field label="Credit Limit (₹)" hint="Max credit allowed">
+            <Input
+              type="number"
+              placeholder="0"
+              value={creditLimit}
+              onChange={(e) => setCreditLimit(e.target.value)}
+            />
+          </Field>
+        </div>
+
+        <Field label="Email Address" hint="Optional for invoice email">
+          <Input
+            type="email"
+            placeholder="e.g. rahul@example.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+        </Field>
+
+        <Field label="Address / City" hint="Optional delivery or billing address">
+          <Input
+            placeholder="e.g. MG Road, Bengaluru"
+            value={address}
+            onChange={(e) => setAddress(e.target.value)}
+          />
+        </Field>
+      </form>
+    </Modal>
+  );
+}
+

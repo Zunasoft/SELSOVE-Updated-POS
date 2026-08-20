@@ -159,11 +159,83 @@ export default function InventoryManager({ products, categories, onRefresh, show
  * Dashboard Tab
  * ------------------------------------------------------------------ */
 
+export function resolveProductStockInfo(p, allProducts = []) {
+  if (!p || p.productType === 'service') {
+    return { stock: Infinity, effectiveStock: 0, isService: true, isLow: false, isOut: false, label: 'Service (No stock)' };
+  }
+
+  const isComposite = p.isComposite || p.productType === 'composite';
+  const isCombo = p.productType === 'combo';
+  const minStock = Number(p.minStock ?? 5);
+
+  if (isComposite) {
+    const ingredients = p.recipe?.ingredients || p.recipeItems || [];
+    if (!ingredients.length) {
+      return { stock: 0, effectiveStock: 0, isComposite: true, isLow: true, isOut: true, label: `0 ${p.unit || 'portions'} (No ingredients)` };
+    }
+    let maxCanMake = Infinity;
+    for (const ing of ingredients) {
+      const raw = allProducts.find((prod) => prod.id === ing.productId);
+      const reqQty = Number(ing.qty) || 1;
+      const rawStock = raw ? Math.max(0, Number(raw.stock || 0)) : 0;
+      const canMake = Math.floor(rawStock / reqQty);
+      if (canMake < maxCanMake) maxCanMake = canMake;
+    }
+    const producible = maxCanMake === Infinity ? 0 : maxCanMake;
+    return {
+      stock: producible,
+      effectiveStock: producible,
+      isComposite: true,
+      isLow: producible <= minStock,
+      isOut: producible <= 0,
+      label: `${producible} ${p.unit || 'portions'} (Producible)`
+    };
+  }
+
+  if (isCombo) {
+    const comboItems = p.comboItems || [];
+    if (!comboItems.length) {
+      return { stock: 0, effectiveStock: 0, isCombo: true, isLow: true, isOut: true, label: `0 ${p.unit || 'combos'} (No items)` };
+    }
+    let maxCanMake = Infinity;
+    for (const item of comboItems) {
+      const raw = allProducts.find((prod) => prod.id === item.productId);
+      const reqQty = Number(item.qty) || 1;
+      const rawStock = raw ? Math.max(0, Number(raw.stock || 0)) : 0;
+      const canMake = Math.floor(rawStock / reqQty);
+      if (canMake < maxCanMake) maxCanMake = canMake;
+    }
+    const comboBuyable = maxCanMake === Infinity ? 0 : maxCanMake;
+    return {
+      stock: comboBuyable,
+      effectiveStock: comboBuyable,
+      isCombo: true,
+      isLow: comboBuyable <= minStock,
+      isOut: comboBuyable <= 0,
+      label: `${comboBuyable} ${p.unit || 'combos'} (Available)`
+    };
+  }
+
+  const stk = Number(p.stock || 0);
+  return {
+    stock: stk,
+    effectiveStock: stk,
+    isLow: stk <= minStock,
+    isOut: stk <= 0,
+    label: `${stk} ${p.unit || 'pcs'}`
+  };
+}
+
 function DashboardTab({ summary, products, setTab }) {
   if (!summary) return <Spinner text="Loading inventory insights..." />;
 
-  const lowStock = (products || []).filter((p) => p.productType !== 'service' && Number(p.stock || 0) <= Number(p.minStock ?? 5));
-  const outOfStock = (products || []).filter((p) => p.productType !== 'service' && Number(p.stock || 0) <= 0);
+  const evaluated = (products || []).map((p) => ({
+    product: p,
+    stockInfo: resolveProductStockInfo(p, products)
+  }));
+
+  const lowStock = evaluated.filter((e) => !e.stockInfo.isService && e.stockInfo.isLow);
+  const outOfStock = evaluated.filter((e) => !e.stockInfo.isService && e.stockInfo.isOut);
 
   return (
     <div className="space-y-4">
@@ -225,16 +297,18 @@ function DashboardTab({ summary, products, setTab }) {
             <EmptyState icon={CheckCircle} title="All Stock Levels Healthy" description="No products are currently at or below minimum stock threshold." />
           ) : (
             <div className="divide-y divide-[color:var(--border-subtle)] max-h-64 overflow-y-auto">
-              {lowStock.slice(0, 10).map((p) => (
+              {lowStock.slice(0, 10).map(({ product: p, stockInfo }) => (
                 <div key={p.id} className="py-2.5 flex items-center justify-between">
                   <div>
                     <div className="text-sm font-bold text-[color:var(--text-primary)]">{p.name}</div>
                     {p.regionalName && <div className="text-xs text-indigo-600 font-medium">{p.regionalName}</div>}
-                    <div className="text-xs text-[color:var(--text-muted)]">Barcode: {p.barcode}</div>
+                    <div className="text-xs text-[color:var(--text-muted)]">
+                      {stockInfo.isComposite ? 'Composite Recipe' : stockInfo.isCombo ? 'Combo Bundle' : `Barcode: ${p.barcode || '—'}`}
+                    </div>
                   </div>
                   <div className="text-right">
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold ${p.stock <= 0 ? 'bg-red-500/10 text-red-600' : 'bg-amber-500/10 text-amber-600'}`}>
-                      {p.stock} / {p.minStock ?? 5} {p.unit}
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold ${stockInfo.isOut ? 'bg-red-500/10 text-red-600' : 'bg-amber-500/10 text-amber-600'}`}>
+                      {stockInfo.stock} / {p.minStock ?? 5} {p.unit}
                     </span>
                   </div>
                 </div>
@@ -414,8 +488,9 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       // If a specific warehouse is selected, optionally hide products that have never been in this warehouse (unless OUT is selected)
       if (warehouseFilter !== 'all' && stockFilter !== 'OUT' && displayStock <= 0) return false;
 
-      if (stockFilter === 'LOW' && (p.productType === 'service' || Number(displayStock) > Number(p.minStock ?? 5))) return false;
-      if (stockFilter === 'OUT' && (p.productType === 'service' || Number(displayStock) > 0)) return false;
+      const stockInfo = resolveProductStockInfo(p, products);
+      if (stockFilter === 'LOW' && (stockInfo.isService || !stockInfo.isLow)) return false;
+      if (stockFilter === 'OUT' && (stockInfo.isService || !stockInfo.isOut)) return false;
 
       if (!needle) return true;
       return (
@@ -761,8 +836,8 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                   }
                   
                   const isLow = p.productType !== 'service' && (
-                    isCompositeRow ? producible <= 5 : 
-                    isComboRow ? comboBuyable <= 5 :
+                    isCompositeRow ? producible <= Number(p.minStock ?? 5) : 
+                    isComboRow ? comboBuyable <= Number(p.minStock ?? 5) :
                     Number(displayStock) <= Number(p.minStock ?? 5)
                   );
                   
@@ -1437,6 +1512,12 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                   const sellingPrice = form.useCustomPricing ? (Number(form.price) || 0) : totalComboPrice;
                   const discount = totalComboPrice - sellingPrice;
                   const discountPct = totalComboPrice ? (discount / totalComboPrice) * 100 : 0;
+                  const comboBuyable = (form.comboItems || []).length > 0
+                    ? Math.max(0, Math.floor(Math.min(...(form.comboItems || []).map(item => {
+                        const material = (products || []).find(p => p.id === item.productId);
+                        return material && Number(item.qty) > 0 ? (material.stock || 0) / Number(item.qty) : 0;
+                      }))))
+                    : 0;
                   
                   return (
                     <div className="pt-2 border-t border-indigo-300/40 dark:border-indigo-800/40 space-y-3">
@@ -1481,6 +1562,13 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                             required 
                           />
                         </Field>
+                      </div>
+                      <div className="text-xs font-bold text-[color:var(--text-secondary)]">
+                        Available to sell:{' '}
+                        <span className={comboBuyable <= 0 ? 'text-red-600' : comboBuyable <= 5 ? 'text-amber-600' : 'text-emerald-600'}>
+                          {comboBuyable} {form.unit || 'combo'}(s)
+                        </span>{' '}
+                        from current component products stock.
                       </div>
                     </div>
                   );
@@ -1976,6 +2064,18 @@ function WarehousesTab({ warehouses, products, showToast, onRefresh }) {
   const [showWhModal, setShowWhModal] = useState(false);
   const [whForm, setWhForm] = useState({ name: '', code: '', location: '' });
 
+  const getWarehouseStock = (product, whId) => {
+    if (!product || !whId) return 0;
+    if (product.warehouses && product.warehouses[whId] !== undefined) {
+      return Number(product.warehouses[whId]) || 0;
+    }
+    const defaultWh = warehouses.find((w) => w.isDefault)?.id || warehouses[0]?.id;
+    if (whId === 'wh_shop' || whId === defaultWh) {
+      return Number(product.stock) || 0;
+    }
+    return 0;
+  };
+
   const addTransferItem = () => {
     setTransferItems((prev) => [...prev, { productId: '', quantity: '1' }]);
   };
@@ -2012,6 +2112,16 @@ function WarehousesTab({ warehouses, products, showToast, onRefresh }) {
       return;
     }
 
+    // Check available stock in source warehouse before submitting
+    for (const item of validItems) {
+      const p = (products || []).find((prod) => prod.id === item.productId);
+      const available = getWarehouseStock(p, sourceWh);
+      if (item.quantity > available) {
+        showToast(`Cannot transfer ${item.quantity} of "${p?.name || 'Item'}". Only ${available} available in source warehouse.`, 'error');
+        return;
+      }
+    }
+
     setLoading(true);
     try {
       const res = await api.post('/inventory/transfer', {
@@ -2024,7 +2134,7 @@ function WarehousesTab({ warehouses, products, showToast, onRefresh }) {
       });
 
       showToast(res.message || 'Stock transferred successfully.');
-      setTransferItems([{ productId: '', quantity: '10' }]);
+      setTransferItems([{ productId: '', quantity: '1' }]);
       onRefresh();
     } catch (err) {
       showToast(api.message(err, 'Stock transfer failed.'), 'error');
@@ -2147,38 +2257,56 @@ function WarehousesTab({ warehouses, products, showToast, onRefresh }) {
               <div className="space-y-2">
                 {transferItems.map((item, idx) => {
                   const prod = (products || []).find((p) => p.id === item.productId);
-                  const sourceStock = prod?.warehouses?.[sourceWh] ?? (sourceWh === 'wh_shop' ? prod?.stock || 0 : Math.max(0, (prod?.stock || 0) - 10));
-                  const targetStock = prod?.warehouses?.[targetWh] ?? (targetWh === 'wh_shop' ? prod?.stock || 0 : Math.max(0, (prod?.stock || 0) - 10));
+                  const sourceStock = getWarehouseStock(prod, sourceWh);
+                  const targetStock = getWarehouseStock(prod, targetWh);
 
                   const selectedProductIds = transferItems.map((i, iIdx) => iIdx !== idx && i.productId).filter(Boolean);
+                  const availableProducts = (products || []).filter((p) => {
+                    if (p.productType === 'service') return false;
+                    if (selectedProductIds.includes(p.id) && p.id !== item.productId) return false;
+                    const stk = getWarehouseStock(p, sourceWh);
+                    return stk > 0 || p.id === item.productId;
+                  });
 
                   return (
                     <div key={idx} className="grid grid-cols-12 gap-2 items-center p-2.5 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)]">
                       <div className="col-span-6 md:col-span-5">
                         <Select
                           value={item.productId}
-                          onChange={(e) => updateTransferItem(idx, { productId: e.target.value })}
+                          onChange={(e) => {
+                            const newProdId = e.target.value;
+                            const newProd = (products || []).find((p) => p.id === newProdId);
+                            const available = getWarehouseStock(newProd, sourceWh);
+                            updateTransferItem(idx, {
+                              productId: newProdId,
+                              quantity: available > 0 ? (Number(item.quantity) > available ? String(available) : item.quantity || '1') : '1'
+                            });
+                          }}
                           required
                         >
-                          <option value="">-- Choose Product --</option>
-                          {(products || [])
-                            .filter((p) => p.productType !== 'service' && (!selectedProductIds.includes(p.id) || p.id === item.productId))
-                            .map((p) => {
-                              const stk = p.warehouses?.[sourceWh] ?? 0;
-                              return (
-                                <option key={p.id} value={p.id}>
-                                  {p.name} (Available: {stk} {p.unit})
-                                </option>
-                              );
-                            })}
+                          <option value="">
+                            {availableProducts.length === 0
+                              ? '-- No items with available stock in source --'
+                              : '-- Choose Product (Available stock only) --'}
+                          </option>
+                          {availableProducts.map((p) => {
+                            const stk = getWarehouseStock(p, sourceWh);
+                            return (
+                              <option key={p.id} value={p.id} disabled={stk <= 0}>
+                                {p.name} {stk > 0 ? `(Available: ${stk} ${p.unit || 'pcs'})` : `(0 Available in Source)`}
+                              </option>
+                            );
+                          })}
                         </Select>
                       </div>
 
                       <div className="col-span-3 md:col-span-3 text-xs">
                         {prod ? (
                           <div className="flex flex-col">
-                            <span className="font-bold text-indigo-600 dark:text-indigo-400">Src: {sourceStock} {prod.unit}</span>
-                            <span className="text-[10px] text-[color:var(--text-muted)]">Dst: {targetStock} {prod.unit}</span>
+                            <span className={`font-bold ${sourceStock > 0 ? 'text-indigo-600 dark:text-indigo-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                              Src: {sourceStock} {prod.unit || 'pcs'}
+                            </span>
+                            <span className="text-[10px] text-[color:var(--text-muted)]">Dst: {targetStock} {prod.unit || 'pcs'}</span>
                           </div>
                         ) : (
                           <span className="text-[color:var(--text-muted)]">—</span>
@@ -2188,8 +2316,9 @@ function WarehousesTab({ warehouses, products, showToast, onRefresh }) {
                       <div className="col-span-2 md:col-span-3">
                         <Input
                           type="number"
-                          min="1"
-                          max={prod ? sourceStock || 99999 : 99999}
+                          step="any"
+                          min="0.001"
+                          max={sourceStock > 0 ? sourceStock : undefined}
                           value={item.quantity}
                           onChange={(e) => updateTransferItem(idx, { quantity: e.target.value })}
                           placeholder="Qty"
@@ -2315,8 +2444,8 @@ function AdjustTab({ products, showToast, onRefresh }) {
           </Select>
         </Field>
 
-        <Field label="Authorization Password (default: 1234)">
-          <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="1234" />
+        <Field label="Authorization Password (only required if enabled in Settings)">
+          <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Leave blank if not required" />
         </Field>
 
         <Button icon={Save} type="submit">Save Stock Adjustment</Button>
@@ -2382,7 +2511,7 @@ function HistoryTab({ products }) {
                   <td className={`py-2.5 px-3 text-right font-bold ${m.qtyChange >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                     {m.qtyChange >= 0 ? `+${m.qtyChange}` : m.qtyChange} {m.unit}
                   </td>
-                  <td className="py-2.5 px-3 text-right font-bold text-[color:var(--text-primary)]">{m.balanceAfter}</td>
+                  <td className="py-2.5 px-3 text-right font-bold text-[color:var(--text-primary)]">{m.resultingStock ?? m.balanceAfter ?? '—'}</td>
                   <td className="py-2.5 px-3 font-sans text-[color:var(--text-muted)]">{m.reason || '—'}</td>
                   <td className="py-2.5 px-3 font-sans text-[color:var(--text-secondary)]">{m.user || 'system'}</td>
                 </tr>

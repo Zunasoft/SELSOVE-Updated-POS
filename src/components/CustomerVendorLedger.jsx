@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Users, Truck, MessageSquare, Plus, Edit3, Trash2, BookOpen, Phone,
-  Star, Wallet, ShoppingBag, Save, Search, Download, RefreshCw,
+  Wallet, ShoppingBag, Save, Search, Download, RefreshCw,
   CheckCircle2, AlertTriangle, ArrowUpRight, ArrowDownRight, Mail,
   MapPin, FileText, X, Printer, Building2, CreditCard, History, Clock, ArrowRight
 } from 'lucide-react';
@@ -15,7 +15,7 @@ import { exportReport } from '../lib/exporters';
 
 /**
  * Customer and vendor masters — SOW Modules 7 and 8.
- * Operational party register with contacts, groups, credit limits, statements, and loyalty.
+ * Operational party register with contacts, groups, credit limits, and statements.
  */
 export default function CustomerVendorLedger({ showToast }) {
   const [tab, setTab] = useState('customers');
@@ -115,9 +115,7 @@ export default function CustomerVendorLedger({ showToast }) {
           { label: 'Phone', key: 'phone' },
           { label: 'Email', key: 'email' },
           { label: 'Group', key: 'group' },
-          { label: 'Loyalty Points', key: 'loyaltyPoints' },
           { label: 'Total Bills', key: 'billCount' },
-          { label: 'Lifetime Purchases', key: 'totalPurchases' },
           { label: 'Credit Limit', key: 'creditLimit' },
           { label: 'Outstanding Balance', key: 'outstanding' }
         ]
@@ -143,7 +141,6 @@ export default function CustomerVendorLedger({ showToast }) {
   const totalReceivable = customers.reduce((s, c) => s + (c.outstanding || 0), 0);
   const totalPayable = vendors.reduce((s, v) => s + (v.outstandingPayable || 0), 0);
   const overLimit = customers.filter((c) => c.creditLimit > 0 && c.outstanding > c.creditLimit);
-  const totalLifetimeSales = customers.reduce((s, c) => s + (c.totalPurchases || 0), 0);
   const totalLifetimePurchases = vendors.reduce((s, v) => s + (v.totalPurchased || 0), 0);
 
   return (
@@ -247,16 +244,16 @@ export default function CustomerVendorLedger({ showToast }) {
 
             <div className="surface rounded-2xl p-4 border border-[color:var(--border)]">
               <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Loyalty Issued</span>
+                <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Total Orders</span>
                 <div className="p-1.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400">
-                  <Star className="w-4 h-4" />
+                  <FileText className="w-4 h-4" />
                 </div>
               </div>
               <div className="mt-2 text-xl font-extrabold text-[color:var(--text-primary)]">
-                {customers.reduce((s, c) => s + (c.loyaltyPoints || 0), 0)} pts
+                {customers.reduce((s, c) => s + (c.billCount || 0), 0)}
               </div>
               <div className="mt-1 text-[11px] text-[color:var(--text-muted)]">
-                {money(totalLifetimeSales, { decimals: false })} lifetime sales
+                Recorded sales bills
               </div>
             </div>
           </>
@@ -387,9 +384,7 @@ export default function CustomerVendorLedger({ showToast }) {
                 <tr className="border-b border-[color:var(--border)] bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-secondary)] uppercase tracking-wider text-[10.5px]">
                   <th className="py-3 px-4">Customer</th>
                   <th className="py-3 px-4">Group</th>
-                  <th className="py-3 px-4 text-center">Loyalty</th>
                   <th className="py-3 px-4 text-right">Bills</th>
-                  <th className="py-3 px-4 text-right">Lifetime Value</th>
                   <th className="py-3 px-4 text-right">Credit Limit</th>
                   <th className="py-3 px-4 text-right">Outstanding Due</th>
                   <th className="py-3 px-4 text-right">Actions</th>
@@ -436,18 +431,8 @@ export default function CustomerVendorLedger({ showToast }) {
                         </span>
                       </td>
 
-                      <td className="py-3 px-4 text-center whitespace-nowrap">
-                        <span className="tabular font-bold text-amber-500 text-[11.5px]">
-                          ★ {c.loyaltyPoints || 0}
-                        </span>
-                      </td>
-
                       <td className="py-3 px-4 text-right font-mono text-[11.5px] text-[color:var(--text-secondary)] whitespace-nowrap">
                         {c.billCount || 0}
-                      </td>
-
-                      <td className="py-3 px-4 text-right font-mono font-semibold text-[12px] text-[color:var(--text-primary)] whitespace-nowrap">
-                        {money(c.totalPurchases || 0, { decimals: false })}
                       </td>
 
                       <td className="py-3 px-4 text-right font-mono text-[12px] text-[color:var(--text-secondary)] whitespace-nowrap">
@@ -504,6 +489,15 @@ export default function CustomerVendorLedger({ showToast }) {
                             className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 transition-colors"
                           >
                             <Edit3 className="w-4 h-4" />
+                          </button>
+
+                          <button
+                            type="button"
+                            title="Delete Customer"
+                            onClick={() => removeParty(c)}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/60 transition-colors"
+                          >
+                            <Trash2 className="w-4 h-4" />
                           </button>
                         </div>
                       </td>

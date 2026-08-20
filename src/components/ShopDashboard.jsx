@@ -13,11 +13,22 @@ import {
 
 const DONUT_COLORS = ['#4f46e5', '#059669', '#f59e0b', '#e11d48', '#0891b2', '#7c3aed', '#65a30d'];
 
-/** ISO date N days before today — used to build the 14-day trend window. */
+/**
+ * ISO date N days before today — used to build the 14-day trend window.
+ *
+ * Built from local calendar fields, not `toISOString()`. The backend buckets
+ * every order by its local calendar day, so a client that instead sends the
+ * UTC calendar day would — for a shop east of UTC, for a few hours after its
+ * own local midnight — ask for "today" while actually meaning "yesterday",
+ * silently dropping the day's own sales from the window it just asked for.
+ */
 const daysAgoISO = (n) => {
   const d = new Date();
   d.setDate(d.getDate() - n);
-  return d.toISOString().slice(0, 10);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 };
 
 /**
@@ -104,7 +115,7 @@ export default function ShopDashboard({ tenant, token, showToast, onNavigate }) 
         <StatTile
           label="Today's Bills"
           value={a.todaysBills || 0}
-          sub={`avg ${money(a.averageBillValue, { decimals: false })} / bill`}
+          sub={`avg ${money(a.todaysAverageBillValue, { decimals: false })} / bill`}
           icon={Receipt}
         />
         <StatTile
