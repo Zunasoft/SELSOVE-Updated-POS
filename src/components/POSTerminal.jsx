@@ -4,17 +4,332 @@ import {
   Search, ShoppingCart, Trash2, Plus, Minus, Printer, Scale, Barcode,
   QrCode, PauseCircle, X, Receipt, User, UserPlus, Lock, Unlock, ArrowDownToLine,
   ArrowUpFromLine, LayoutGrid, Star, RotateCcw, Wallet, CheckCircle2,
-  Flame, ArrowUpDown, Clock, History, Zap, FileCheck
+  Flame, ArrowUpDown, Clock, History, Zap, FileCheck, CreditCard
 } from 'lucide-react';
 
-import api, { money, fmtDateTime, fmtDate } from '../lib/api';
+import api, { money, fmtDateTime, fmtDate, API_BASE } from '../lib/api';
 import {
   Panel, Button, Modal, Field, Input, Select, Textarea, Badge, Money,
   Spinner, EmptyState, SegmentedControl, DataTable, StatTile
 } from '../lib/ui';
+import { getCategoryTheme } from '../lib/categoryTheme';
 
 const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Credit (Udhar)'];
 const DISCOUNT_PRESETS = [0, 5, 10, 15, 20];
+
+export function getProductImageUrl(url, name = '', barcode = '') {
+  // 1. Manually uploaded or custom image takes absolute top priority!
+  if (url && typeof url === 'string') {
+    const trimmed = url.trim();
+    if (trimmed) {
+      if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('data:') || trimmed.startsWith('blob:')) {
+        return trimmed;
+      }
+      if (trimmed.startsWith('/')) {
+        return `${API_BASE.replace('/api/pos', '')}${trimmed}`;
+      }
+      return trimmed;
+    }
+  }
+
+  // 2. Auto-generate real product photo URL based on name/barcode
+  if (name && typeof name === 'string' && name.trim()) {
+    return getProductAutoImageUrl(name, barcode);
+  }
+
+  return 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=350&auto=format&fit=crop&q=80';
+}
+
+const PRODUCT_KEYWORD_MAP = [
+  // Technology & Computer Peripherals
+  { keywords: ['wireless mouse', 'mouse'], icon: '🖱️', photo: 'https://images.unsplash.com/photo-1527864550417-7fd91fc51a46?w=350&auto=format&fit=crop&q=80', gradient: 'from-slate-600 to-slate-800' },
+  { keywords: ['keyboard usb', 'keyboard'], icon: '⌨️', photo: 'https://images.unsplash.com/photo-1587829741301-dc798b83add3?w=350&auto=format&fit=crop&q=80', gradient: 'from-slate-700 to-zinc-900' },
+  { keywords: ['wifi router', 'router', 'wifi'], icon: '📡', photo: 'https://images.unsplash.com/photo-1544197150-b99a580bb7a8?w=350&auto=format&fit=crop&q=80', gradient: 'from-blue-600 to-indigo-800' },
+  { keywords: ['bluetooth speaker', 'speaker'], icon: '🔊', photo: 'https://images.unsplash.com/photo-1608043152269-423dbba4e7e1?w=350&auto=format&fit=crop&q=80', gradient: 'from-indigo-600 to-purple-800' },
+  { keywords: ['power bank'], icon: '🔋', photo: 'https://images.unsplash.com/photo-1609592807664-4a4be1a7b4fa?w=350&auto=format&fit=crop&q=80', gradient: 'from-zinc-700 to-slate-900' },
+  { keywords: ['mobile charger', 'charger', 'adapter'], icon: '🔌', photo: 'https://images.unsplash.com/photo-1583863788434-e58a36330cf0?w=350&auto=format&fit=crop&q=80', gradient: 'from-emerald-600 to-teal-800' },
+  { keywords: ['usb cable', 'type-c', 'lan cable', 'hdmi cable', 'cable'], icon: '🔌', photo: 'https://images.unsplash.com/photo-1544652478-6653e09f18a2?w=350&auto=format&fit=crop&q=80', gradient: 'from-cyan-600 to-blue-700' },
+  { keywords: ['printer ink', 'ink cartridge', 'toner'], icon: '🖨️', photo: 'https://images.unsplash.com/photo-1612815154858-60aa4c59eaa6?w=350&auto=format&fit=crop&q=80', gradient: 'from-slate-600 to-slate-900' },
+  { keywords: ['extension box', 'socket', 'power strip'], icon: '🔌', photo: 'https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-600 to-orange-700' },
+  { keywords: ['led bulb', 'bulb', 'light'], icon: '💡', photo: 'https://images.unsplash.com/photo-1513506003901-1e6a229e2d15?w=350&auto=format&fit=crop&q=80', gradient: 'from-yellow-400 to-amber-600' },
+  { keywords: ['mobile', 'phone', 'smartphone', 'earphone', 'headphone'], icon: '📱', photo: 'https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?w=350&auto=format&fit=crop&q=80', gradient: 'from-slate-700 to-slate-900' },
+
+  // Kitchen Appliances & Utensils
+  { keywords: ['electric kettle', 'kettle'], icon: '🫖', photo: 'https://images.unsplash.com/photo-1556909114-f6e7ad7d3136?w=350&auto=format&fit=crop&q=80', gradient: 'from-slate-500 to-stone-700' },
+  { keywords: ['lunch box', 'tiffin'], icon: '🍱', photo: 'https://images.unsplash.com/photo-1594998893017-36147cbcae05?w=350&auto=format&fit=crop&q=80', gradient: 'from-emerald-600 to-teal-700' },
+  { keywords: ['table fan', 'fan'], icon: '🌀', photo: 'https://images.unsplash.com/photo-1585771724684-38269d6639fd?w=350&auto=format&fit=crop&q=80', gradient: 'from-sky-500 to-blue-700' },
+  { keywords: ['kitchen knife', 'knife'], icon: '🔪', photo: 'https://images.unsplash.com/photo-1593618998160-e34014e67546?w=350&auto=format&fit=crop&q=80', gradient: 'from-zinc-600 to-slate-800' },
+  { keywords: ['stainless steel spoon', 'spoon', 'fork', 'cutlery'], icon: '🥄', photo: 'https://images.unsplash.com/photo-1616788494707-ec28f08d05a1?w=350&auto=format&fit=crop&q=80', gradient: 'from-slate-400 to-stone-600' },
+  { keywords: ['tea glass', 'steel tumbler', 'tumbler', 'glass'], icon: '🥛', photo: 'https://images.unsplash.com/photo-1577937927133-66ef06acdf18?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-600 to-yellow-700' },
+  { keywords: ['steel plate', 'plate', 'dish'], icon: '🍽️', photo: 'https://images.unsplash.com/photo-1603199506016-b9e594b5931a?w=350&auto=format&fit=crop&q=80', gradient: 'from-slate-400 to-zinc-600' },
+  { keywords: ['water bottle', 'bottle'], icon: '🍶', photo: 'https://images.unsplash.com/photo-1602143407151-7111542de6e8?w=350&auto=format&fit=crop&q=80', gradient: 'from-cyan-500 to-blue-600' },
+  { keywords: ['plastic storage box', 'storage box', 'container'], icon: '📦', photo: 'https://images.unsplash.com/photo-1614735241165-6756e1df61ab?w=350&auto=format&fit=crop&q=80', gradient: 'from-blue-500 to-indigo-600' },
+  { keywords: ['plastic bucket', 'bucket'], icon: '🪣', photo: 'https://images.unsplash.com/photo-1584622650111-993a426fbf0a?w=350&auto=format&fit=crop&q=80', gradient: 'from-blue-600 to-cyan-700' },
+
+  // Cleaning & Household
+  { keywords: ['garbage bags', 'garbage bag', 'trash bag'], icon: '🗑️', photo: 'https://images.unsplash.com/photo-1611284446314-60a58ac0deb9?w=350&auto=format&fit=crop&q=80', gradient: 'from-zinc-700 to-stone-900' },
+  { keywords: ['floor mop refill', 'floor mop', 'mop'], icon: '🧹', photo: 'https://images.unsplash.com/photo-1581578731548-c64695cc6952?w=350&auto=format&fit=crop&q=80', gradient: 'from-blue-500 to-teal-600' },
+  { keywords: ['broom stick', 'broom'], icon: '🧹', photo: 'https://images.unsplash.com/photo-1585670270608-b4be2f629c15?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-600 to-yellow-800' },
+  { keywords: ['dustpan'], icon: '🧹', photo: 'https://images.unsplash.com/photo-1527515637462-cff94eecc1ac?w=350&auto=format&fit=crop&q=80', gradient: 'from-slate-600 to-zinc-700' },
+  { keywords: ['glass cleaner'], icon: '🧴', photo: 'https://images.unsplash.com/photo-1585670270608-b4be2f629c15?w=350&auto=format&fit=crop&q=80', gradient: 'from-cyan-400 to-blue-600' },
+  { keywords: ['phenyl', 'disinfectant'], icon: '🧴', photo: 'https://images.unsplash.com/photo-1584820927498-cfe5211fd8bf?w=350&auto=format&fit=crop&q=80', gradient: 'from-emerald-500 to-teal-700' },
+  { keywords: ['toilet cleaner', 'harpic'], icon: '🧴', photo: 'https://images.unsplash.com/photo-1585670270608-b4be2f629c15?w=350&auto=format&fit=crop&q=80', gradient: 'from-blue-600 to-indigo-700' },
+  { keywords: ['dishwash liquid', 'dishwash'], icon: '🧴', photo: 'https://images.unsplash.com/photo-1622560480605-d83c853bc5c3?w=350&auto=format&fit=crop&q=80', gradient: 'from-emerald-500 to-green-600' },
+  { keywords: ['hand wash', 'handwash'], icon: '🧴', photo: 'https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=350&auto=format&fit=crop&q=80', gradient: 'from-teal-400 to-cyan-600' },
+  { keywords: ['detergent liquid', 'detergent powder', 'detergent', 'washing powder'], icon: '🧼', photo: 'https://images.unsplash.com/photo-1585670270608-b4be2f629c15?w=350&auto=format&fit=crop&q=80', gradient: 'from-blue-500 to-indigo-600' },
+  { keywords: ['bath soap', 'soap', 'soaps', 'sabun'], icon: '🧼', photo: 'https://images.unsplash.com/photo-1600857544200-b2f666a9a2ec?w=350&auto=format&fit=crop&q=80', gradient: 'from-teal-400 to-cyan-600' },
+  { keywords: ['shampoo', 'conditioner'], icon: '🧴', photo: 'https://images.unsplash.com/photo-1535585209827-a15fcdbc4c2d?w=350&auto=format&fit=crop&q=80', gradient: 'from-purple-400 to-indigo-600' },
+  { keywords: ['toothpaste'], icon: '🪥', photo: 'https://images.unsplash.com/photo-1559591937-e10f135b1d44?w=350&auto=format&fit=crop&q=80', gradient: 'from-blue-400 to-teal-500' },
+  { keywords: ['toothbrush'], icon: '🪥', photo: 'https://images.unsplash.com/photo-1559591937-e10f135b1d44?w=350&auto=format&fit=crop&q=80', gradient: 'from-sky-400 to-blue-600' },
+
+  // Dairy & Refrigerated
+  { keywords: ['paneer', 'cottage cheese'], icon: '🧀', photo: 'https://images.unsplash.com/photo-1568909344668-6f14a07b56a0?w=350&auto=format&fit=crop&q=80', gradient: 'from-sky-400 to-indigo-600' },
+  { keywords: ['butter', 'makhan', 'amul butter'], icon: '🧈', photo: 'https://images.unsplash.com/photo-1589985270826-4b7bb135bc9d?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-400 to-yellow-600' },
+  { keywords: ['ghee', 'desi ghee'], icon: '🧈', photo: 'https://images.unsplash.com/photo-1631452180519-c014fe946bc7?w=350&auto=format&fit=crop&q=80', gradient: 'from-yellow-500 to-amber-600' },
+  { keywords: ['cheese', 'cheddar', 'mozzarella', 'cheese slice'], icon: '🧀', photo: 'https://images.unsplash.com/photo-1486297678162-eb2a19b0a32d?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-400 to-orange-500' },
+  { keywords: ['curd', 'dahi', 'yogurt', 'lassi'], icon: '🥣', photo: 'https://images.unsplash.com/photo-1571212515416-fef01fc43637?w=350&auto=format&fit=crop&q=80', gradient: 'from-blue-400 to-sky-600' },
+  { keywords: ['milk', 'dairy', 'taaza'], icon: '🥛', photo: 'https://images.unsplash.com/photo-1550583724-b2692b85b150?w=350&auto=format&fit=crop&q=80', gradient: 'from-sky-500 to-blue-700' },
+  { keywords: ['ice', 'ice cubes'], icon: '🧊', photo: 'https://images.unsplash.com/photo-1518895949257-7621c3c786d7?w=350&auto=format&fit=crop&q=80', gradient: 'from-cyan-300 to-blue-500' },
+
+  // Cooking Oils & Seeds
+  { keywords: ['coconut oil'], icon: '🛢️', photo: 'https://images.unsplash.com/photo-1526947425960-945c6e72858f?w=350&auto=format&fit=crop&q=80', gradient: 'from-emerald-500 to-teal-700' },
+  { keywords: ['groundnut oil', 'peanut oil'], icon: '🛢️', photo: 'https://images.unsplash.com/photo-1474979266404-7eaacbcd87c5?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-500 to-yellow-600' },
+  { keywords: ['mustard seeds', 'rai', 'sarson'], icon: '🫘', photo: 'https://images.unsplash.com/photo-1596040033229-a9821ebd058d?w=350&auto=format&fit=crop&q=80', gradient: 'from-stone-600 to-amber-800' },
+  { keywords: ['mustard oil'], icon: '🛢️', photo: 'https://images.unsplash.com/photo-1474979266404-7eaacbcd87c5?w=350&auto=format&fit=crop&q=80', gradient: 'from-yellow-500 to-amber-700' },
+  { keywords: ['cooking oil', 'sunflower oil', 'refined oil', 'oil'], icon: '🛢️', photo: 'https://images.unsplash.com/photo-1474979266404-7eaacbcd87c5?w=350&auto=format&fit=crop&q=80', gradient: 'from-yellow-400 to-amber-600' },
+
+  // Grains, Flour, Pulses, Sugar & Spices
+  { keywords: ['poha', 'flattened rice'], icon: '🥣', photo: 'https://images.unsplash.com/photo-1589301760014-d929f3979dbc?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-200 to-yellow-400' },
+  { keywords: ['vermicelli', 'seviyan'], icon: '🍜', photo: 'https://images.unsplash.com/photo-1569718212165-3a8278d5f624?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-300 to-yellow-500' },
+  { keywords: ['tamarind', 'imli'], icon: '🌰', photo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/2/2e/Tamarindus_indica_pods.JPG/500px-Tamarindus_indica_pods.JPG', gradient: 'from-amber-800 to-stone-900' },
+  { keywords: ['jaggery', 'gur', 'gud'], icon: '🍯', photo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/d/df/Jaggery_Blocks.jpg/500px-Jaggery_Blocks.jpg', gradient: 'from-amber-600 to-yellow-800' },
+  { keywords: ['sugar', 'cheeni', 'sakkar'], icon: '🧂', photo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/3/3c/Sucre_blanc_cassonade_complet_rapadura.jpg/500px-Sucre_blanc_cassonade_complet_rapadura.jpg', gradient: 'from-amber-100 to-yellow-300' },
+  { keywords: ['salt', 'namak', 'tata salt'], icon: '🧂', photo: 'https://images.unsplash.com/photo-1518110925495-5fe2fda0442c?w=350&auto=format&fit=crop&q=80', gradient: 'from-slate-400 to-blue-600' },
+  { keywords: ['wheat flour', 'atta', 'flour', 'wheat'], icon: '🌾', photo: 'https://images.unsplash.com/photo-1509440159596-0249088772ff?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-400 to-yellow-600' },
+  { keywords: ['maida'], icon: '🌾', photo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/4/43/White_flour_in_bowl.jpg/500px-White_flour_in_bowl.jpg', gradient: 'from-stone-300 to-amber-500' },
+  { keywords: ['besan', 'gram flour'], icon: '🌾', photo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/1/15/Gram_flour_besan.jpg/500px-Gram_flour_besan.jpg', gradient: 'from-yellow-400 to-amber-600' },
+  { keywords: ['rava', 'suji', 'sooji', 'semolina'], icon: '🌾', photo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/b3/Semolina_suji_rava.jpg/500px-Semolina_suji_rava.jpg', gradient: 'from-yellow-300 to-amber-500' },
+  { keywords: ['rice', 'basmati', 'chawal'], icon: '🍚', photo: 'https://images.unsplash.com/photo-1586201375761-83865001e31c?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-100 to-yellow-300' },
+  { keywords: ['toor dal', 'arhar dal', 'dal', 'pulse', 'pulses'], icon: '🫘', photo: 'https://images.unsplash.com/photo-1585994192701-f1a505c8574a?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-500 to-yellow-700' },
+  { keywords: ['black pepper', 'kali mirch'], icon: '🌶️', photo: 'https://images.unsplash.com/photo-1509358271058-acd22cc93898?w=350&auto=format&fit=crop&q=80', gradient: 'from-stone-700 to-zinc-900' },
+  { keywords: ['cardamom', 'elaichi'], icon: '🌿', photo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Cardamom_pods.jpg/500px-Cardamom_pods.jpg', gradient: 'from-emerald-600 to-green-700' },
+  { keywords: ['cumin seeds', 'cumin', 'jeera'], icon: '🌿', photo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/01/Cumin_seeds.jpg/500px-Cumin_seeds.jpg', gradient: 'from-amber-700 to-stone-800' },
+  { keywords: ['chilli powder', 'mirch powder', 'lal mirch'], icon: '🌶️', photo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/00/BolivianChilePowder2.JPG/500px-BolivianChilePowder2.JPG', gradient: 'from-red-600 to-rose-800' },
+  { keywords: ['turmeric powder', 'turmeric', 'haldi'], icon: '🧂', photo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/5/5b/Turmeric_curcuma_powder.jpg/500px-Turmeric_curcuma_powder.jpg', gradient: 'from-yellow-400 to-amber-600' },
+
+  // Vegetables & Fruits
+  { keywords: ['green chilli'], icon: '🌶️', photo: 'https://images.unsplash.com/photo-1588252303782-cb80119abd6d?w=350&auto=format&fit=crop&q=80', gradient: 'from-emerald-500 to-teal-700' },
+  { keywords: ['beans', 'french beans'], icon: '🫘', photo: 'https://images.unsplash.com/photo-1567306226416-28f0efdc88ce?w=350&auto=format&fit=crop&q=80', gradient: 'from-emerald-500 to-green-700' },
+  { keywords: ['coriander', 'dhaniya'], icon: '🌿', photo: 'https://images.unsplash.com/photo-1576045057995-568f588f82fb?w=350&auto=format&fit=crop&q=80', gradient: 'from-emerald-500 to-green-700' },
+  { keywords: ['cabbage', 'patta gobi'], icon: '🥬', photo: 'https://images.unsplash.com/photo-1459411621453-7b03977f4bfc?w=350&auto=format&fit=crop&q=80', gradient: 'from-emerald-600 to-green-700' },
+  { keywords: ['carrot', 'gajar'], icon: '🥕', photo: 'https://images.unsplash.com/photo-1598170845058-32b9d6a5da37?w=350&auto=format&fit=crop&q=80', gradient: 'from-orange-500 to-amber-600' },
+  { keywords: ['potato', 'potatoes', 'aloo'], icon: '🥔', photo: 'https://images.unsplash.com/photo-1518977676601-b53f82aba655?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-600 to-yellow-700' },
+  { keywords: ['tomato', 'tomatoes', 'tamatar'], icon: '🍅', photo: 'https://images.unsplash.com/photo-1546094096-0df4bcaaa337?w=350&auto=format&fit=crop&q=80', gradient: 'from-red-500 to-rose-600' },
+  { keywords: ['onion', 'onions', 'pyaz'], icon: '🧅', photo: 'https://images.unsplash.com/photo-1508747703725-719777637510?w=350&auto=format&fit=crop&q=80', gradient: 'from-purple-500 to-rose-700' },
+  { keywords: ['garlic', 'lehsun'], icon: '🧄', photo: 'https://images.unsplash.com/photo-1540148426945-6cf22a6b2383?w=350&auto=format&fit=crop&q=80', gradient: 'from-stone-400 to-stone-600' },
+  { keywords: ['ginger', 'adrak'], icon: '🫚', photo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/1/18/Koeh-146-no_text.jpg/500px-Koeh-146-no_text.jpg', gradient: 'from-amber-600 to-yellow-700' },
+  { keywords: ['lemon', 'nimbu'], icon: '🍋', photo: 'https://images.unsplash.com/photo-1590502593747-42a996133562?w=350&auto=format&fit=crop&q=80', gradient: 'from-yellow-300 to-lime-500' },
+  { keywords: ['coconut', 'nariyal'], icon: '🥥', photo: 'https://images.unsplash.com/photo-1544378730-8b5104b18790?w=350&auto=format&fit=crop&q=80', gradient: 'from-stone-600 to-amber-800' },
+  { keywords: ['apple', 'apples', 'seb'], icon: '🍎', photo: 'https://images.unsplash.com/photo-1560806887-1e4cd0b6cbd6?w=350&auto=format&fit=crop&q=80', gradient: 'from-rose-500 to-red-700' },
+  { keywords: ['banana', 'bananas', 'kela'], icon: '🍌', photo: 'https://images.unsplash.com/photo-1571771894821-ce9b6c11b08e?w=350&auto=format&fit=crop&q=80', gradient: 'from-yellow-400 to-amber-500' },
+  { keywords: ['mango', 'mangoes', 'aam'], icon: '🥭', photo: 'https://images.unsplash.com/photo-1553279768-865429fa0078?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-400 to-orange-500' },
+  { keywords: ['orange', 'santre'], icon: '🍊', photo: 'https://images.unsplash.com/photo-1547514701-42782101795e?w=350&auto=format&fit=crop&q=80', gradient: 'from-orange-400 to-amber-600' },
+
+  // Bakery, Snacks & Beverages
+  { keywords: ['eggs', 'egg', 'anda'], icon: '🥚', photo: 'https://images.unsplash.com/photo-1582722872445-44dc5f7e3c8f?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-300 to-orange-400' },
+  { keywords: ['bread'], icon: '🍞', photo: 'https://images.unsplash.com/photo-1509440159596-0249088772ff?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-500 to-yellow-700' },
+  { keywords: ['biscuits', 'biscuit', 'cookie', 'cookies'], icon: '🍪', photo: 'https://images.unsplash.com/photo-1499636136210-6f4ee915583e?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-600 to-yellow-800' },
+  { keywords: ['candy', 'toffee', 'sweet'], icon: '🍬', photo: 'https://images.unsplash.com/photo-1582058091505-f87a2e55a40f?w=350&auto=format&fit=crop&q=80', gradient: 'from-pink-400 to-purple-600' },
+  { keywords: ['tea powder', 'tea', 'chai'], icon: '☕', photo: 'https://images.unsplash.com/photo-1576092768241-dec231879fc3?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-600 to-yellow-800' },
+  { keywords: ['coffee powder', 'coffee'], icon: '☕', photo: 'https://images.unsplash.com/photo-1514432324607-a09d9b4aefdd?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-800 to-amber-950' },
+  { keywords: ['juice', 'shake', 'smoothie'], icon: '🧃', photo: 'https://images.unsplash.com/photo-1613478223719-2ab802602423?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-400 to-orange-600' },
+  { keywords: ['coke', 'pepsi', 'soda', 'drink', 'beverage'], icon: '🥤', photo: 'https://images.unsplash.com/photo-1622483767028-3f66f32aef97?w=350&auto=format&fit=crop&q=80', gradient: 'from-rose-600 to-red-800' },
+
+  // Stationery & Office
+  { keywords: ['stapler'], icon: '📎', photo: 'https://images.unsplash.com/photo-1583485088034-697b5bc54ccd?w=350&auto=format&fit=crop&q=80', gradient: 'from-slate-600 to-zinc-700' },
+  { keywords: ['file folder', 'folder'], icon: '📁', photo: 'https://images.unsplash.com/photo-1586075010923-2dd4570fb338?w=350&auto=format&fit=crop&q=80', gradient: 'from-amber-500 to-yellow-600' },
+  { keywords: ['printer paper', 'a4 paper', 'a4'], icon: '📄', photo: 'https://images.unsplash.com/photo-1589330694653-ded6df03f754?w=350&auto=format&fit=crop&q=80', gradient: 'from-slate-400 to-zinc-600' },
+  { keywords: ['notebook'], icon: '📓', photo: 'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?w=350&auto=format&fit=crop&q=80', gradient: 'from-indigo-500 to-purple-600' },
+  { keywords: ['ball pen', 'pen'], icon: '✏️', photo: 'https://images.unsplash.com/photo-1585336261026-78c772db317c?w=350&auto=format&fit=crop&q=80', gradient: 'from-blue-500 to-indigo-600' },
+
+  // Services
+  { keywords: ['ac repair', 'ac service'], icon: '❄️', photo: 'https://images.unsplash.com/photo-1621905251189-08b45d6a269e?w=350&auto=format&fit=crop&q=80', gradient: 'from-cyan-600 to-blue-700' },
+  { keywords: ['computer maintenance', 'computer service'], icon: '💻', photo: 'https://images.unsplash.com/photo-1588508065123-287b28e013da?w=350&auto=format&fit=crop&q=80', gradient: 'from-indigo-600 to-slate-800' },
+  { keywords: ['repair', 'service'], icon: '🛠️', photo: 'https://images.unsplash.com/photo-1581783342308-f792dbdd27c5?w=350&auto=format&fit=crop&q=80', gradient: 'from-slate-600 to-stone-800' },
+
+  // Apparel & Combos
+  { keywords: ['sports shoes', 'shoes', 'sneakers', 'footwear'], icon: '👟', photo: 'https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=350&auto=format&fit=crop&q=80', gradient: 'from-stone-600 to-slate-800' },
+  { keywords: ['combo'], icon: '🎁', photo: 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=350&auto=format&fit=crop&q=80', gradient: 'from-violet-600 to-indigo-700' }
+];
+
+const FALLBACK_GRADIENTS = [
+  'from-indigo-600 to-purple-700',
+  'from-blue-600 to-cyan-700',
+  'from-emerald-600 to-teal-700',
+  'from-amber-600 to-orange-700',
+  'from-rose-600 to-pink-700',
+  'from-violet-600 to-fuchsia-700',
+  'from-sky-600 to-indigo-700',
+  'from-teal-600 to-emerald-700'
+];
+
+export function getProductAutoImageUrl(name = '', barcode = '') {
+  const clean = String(name || '').toLowerCase().trim();
+  if (!clean) return 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=350&auto=format&fit=crop&q=80';
+
+  let bestMatch = null;
+  let bestScore = 0;
+
+  for (const entry of PRODUCT_KEYWORD_MAP) {
+    if (entry.photo) {
+      for (const kw of entry.keywords) {
+        const kwLower = kw.toLowerCase();
+        if (clean === kwLower) {
+          return entry.photo;
+        }
+        const regex = new RegExp(`\\b${kwLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+        if (regex.test(clean)) {
+          const score = kwLower.length * (kwLower.includes(' ') ? 3 : 2);
+          if (score > bestScore) {
+            bestScore = score;
+            bestMatch = entry.photo;
+          }
+        } else if (clean.includes(kwLower)) {
+          const score = kwLower.length;
+          if (score > bestScore) {
+            bestScore = score;
+            bestMatch = entry.photo;
+          }
+        }
+      }
+    }
+  }
+
+  if (bestMatch) return bestMatch;
+  return 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=350&auto=format&fit=crop&q=80';
+}
+
+export async function fetchRealProductPhoto(name = '', barcode = '') {
+  const cleanBarcode = String(barcode || '').trim();
+  // 1. Try Open Food Facts by barcode
+  if (cleanBarcode && /^\d{8,14}$/.test(cleanBarcode)) {
+    try {
+      const res = await fetch(`https://world.openfoodfacts.org/api/v0/product/${cleanBarcode}.json`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.status === 1 && data.product) {
+          const img = data.product.image_front_url || data.product.image_url || data.product.image_front_small_url;
+          if (img) return img;
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // 2. Try curated photo dictionary by scoring
+  const photo = getProductAutoImageUrl(name, barcode);
+  if (photo && !photo.includes('photo-1542838132-92c53300491e')) {
+    return photo;
+  }
+
+  // 3. Dynamic search across Wikipedia Commons for ANY newly created product
+  try {
+    const queryTerm = String(name || '')
+      .replace(/\b\d+(\.\d+)?\s*(kg|g|gm|ml|l|ltr|pcs|pc|w|mah|m|cm|mm|pages|sheets|socket|socket box)\b/gi, '')
+      .replace(/[^\w\s]/g, ' ')
+      .trim();
+    if (queryTerm) {
+      const wikiUrl = `https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(queryTerm)}&gsrlimit=3&prop=pageimages&pithumbsize=400&format=json&origin=*`;
+      const res = await fetch(wikiUrl);
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.query?.pages) {
+          const pages = Object.values(data.query.pages);
+          const found = pages.find(p => p.thumbnail?.source);
+          if (found?.thumbnail?.source) {
+            return found.thumbnail.source;
+          }
+        }
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  return photo || 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=350&auto=format&fit=crop&q=80';
+}
+
+export function getProductAutoVisual(name = '') {
+  const clean = String(name || '').toLowerCase().trim();
+  if (!clean) {
+    return {
+      icon: '📦',
+      photo: 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=350&auto=format&fit=crop&q=80',
+      gradient: 'from-indigo-600 to-purple-700',
+      initials: 'P',
+      isEmoji: true
+    };
+  }
+
+  let bestEntry = null;
+  let bestScore = 0;
+
+  for (const entry of PRODUCT_KEYWORD_MAP) {
+    for (const kw of entry.keywords) {
+      const kwLower = kw.toLowerCase();
+      if (clean === kwLower) {
+        return {
+          icon: entry.icon,
+          photo: entry.photo || null,
+          gradient: entry.gradient,
+          initials: (name || 'P').slice(0, 2).toUpperCase(),
+          isEmoji: true
+        };
+      }
+      const regex = new RegExp(`\\b${kwLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+      if (regex.test(clean)) {
+        const score = kwLower.length * (kwLower.includes(' ') ? 3 : 2);
+        if (score > bestScore) {
+          bestScore = score;
+          bestEntry = entry;
+        }
+      } else if (clean.includes(kwLower)) {
+        const score = kwLower.length;
+        if (score > bestScore) {
+          bestScore = score;
+          bestEntry = entry;
+        }
+      }
+    }
+  }
+
+  if (bestEntry) {
+    return {
+      icon: bestEntry.icon,
+      photo: bestEntry.photo || null,
+      gradient: bestEntry.gradient,
+      initials: (name || 'P').slice(0, 2).toUpperCase(),
+      isEmoji: true
+    };
+  }
+
+  // Deterministic fallback based on product name hash
+  let hash = 0;
+  for (let i = 0; i < clean.length; i++) {
+    hash = (hash << 5) - hash + clean.charCodeAt(i);
+    hash |= 0;
+  }
+  const gradIdx = Math.abs(hash) % FALLBACK_GRADIENTS.length;
+
+  return {
+    icon: (name || 'P').slice(0, 2).toUpperCase(),
+    photo: 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=350&auto=format&fit=crop&q=80',
+    gradient: FALLBACK_GRADIENTS[gradIdx],
+    initials: (name || 'P').slice(0, 2).toUpperCase(),
+    isEmoji: false
+  };
+}
 
 export function getProductUnitOptions(product) {
   if (!product) return [{ unit: 'pcs', factor: 1, price: 0, isBase: true }];
@@ -209,15 +524,15 @@ export function playScanSound(type = 'add') {
   } catch (_) {}
 }
 
-export function resolveProductPricing(product, customer, priceSheets = []) {
+export function resolveProductPricing(product, customer, priceSheets = [], overrideSheetId = null) {
   if (!product) return { price: 0, discountPercent: 0, ruleSource: null };
 
   let basePrice = Number(product.price || 0);
   let discountPercent = 0;
   let ruleSource = null;
 
-  // 1. Direct customer custom price override (REQ-02)
-  if (customer?.customPrices && customer.customPrices[product.id] !== undefined) {
+  // 1. Direct customer custom price override (REQ-02) — skipped when a sheet is picked manually for this bill
+  if (!overrideSheetId && customer?.customPrices && customer.customPrices[product.id] !== undefined) {
     const custPrice = Number(customer.customPrices[product.id]);
     if (Number.isFinite(custPrice) && custPrice >= 0) {
       return {
@@ -228,9 +543,9 @@ export function resolveProductPricing(product, customer, priceSheets = []) {
     }
   }
 
-  // 2. Customer Price Sheet or Customer Group Price Sheet (REQ-01 & REQ-02)
-  const targetSheetId = customer?.priceSheetId;
-  const targetGroup = customer?.group;
+  // 2. Manually-picked bill sheet > Customer's assigned Price Sheet > Customer Group Price Sheet (REQ-01 & REQ-02)
+  const targetSheetId = overrideSheetId || customer?.priceSheetId;
+  const targetGroup = overrideSheetId ? null : customer?.group;
   const activeSheet = priceSheets.find(
     (s) => s.isActive && (s.id === targetSheetId || (targetGroup && String(s.customerType || '').toLowerCase() === String(targetGroup).toLowerCase()))
   );
@@ -255,7 +570,13 @@ export function resolveProductPricing(product, customer, priceSheets = []) {
     ruleSource = 'Customer Discount';
   }
 
-  return { price: basePrice, discountPercent, ruleSource };
+  // Fold the resolved discount % into the actual selling price — callers only
+  // read `price` for the cart/grid, they never re-apply discountPercent themselves.
+  const finalPrice = discountPercent > 0
+    ? Math.round(basePrice * (1 - discountPercent / 100) * 100) / 100
+    : basePrice;
+
+  return { price: finalPrice, discountPercent, ruleSource };
 }
 
 /**
@@ -264,7 +585,7 @@ export function resolveProductPricing(product, customer, priceSheets = []) {
  * keyboard wedge, so keystrokes are captured globally rather than requiring the
  * search box to hold focus, and weighed items pull a stable read from the scale.
  */
-export default function POSTerminal({ tenant, showToast, settings: appSettings }) {
+export default function POSTerminal({ tenant, showToast, settings: appSettings, onSaleCompleted }) {
   const [categories, setCategories] = useState([]);
   const [products, setProducts] = useState([]);
   const [customers, setCustomers] = useState([]);
@@ -283,6 +604,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
   const [recentBilledIds, setRecentBilledIds] = useState([]);
   const [cart, setCart] = useState([]);
   const [customerId, setCustomerId] = useState('');
+  const [priceSheetId, setPriceSheetId] = useState('');
   const [showAddCustomer, setShowAddCustomer] = useState(false);
   const [roundOffOverride, setRoundOffOverride] = useState(null);
   const [discountPercent, setDiscountPercent] = useState(0);
@@ -299,6 +621,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
   const [paymentMode, setPaymentMode] = useState('Cash');
   const [cashTendered, setCashTendered] = useState('');
   const [redeemPoints, setRedeemPoints] = useState(0);
+  const [redeemAdvance, setRedeemAdvance] = useState(0);
   const [checkingOut, setCheckingOut] = useState(false);
   const [receipt, setReceipt] = useState(null);
   const [showHeld, setShowHeld] = useState(false);
@@ -354,13 +677,13 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
   // Customer-Specific Pricing & Price Sheet Auto-Application (REQ-01 & REQ-02)
   useEffect(() => {
     const cust = customers.find((c) => c.id === customerId);
-    if (!cust) return;
+    if (!cust && !priceSheetId) return;
 
     setCart((prevCart) => {
       if (prevCart.length === 0) return prevCart;
       return prevCart.map((item) => {
         const prod = products.find((p) => p.id === item.id) || item;
-        const pricing = resolveProductPricing(prod, cust, priceSheets);
+        const pricing = resolveProductPricing(prod, cust, priceSheets, priceSheetId);
         const unitOpts = getProductUnitOptions(prod);
         const opt = unitOpts.find((o) => o.unit === item.unit) || unitOpts[0];
         const factor = opt?.factor || 1;
@@ -375,7 +698,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
         };
       });
     });
-  }, [customerId, customers, priceSheets, products]);
+  }, [customerId, customers, priceSheets, priceSheetId, products]);
 
   /* ------------------------- cart maths ------------------------- */
 
@@ -386,7 +709,10 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
   const isRoundOff = useMemo(() => {
     if (roundOffOverride !== null) return roundOffOverride;
     const b = settings?.billing || {};
-    return Boolean(b.roundOff || b.roundOffTotal || b.roundOffGrandTotal);
+    if (b.roundOff !== undefined) return Boolean(b.roundOff);
+    if (b.roundOffTotal !== undefined) return Boolean(b.roundOffTotal);
+    if (b.roundOffGrandTotal !== undefined) return Boolean(b.roundOffGrandTotal);
+    return true; // Always round off by default in billing
   }, [roundOffOverride, settings]);
 
   const totals = useMemo(() => {
@@ -445,10 +771,26 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
     };
   }, [settings, customer, totals.grand, redeemPoints]);
 
-  const payable = isRoundOff ? Math.round(totals.grand - loyalty.amount) : Math.round((totals.grand - loyalty.amount) * 100) / 100;
+  /* ---------------------- Customer Advance / Store Credit ---------------------- */
+  const advanceCredit = useMemo(() => {
+    const available = Math.max(0, Number(customer?.advance || customer?.advanceBalance || 0));
+    const afterLoyalty = Math.max(0, totals.grand - loyalty.amount);
+    const maxAdvance = Math.min(available, afterLoyalty);
+    const applied = Math.max(0, Math.min(Number(redeemAdvance) || 0, maxAdvance));
+    return {
+      available,
+      maxAdvance,
+      applied: Math.round(applied * 100) / 100
+    };
+  }, [customer, totals.grand, loyalty.amount, redeemAdvance]);
+
+  const payable = isRoundOff
+    ? Math.max(0, Math.round(totals.grand - loyalty.amount - advanceCredit.applied))
+    : Math.max(0, Math.round((totals.grand - loyalty.amount - advanceCredit.applied) * 100) / 100);
 
   useEffect(() => {
     setRedeemPoints(0);
+    setRedeemAdvance(0);
   }, [customerId, cart.length]);
 
   const changeDue = Math.max(0, (parseFloat(cashTendered) || 0) - payable);
@@ -458,7 +800,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
   const addToCart = useCallback(
     (product, qty = 1) => {
       const cust = customers.find((c) => c.id === customerId);
-      const pricing = resolveProductPricing(product, cust, priceSheets);
+      const pricing = resolveProductPricing(product, cust, priceSheets, priceSheetId);
       const options = getProductUnitOptions({ ...product, price: pricing.price });
       const isScaleWeighed = Boolean(product.requiresWeight);
 
@@ -505,7 +847,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
         ];
       });
     },
-    [customerId, customers, priceSheets, showToast]
+    [customerId, customers, priceSheets, priceSheetId, showToast]
   );
 
   const removeFromCart = useCallback((product, qty = 1) => {
@@ -788,6 +1130,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
         customerName: customer?.name || 'Walk-in Customer',
         customerPhone: customer?.phone || 'N/A',
         customerGstin: customer?.gstin || '',
+        customerPan: customer?.pan || '',
         customerAddress: customer?.address || '',
         items: cart.map((i) => ({
           productId: i.id,
@@ -802,7 +1145,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
         subtotal: totals.subtotal,
         tax: totals.tax,
         discount: totals.discountAmount,
-        roundOff: isRoundOff ? totals.roundOff : 0,
+        roundOff: totals.roundOff,
         total: totals.grand,
         notes: note || ''
       });
@@ -815,6 +1158,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
   const resumeBill = async (bill) => {
     setCart(bill.items);
     setCustomerId(bill.customerId || '');
+    setPriceSheetId('');
     setTableId(bill.tableId || '');
     setNote(bill.notes || '');
     try {
@@ -852,17 +1196,24 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
 
     setCheckingOut(true);
     try {
+      const actualPaymentMode = payable === 0 && advanceCredit.applied > 0 ? 'Advance / Store Credit' : paymentMode;
       const res = await api.post('/orders', {
         customerId: customer?.id || null,
         customerName: customer?.name || 'Walk-in Customer',
         customerPhone: customer?.phone || null,
-        paymentMethod: paymentMode,
+        customerGstin: customer?.gstin || '',
+        customerPan: customer?.pan || '',
+        customerAddress: customer?.address || '',
+        customerState: customer?.state || '',
+        customerStateCode: customer?.stateCode || '',
+        paymentMethod: actualPaymentMode,
         subtotal: totals.subtotal,
         tax: totals.tax,
         discount: totals.discountAmount,
         roundOff: totals.roundOff,
         total: totals.grand,
         redeemPoints: loyalty.points || 0,
+        redeemAdvanceAmount: advanceCredit.applied || 0,
         items: cart,
         tableId: tableId || null,
         notes: note
@@ -873,6 +1224,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
       clearCart();
       setCashTendered('');
       setRedeemPoints(0);
+      setRedeemAdvance(0);
 
       if (res.data) {
         setRecentInvoices((prev) => [res.data, ...(prev || []).filter((o) => o.orderId !== res.data.orderId)].slice(0, 20));
@@ -891,6 +1243,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
       // drawer balance and held bills back in sync without the multi-second
       // gap during which the grid used to show stale stock.
       load();
+      onSaleCompleted?.();
 
       if (settings?.billing?.printAfterCheckout) setTimeout(() => window.print(), 400);
     } catch (err) {
@@ -975,13 +1328,34 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
 
   const currentCustomer = useMemo(() => customers.find((c) => c.id === customerId) || null, [customers, customerId]);
 
+  // Stock + pricing per product used to be recomputed inline in JSX for every
+  // visible card on every POSTerminal render — including renders triggered by
+  // wholly unrelated state (typing a cash amount, opening a modal). With ~150
+  // cards each doing a cart scan + price-sheet lookup, that was the "buffering"
+  // stutter on selection. Memoized here so it only recomputes when something
+  // that actually affects a card's stock/price/label changes.
+  const visibleProductCards = useMemo(() => {
+    return filtered.slice(0, 150).map((p, index) => {
+      const stockInfo = getProductRemainingStock(p, cart, products);
+      const out = stockInfo.isOut;
+      const isLow = stockInfo.isLow;
+      const pricing = resolveProductPricing(p, currentCustomer, priceSheets, priceSheetId);
+      const isRecent = recentBilledIdSet.has(p.id) && (selectedCategory === 'recent-billed' || index < 8);
+      const imgUrl = getProductImageUrl(p.imageUrl, p.name, p.barcode);
+      const autoVisual = getProductAutoVisual(p.name);
+      const prodCat = categories.find((c) => (p.categoryIds || [p.categoryId]).includes(c.id)) || { name: p.categoryId || 'General' };
+      const catTheme = getCategoryTheme(prodCat);
+      return { product: p, stockInfo, out, isLow, pricing, isRecent, imgUrl, autoVisual, catTheme };
+    });
+  }, [filtered, cart, products, currentCustomer, priceSheets, priceSheetId, recentBilledIdSet, selectedCategory, categories]);
+
   if (initialLoading) return <Spinner label="Opening the billing terminal…" />;
 
   const sessionOpen = session?.status === 'open';
 
   return (
-    <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-12">
-      {/* ----------------------------- Catalogue ----------------------------- */}
+    <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-10">
+      {/* ----------------------------- Catalogue (70%) ----------------------------- */}
       <div className="space-y-3 lg:col-span-7">
         <Panel className="flex flex-wrap items-center gap-2 relative">
           <div className="relative min-w-[220px] flex-1">
@@ -1015,7 +1389,11 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
                   filtered.slice(0, 8).map((p) => {
                     const stockInfo = getProductRemainingStock(p, cart, products);
                     const cust = customers.find((c) => c.id === customerId);
-                    const pricing = resolveProductPricing(p, cust, priceSheets);
+                    const pricing = resolveProductPricing(p, cust, priceSheets, priceSheetId);
+                    const imgUrl = getProductImageUrl(p.imageUrl, p.name, p.barcode);
+                    const autoVisual = getProductAutoVisual(p.name);
+                    const prodCat = categories.find((c) => (p.categoryIds || [p.categoryId]).includes(c.id)) || { name: p.categoryId || 'General' };
+                    const catTheme = getCategoryTheme(prodCat);
                     return (
                       <div
                         key={p.id}
@@ -1026,21 +1404,50 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
                         }}
                         className="flex items-center justify-between p-2 rounded-xl hover:bg-[color:var(--bg-subtle)] cursor-pointer text-xs transition-colors group"
                       >
-                        <div className="min-w-0 pr-2">
-                          <div className="font-bold text-[color:var(--text-primary)] group-hover:text-indigo-600 dark:group-hover:text-indigo-400 truncate">
-                            {p.name}
+                        <div className="flex items-center gap-2.5 min-w-0 pr-2">
+                          <div className="h-8 w-8 rounded-lg overflow-hidden border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] shrink-0 flex items-center justify-center">
+                            {imgUrl ? (
+                              <img
+                                src={imgUrl}
+                                alt={p.name}
+                                className="h-full w-full object-cover"
+                                onError={(e) => {
+                                  e.currentTarget.style.display = 'none';
+                                  if (e.currentTarget.nextSibling) {
+                                    e.currentTarget.nextSibling.style.display = 'flex';
+                                  }
+                                }}
+                              />
+                            ) : null}
+                            <div
+                              className={`h-full w-full bg-gradient-to-br ${autoVisual.gradient} flex items-center justify-center text-xs select-none`}
+                              style={{ display: imgUrl ? 'none' : 'flex' }}
+                            >
+                              <span>{autoVisual.icon}</span>
+                            </div>
                           </div>
-                          <div className="text-[10px] text-[color:var(--text-muted)] flex items-center gap-2 mt-0.5">
-                            {p.barcode && <span className="font-mono bg-[color:var(--bg-subtle)] px-1.5 py-0.2 rounded">{p.barcode}</span>}
-                            <span>{p.unit || 'pcs'}</span>
-                            <span className={stockInfo.isOut ? 'text-rose-500 font-semibold' : 'text-emerald-600 dark:text-emerald-400 font-semibold'}>
-                              {stockInfo.text}
-                            </span>
-                            {pricing.ruleSource && (
-                              <span className="text-amber-600 dark:text-amber-400 font-bold">
-                                {pricing.ruleSource}
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <div className="font-bold text-[color:var(--text-primary)] group-hover:text-indigo-600 dark:group-hover:text-indigo-400 truncate">
+                                {p.name}
+                              </div>
+                              <span className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[8.5px] font-extrabold ${catTheme.badge} shrink-0`}>
+                                <span className={`h-1 w-1 rounded-full ${catTheme.dot}`} />
+                                {prodCat.name}
                               </span>
-                            )}
+                            </div>
+                            <div className="text-[10px] text-[color:var(--text-muted)] flex items-center gap-2 mt-0.5">
+                              {p.barcode && <span className="font-mono bg-[color:var(--bg-subtle)] px-1.5 py-0.2 rounded">{p.barcode}</span>}
+                              <span>{p.unit || 'pcs'}</span>
+                              <span className={stockInfo.isOut ? 'text-rose-500 font-semibold' : 'text-emerald-600 dark:text-emerald-400 font-semibold'}>
+                                {stockInfo.text}
+                              </span>
+                              {pricing.ruleSource && (
+                                <span className="text-amber-600 dark:text-amber-400 font-bold">
+                                  {pricing.ruleSource}
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </div>
                         <div className="text-right shrink-0">
@@ -1123,7 +1530,9 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
           <button
             onClick={() => setSelectedCategory('all')}
             className={`shrink-0 rounded-xl px-3 py-2 text-[11.5px] font-bold transition-all ${
-              selectedCategory === 'all' ? 'bg-indigo-600 text-white shadow-sm' : 'surface text-[color:var(--text-secondary)]'
+              selectedCategory === 'all'
+                ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/30'
+                : 'surface text-[color:var(--text-secondary)] border border-[color:var(--border)] hover:text-[color:var(--text-primary)]'
             }`}
           >
             All items ({products.length})
@@ -1131,19 +1540,23 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
 
           {categories.map((cat) => {
             const count = products.filter((p) => (p.categoryIds || [p.categoryId]).includes(cat.id)).length;
+            const catTheme = getCategoryTheme(cat);
+            const isSelected = selectedCategory === cat.id;
             return (
               <button
                 key={cat.id}
                 onClick={() => setSelectedCategory(cat.id)}
                 className={`flex shrink-0 items-center gap-1.5 rounded-xl px-3 py-2 text-[11.5px] font-bold transition-all ${
-                  selectedCategory === cat.id
-                    ? 'bg-indigo-600 text-white shadow-sm'
-                    : 'surface text-[color:var(--text-secondary)]'
+                  isSelected
+                    ? `${catTheme.solid}`
+                    : `border ${catTheme.tabInactive}`
                 }`}
               >
-                <span>{cat.icon}</span>
-                {cat.name}
-                <span className="opacity-60">{count}</span>
+                <span>{cat.icon || '📦'}</span>
+                <span>{cat.name}</span>
+                <span className={`inline-flex items-center justify-center px-1.5 py-0.2 rounded-full text-[10px] font-extrabold ${isSelected ? 'bg-white/20 text-white' : 'opacity-70'}`}>
+                  {count}
+                </span>
               </button>
             );
           })}
@@ -1157,14 +1570,8 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
             />
           </Panel>
         ) : (
-          <div className="grid max-h-[calc(100vh-19rem)] grid-cols-2 gap-2.5 overflow-y-auto pr-1 sm:grid-cols-3 xl:grid-cols-4 pb-12">
-            {filtered.slice(0, 150).map((p, index) => {
-              const stockInfo = getProductRemainingStock(p, cart, products);
-              const out = stockInfo.isOut;
-              const isLow = stockInfo.isLow;
-              const pricing = resolveProductPricing(p, currentCustomer, priceSheets);
-              const isRecent = recentBilledIdSet.has(p.id) && (selectedCategory === 'recent-billed' || index < 8);
-
+          <div className="grid max-h-[calc(100vh-18rem)] grid-cols-2 gap-2.5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-4 2xl:grid-cols-4 overflow-y-auto pr-1 pb-12">
+            {visibleProductCards.map(({ product: p, stockInfo, out, isLow, pricing, isRecent, imgUrl, autoVisual, catTheme }) => {
               return (
                 <motion.button
                   key={p.id}
@@ -1173,54 +1580,99 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
                     addToCart(p, 1);
                     playScanSound('add');
                   }}
-                  className="surface group flex flex-col justify-between rounded-2xl p-3 text-left transition-all hover:-translate-y-0.5 hover:shadow-md cursor-pointer"
+                  className="surface group flex flex-col justify-between rounded-xl p-2.5 text-left transition-all hover:-translate-y-0.5 hover:shadow-md cursor-pointer relative overflow-hidden border border-[color:var(--border)] hover:border-indigo-400 dark:hover:border-indigo-600"
                 >
-                  <div className="min-w-0">
-                    <div className="flex items-center justify-between gap-1">
-                      <span className="tabular truncate text-[9.5px] font-bold text-[color:var(--text-muted)]">
-                        {p.barcode}
-                      </span>
-                      <div className="flex items-center gap-1 shrink-0">
+                  {/* Category Accent Top Line */}
+                  <div className={`absolute top-0 left-0 right-0 h-[3.5px] ${catTheme.topBar}`} />
+
+                  {/* Product Image Card (Compact 4-per-row) */}
+                  <div className="relative w-full h-22 sm:h-24 rounded-lg overflow-hidden bg-[color:var(--bg-subtle)] border border-[color:var(--border-subtle)] mt-0.5 mb-1.5 flex items-center justify-center shrink-0">
+                    {imgUrl ? (
+                      <img
+                        src={imgUrl}
+                        alt={p.name}
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                        loading="lazy"
+                        onError={(e) => {
+                          e.currentTarget.style.display = 'none';
+                          if (e.currentTarget.nextSibling) {
+                            e.currentTarget.nextSibling.style.display = 'flex';
+                          }
+                        }}
+                      />
+                    ) : null}
+                    <div
+                      className={`w-full h-full bg-gradient-to-br ${autoVisual.gradient} flex flex-col items-center justify-center relative overflow-hidden transition-transform duration-300 group-hover:scale-105 select-none`}
+                      style={{ display: imgUrl ? 'none' : 'flex' }}
+                    >
+                      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,255,255,0.25),transparent_60%)] pointer-events-none" />
+                      {autoVisual.isEmoji ? (
+                        <span className="text-3xl sm:text-4xl filter drop-shadow-md select-none transform transition-transform group-hover:scale-110 duration-200">
+                          {autoVisual.icon}
+                        </span>
+                      ) : (
+                        <div className="h-9 w-9 rounded-xl bg-white/20 backdrop-blur-xs border border-white/30 flex items-center justify-center text-white font-black text-sm shadow-md tracking-wider uppercase">
+                          {autoVisual.icon}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Overlay Badges */}
+                    <div className="absolute top-1 left-1 right-1 flex items-center justify-between gap-0.5 pointer-events-none">
+                      {p.barcode ? (
+                        <span className="tabular truncate text-[8px] font-mono font-bold px-1 py-0.2 rounded bg-slate-950/80 text-white backdrop-blur-xs shadow-xs max-w-[65%]">
+                          {p.barcode}
+                        </span>
+                      ) : <span />}
+
+                      <div className="flex items-center gap-0.5 shrink-0">
                         {isRecent && (
                           <span
-                            className="flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-bold bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border border-amber-200 dark:border-amber-900"
+                            className="flex items-center gap-0.5 rounded px-1 py-0.2 text-[7.5px] font-bold bg-amber-500 text-white shadow-xs"
                             title="Recently billed product"
                           >
-                            <Clock className="h-2.5 w-2.5" />
+                            <Clock className="h-2 w-2" />
                             Recent
                           </span>
                         )}
-                        {p.requiresWeight && <Scale className="h-3 w-3 shrink-0 text-cyan-600 dark:text-cyan-400" />}
+                        {p.requiresWeight && (
+                          <span className="rounded p-0.5 bg-cyan-600 text-white shadow-xs" title="Weighing Scale Required">
+                            <Scale className="h-2 w-2" />
+                          </span>
+                        )}
                       </div>
                     </div>
-                    <div className="mt-1 line-clamp-2 text-[12px] font-bold leading-snug text-[color:var(--text-primary)] group-hover:text-[color:var(--accent)]">
-                      {p.name}
-                    </div>
-                    {pricing.ruleSource && (
-                      <div className="mt-0.5 text-[9.5px] font-bold text-indigo-600 dark:text-indigo-400">
-                        {pricing.ruleSource}
-                      </div>
-                    )}
-                    {p.printName && (
-                      <div className="truncate text-[10px] text-[color:var(--text-muted)]">{p.printName}</div>
-                    )}
                   </div>
 
-                  <div className="mt-2.5 flex items-end justify-between gap-1 border-t pt-2" style={{ borderColor: 'var(--border)' }}>
-                    <Money value={pricing.price} decimals={false} className="text-[14px] font-bold" />
-                    <span
-                      className={`tabular rounded-md px-1.5 py-0.5 text-[9.5px] font-bold ${
-                        out
-                          ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300'
-                          : isLow
-                            ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300'
-                            : 'text-[color:var(--text-muted)]'
-                      }`}
-                      style={!out && !isLow ? { background: 'var(--bg-subtle)' } : undefined}
-                      title={`Stock: ${stockInfo.text}`}
-                    >
-                      {out ? 'Out of stock' : stockInfo.text}
-                    </span>
+                  {/* Product Info */}
+                  <div className="min-w-0 flex-1 flex flex-col justify-between">
+                    <div>
+                      <div className="line-clamp-2 text-[11px] sm:text-[11.5px] font-bold leading-tight text-[color:var(--text-primary)] group-hover:text-[color:var(--accent)] transition-colors">
+                        {p.name}
+                      </div>
+                      {pricing.ruleSource && (
+                        <div className="mt-0.5 text-[8.5px] font-bold text-indigo-600 dark:text-indigo-400 truncate">
+                          {pricing.ruleSource}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="mt-1.5 flex items-center justify-between gap-1 border-t pt-1.5" style={{ borderColor: 'var(--border)' }}>
+                      <Money value={pricing.price} decimals={false} className="text-[12px] sm:text-[12.5px] font-bold text-[color:var(--text-primary)]" />
+                      <span
+                        className={`tabular rounded px-1 py-0.2 text-[8px] sm:text-[8.5px] font-bold shrink-0 ${
+                          out
+                            ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300'
+                            : isLow
+                              ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300'
+                              : 'text-[color:var(--text-muted)]'
+                        }`}
+                        style={!out && !isLow ? { background: 'var(--bg-subtle)' } : undefined}
+                        title={`Stock: ${stockInfo.text}`}
+                      >
+                        {out ? 'Out' : stockInfo.text}
+                      </span>
+                    </div>
                   </div>
                 </motion.button>
               );
@@ -1229,8 +1681,8 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
         )}
       </div>
 
-      {/* ------------------------------- Cart ------------------------------- */}
-      <div className="lg:sticky lg:top-20 lg:col-span-5">
+      {/* ------------------------------- Cart / Billing (30%) ------------------------------- */}
+      <div className="lg:sticky lg:top-20 lg:col-span-3">
         <Panel className="space-y-3">
           <div className="flex items-center justify-between gap-2 border-b pb-2.5" style={{ borderColor: 'var(--border)' }}>
             <div className="flex items-center gap-2">
@@ -1250,37 +1702,40 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
             </div>
           </div>
 
-          <div className="grid grid-cols-12 gap-2.5">
+          <div className="grid grid-cols-12 gap-2">
             <div className="col-span-7 min-w-0">
-              <Field label="Customer" className="min-w-0">
-                <div className="flex items-center gap-1.5 min-w-0 w-full">
-                  <div className="flex-1 min-w-0">
-                    <Select
-                      value={customerId}
-                      onChange={(e) => setCustomerId(e.target.value)}
-                      className="w-full"
-                    >
-                      <option value="">Walk-in Customer</option>
-                      {customers.map((c) => {
-                        const hasCustom = c.customPrices && Object.keys(c.customPrices).length > 0;
-                        return (
-                          <option key={c.id} value={c.id}>
-                            {c.name}{c.phone ? ` (${c.phone})` : ''}{hasCustom ? ' ★ Custom' : ''}{c.outstanding > 0 ? ` · due ${money(c.outstanding, { decimals: false })}` : ''}
-                          </option>
-                        );
-                      })}
-                    </Select>
-                  </div>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    icon={UserPlus}
-                    onClick={() => setShowAddCustomer(true)}
-                    title="Add New Customer"
-                    className="shrink-0 h-[36px] w-[36px] p-0 flex items-center justify-center rounded-xl border border-[color:var(--border)] hover:border-indigo-500 hover:text-indigo-600 bg-[color:var(--bg-subtle)]"
-                  />
+              <span className="label-eyebrow mb-1.5 block">Customer</span>
+              <div className="flex items-center gap-1.5 min-w-0 w-full">
+                <div className="flex-1 min-w-0">
+                  <Select
+                    value={customerId}
+                    onChange={(e) => {
+                      setCustomerId(e.target.value);
+                      setPriceSheetId('');
+                    }}
+                    className="w-full text-xs"
+                  >
+                    <option value="">Walk-in Customer</option>
+                    {customers.map((c) => {
+                      const hasCustom = c.customPrices && Object.keys(c.customPrices).length > 0;
+                      return (
+                        <option key={c.id} value={c.id}>
+                          {c.name}{c.phone ? ` (${c.phone})` : ''}{hasCustom ? ' ★ Custom' : ''}{c.outstanding > 0 ? ` · due ${money(c.outstanding, { decimals: false })}` : ''}
+                        </option>
+                      );
+                    })}
+                  </Select>
                 </div>
-              </Field>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  icon={UserPlus}
+                  onClick={() => setShowAddCustomer(true)}
+                  title="Add New Customer"
+                  className="shrink-0 h-[36px] w-[36px] p-0 flex items-center justify-center rounded-xl border border-[color:var(--border)] hover:border-indigo-500 hover:text-indigo-600 bg-[color:var(--bg-subtle)]"
+                />
+              </div>
             </div>
 
             <div className="col-span-5 min-w-0">
@@ -1288,7 +1743,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
                 <Select
                   value={discountPercent}
                   onChange={(e) => setDiscountPercent(Math.min(maxDiscount, Number(e.target.value)))}
-                  className="w-full"
+                  className="w-full text-xs"
                 >
                   {DISCOUNT_PRESETS.filter((d) => d <= maxDiscount).map((d) => (
                     <option key={d} value={d}>
@@ -1299,6 +1754,33 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
               </Field>
             </div>
           </div>
+
+          {priceSheets.length > 0 && (
+            <Field
+              label="Price Sheet"
+              hint={
+                priceSheetId
+                  ? 'Active price sheet for this bill.'
+                  : customer?.priceSheetId
+                    ? `Linked to ${customer.name}'s profile.`
+                    : 'Select a custom sheet or leave default.'
+              }
+              className="min-w-0"
+            >
+              <Select
+                value={priceSheetId}
+                onChange={(e) => setPriceSheetId(e.target.value)}
+                className="w-full text-xs"
+              >
+                <option value="">Select Price Sheet</option>
+                {priceSheets.filter((s) => s.isActive).map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}{s.customerType ? ` · ${s.customerType}` : ''}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          )}
 
           {customer && (
             <div className="flex flex-wrap items-center gap-2 rounded-xl px-3 py-2 text-[11px]" style={{ background: 'var(--bg-subtle)' }}>
@@ -1317,6 +1799,16 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
                 <Star className="h-2.5 w-2.5" />
                 {customer.loyaltyPoints || 0} pts
               </Badge>
+              {totals.grand > 0 && (
+                <Badge tone="success">
+                  ✨ +{Math.floor((totals.grand / 100) * (Number(settings?.pos?.loyaltyPointsPerHundred) || 1))} pts on this bill
+                </Badge>
+              )}
+              {(Number(customer.advance) > 0 || Number(customer.advanceBalance) > 0) && (
+                <Badge tone="info" className="font-bold">
+                  💳 Advance / Credit: {money(customer.advance || customer.advanceBalance)}
+                </Badge>
+              )}
               {customer.outstanding > 0 && <Badge tone="warning">Due {money(customer.outstanding, { decimals: false })}</Badge>}
             </div>
           )}
@@ -1333,60 +1825,104 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
                 const prod = products.find((p) => p.id === item.id) || item;
                 const unitOpts = getProductUnitOptions(prod);
                 const stockInfo = getProductRemainingStock(prod, cart, products);
+                const imgUrl = getProductImageUrl(prod?.imageUrl || item?.imageUrl, item.name || prod?.name, item.barcode || prod?.barcode);
+                const autoVisual = getProductAutoVisual(item.name || prod?.name);
+
+                const prodCat = categories.find((c) => (prod?.categoryIds || [prod?.categoryId]).includes(c.id)) || { name: prod?.categoryId || 'General' };
+                const catTheme = getCategoryTheme(prodCat);
 
                 return (
                   <div
                     key={`${item.id}_${item.unit}`}
-                    className="flex flex-col gap-1.5 rounded-xl px-2.5 py-2"
+                    className="flex flex-col gap-1.5 rounded-xl p-2 sm:p-2.5 transition-colors"
                     style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}
                   >
-                    <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      {/* Product Image Card in Cart / Billing */}
+                      <div className="h-10 w-10 shrink-0 rounded-lg overflow-hidden border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] flex items-center justify-center shadow-2xs">
+                        {imgUrl ? (
+                          <img
+                            src={imgUrl}
+                            alt={item.name}
+                            className="h-full w-full object-cover"
+                            onError={(e) => {
+                              e.currentTarget.style.display = 'none';
+                              if (e.currentTarget.nextSibling) {
+                                e.currentTarget.nextSibling.style.display = 'flex';
+                              }
+                            }}
+                          />
+                        ) : null}
+                        <div
+                          className={`h-full w-full bg-gradient-to-br ${autoVisual.gradient} flex items-center justify-center text-[13px] shadow-inner select-none font-bold text-white`}
+                          style={{ display: imgUrl ? 'none' : 'flex' }}
+                        >
+                          <span>{autoVisual.icon}</span>
+                        </div>
+                      </div>
+
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-[12px] font-bold text-[color:var(--text-primary)]">{item.name}</div>
-                        <div className="text-[10px] text-[color:var(--text-muted)]">
-                          Stock left: <span className="font-semibold text-[color:var(--text-secondary)]">{stockInfo.text}</span>
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="truncate text-[12px] font-bold text-[color:var(--text-primary)]" title={item.name}>
+                            {item.name}
+                          </span>
+                          <span className={`inline-flex items-center px-1.5 py-0.2 rounded text-[8px] font-extrabold ${catTheme.badge} shrink-0`}>
+                            {prodCat.name}
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-[color:var(--text-muted)] truncate">
+                          Stock: <span className="font-semibold text-[color:var(--text-secondary)]">{stockInfo.text}</span>
                         </div>
                       </div>
 
                       <div className="flex shrink-0 items-center gap-1">
                         <button
+                          type="button"
                           onClick={() => updateQty(item.id, -1)}
-                          className="rounded-md p-1 text-[color:var(--text-secondary)]"
+                          className="rounded-md p-1 text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-muted)] transition-colors"
                           style={{ background: 'var(--surface)' }}
+                          title="Decrease quantity"
                         >
                           <Minus className="h-3 w-3" />
                         </button>
                         <button
+                          type="button"
                           onClick={() => updateQty(item.id, 1)}
-                          className="rounded-md p-1 text-[color:var(--text-secondary)]"
+                          className="rounded-md p-1 text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-muted)] transition-colors"
                           style={{ background: 'var(--surface)' }}
+                          title="Increase quantity"
                         >
                           <Plus className="h-3 w-3" />
                         </button>
-                        <Money value={item.total} decimals={false} className="w-16 text-right text-[12.5px] font-bold" />
-                        <button onClick={() => setCart(cart.filter((i) => !(i.id === item.id && i.unit === item.unit)))} className="p-1 text-rose-500">
+                        <Money value={item.total} decimals={false} className="w-14 text-right text-[12px] font-bold" />
+                        <button
+                          type="button"
+                          onClick={() => setCart(cart.filter((i) => !(i.id === item.id && i.unit === item.unit)))}
+                          className="p-1 text-rose-500 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-md transition-colors"
+                          title="Remove item"
+                        >
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1.5 pt-1 border-t border-[color:var(--border-subtle)] text-[11px]">
-                      <span className="text-[10.5px] text-[color:var(--text-muted)]">Rate:</span>
+                    <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-[color:var(--border-subtle)] text-[11px]">
+                      <span className="text-[10px] text-[color:var(--text-muted)]">Rate:</span>
                       <input
                         type="number"
                         step="0.0001"
                         value={item.price}
                         onChange={(e) => setLinePrice(item.id, e.target.value)}
-                        className="tabular w-20 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold"
+                        className="tabular w-16 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold"
                         style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
                       />
-                      <span className="text-[10.5px] text-[color:var(--text-muted)]">×</span>
+                      <span className="text-[10px] text-[color:var(--text-muted)]">×</span>
                       <input
                         type="number"
                         step="any"
                         value={item.qty}
                         onChange={(e) => setLineQty(item.id, e.target.value)}
-                        className="tabular w-16 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold text-center"
+                        className="tabular w-12 rounded-md px-1 py-0.5 text-[10.5px] font-semibold text-center"
                         style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
                       />
 
@@ -1394,7 +1930,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
                         <select
                           value={item.unit}
                           onChange={(e) => switchCartItemUnit(item.id, e.target.value)}
-                          className="tabular rounded-md px-1 py-0.5 text-[10.5px] font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 cursor-pointer"
+                          className="tabular rounded-md px-1 py-0.5 text-[10px] font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 cursor-pointer"
                         >
                           {unitOpts.map((opt) => (
                             <option key={opt.unit} value={opt.unit}>
@@ -1408,7 +1944,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
                         </span>
                       )}
 
-                      {item.taxRate ? <span className="text-[10px] text-[color:var(--text-muted)] ml-auto">GST {item.taxRate}%</span> : null}
+                      {item.taxRate ? <span className="text-[9.5px] text-[color:var(--text-muted)] ml-auto">GST {item.taxRate}%</span> : null}
                     </div>
                   </div>
                 );
@@ -1739,12 +2275,82 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
             </div>
           )}
 
-          {loyalty.amount > 0 && (
+          {/* Customer Advance / Store Credit (Pending Owed to Customer) */}
+          {customer && advanceCredit.available > 0 && (
+            <div
+              className="space-y-2 rounded-xl px-3 py-2.5 bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800/60"
+            >
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-1.5 text-[11.5px] font-bold text-blue-700 dark:text-blue-300">
+                  <CreditCard className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+                  Customer Advance / Store Credit (Pending Owed)
+                </span>
+                <Badge tone="info">{money(advanceCredit.available)} available</Badge>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  min="0"
+                  max={advanceCredit.maxAdvance}
+                  step="0.01"
+                  value={redeemAdvance || ''}
+                  onChange={(e) => setRedeemAdvance(Math.max(0, Math.min(advanceCredit.maxAdvance, Number(e.target.value) || 0)))}
+                  placeholder="0.00"
+                  className="tabular w-28 text-center font-bold font-mono"
+                />
+                <Button size="sm" onClick={() => setRedeemAdvance(advanceCredit.maxAdvance)} disabled={advanceCredit.maxAdvance === 0}>
+                  Use max ({money(advanceCredit.maxAdvance)})
+                </Button>
+                {redeemAdvance > 0 && (
+                  <Button size="sm" onClick={() => setRedeemAdvance(0)}>
+                    Clear
+                  </Button>
+                )}
+                <span className="ml-auto text-[10.5px] font-semibold text-blue-600 dark:text-blue-400">
+                  Pending: {money(advanceCredit.available)}
+                </span>
+              </div>
+
+              {advanceCredit.applied > 0 && (
+                <div className="flex items-center justify-between border-t border-blue-200/80 dark:border-blue-800/60 pt-2">
+                  <span className="text-[11.5px] font-semibold text-blue-700 dark:text-blue-300">
+                    Deducted from Pending Advance
+                  </span>
+                  <span className="tabular text-[12.5px] font-bold text-emerald-600 dark:text-emerald-400">
+                    −{money(advanceCredit.applied)}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {customer && settings?.pos?.enableLoyalty !== false && (
+            <div className="flex items-center justify-between rounded-xl px-3 py-2 text-xs" style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}>
+              <span className="flex items-center gap-1.5 font-bold text-[color:var(--text-secondary)]">
+                <Star className="h-3.5 w-3.5 text-amber-500" />
+                Loyalty Earned on this Order
+              </span>
+              <span className="font-bold text-emerald-600 dark:text-emerald-400">
+                +{Math.floor((payable / 100) * (Number(settings?.pos?.loyaltyPointsPerHundred) || 1))} pts
+              </span>
+            </div>
+          )}
+
+          {(loyalty.amount > 0 || advanceCredit.applied > 0) && (
             <div className="flex items-center justify-between rounded-xl px-3 py-2.5" style={{ background: 'var(--bg-subtle)' }}>
               <div className="text-[11.5px] font-semibold text-[color:var(--text-secondary)]">
-                Bill {money(totals.grand)} − points {money(loyalty.amount)}
+                Bill {money(totals.grand)}
+                {loyalty.amount > 0 && ` − pts ${money(loyalty.amount)}`}
+                {advanceCredit.applied > 0 && ` − advance ${money(advanceCredit.applied)}`}
               </div>
               <Money value={payable} className="text-[18px] font-bold text-[color:var(--accent)]" />
+            </div>
+          )}
+
+          {payable === 0 && advanceCredit.applied > 0 && (
+            <div className="rounded-xl p-2.5 text-center text-xs font-bold bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+              ✨ Bill fully covered by Customer Advance / Store Credit (₹0.00 payable)
             </div>
           )}
 
@@ -1895,7 +2501,9 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings }
         onCreated={(newCust) => {
           setCustomers((prev) => [newCust, ...(prev || [])]);
           setCustomerId(newCust.id);
+          setPriceSheetId('');
         }}
+        priceSheets={priceSheets}
         showToast={showToast}
       />
     </div>
@@ -2008,6 +2616,9 @@ function ReceiptModal({ receipt, settings, tenant, onClose }) {
           {receipt.loyaltyRedeemed > 0 && (
             <ReceiptRow label={`Points redeemed (${receipt.pointsRedeemed})`} value={-receipt.loyaltyRedeemed} />
           )}
+          {receipt.advanceRedeemed > 0 && (
+            <ReceiptRow label="Advance / Credit Deducted" value={-receipt.advanceRedeemed} />
+          )}
           <div className="flex justify-between border-t border-dashed pt-1 text-[14px] font-bold" style={{ borderColor: 'var(--border-strong)' }}>
             <span>TOTAL</span>
             <span className="tabular">₹{Number(receipt.total).toFixed(2)}</span>
@@ -2018,6 +2629,9 @@ function ReceiptModal({ receipt, settings, tenant, onClose }) {
           </div>
           {receipt.loyaltyBalance !== undefined && (
             <div className="text-[9.5px]">Points balance: {receipt.loyaltyBalance}</div>
+          )}
+          {receipt.advanceBalance !== undefined && receipt.advanceRedeemed > 0 && (
+            <div className="text-[9.5px]">Remaining advance: ₹{Number(receipt.advanceBalance).toFixed(2)}</div>
           )}
         </div>
 
@@ -3155,13 +3769,16 @@ function RecentBillsModal({ open, onClose, onReprint, showToast }) {
   );
 }
 
-function QuickCustomerModal({ open, onClose, onCreated, showToast }) {
+function QuickCustomerModal({ open, onClose, onCreated, priceSheets = [], showToast }) {
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
   const [address, setAddress] = useState('');
+  const [gstin, setGstin] = useState('');
+  const [pan, setPan] = useState('');
   const [group, setGroup] = useState('Retail');
   const [creditLimit, setCreditLimit] = useState('');
+  const [sheetId, setSheetId] = useState('');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -3170,8 +3787,11 @@ function QuickCustomerModal({ open, onClose, onCreated, showToast }) {
       setPhone('');
       setEmail('');
       setAddress('');
+      setGstin('');
+      setPan('');
       setGroup('Retail');
       setCreditLimit('');
+      setSheetId('');
     }
   }, [open]);
 
@@ -3193,8 +3813,11 @@ function QuickCustomerModal({ open, onClose, onCreated, showToast }) {
         phone: phone.trim(),
         email: email.trim(),
         address: address.trim(),
+        gstin: gstin.trim(),
+        pan: pan.trim(),
         group,
-        creditLimit: Number(creditLimit) || 0
+        creditLimit: Number(creditLimit) || 0,
+        priceSheetId: sheetId || null
       });
 
       const newCustomer = res.data;
@@ -3266,6 +3889,19 @@ function QuickCustomerModal({ open, onClose, onCreated, showToast }) {
           </Field>
         </div>
 
+        {priceSheets.length > 0 && (
+          <Field label="Price Sheet" hint="Prices from this sheet apply automatically whenever this customer is billed">
+            <Select value={sheetId} onChange={(e) => setSheetId(e.target.value)}>
+              <option value="">None — use group / standard pricing</option>
+              {priceSheets.filter((s) => s.isActive).map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}{s.customerType ? ` · ${s.customerType}` : ''}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        )}
+
         <Field label="Email Address" hint="Optional for invoice email">
           <Input
             type="email"
@@ -3282,6 +3918,23 @@ function QuickCustomerModal({ open, onClose, onCreated, showToast }) {
             onChange={(e) => setAddress(e.target.value)}
           />
         </Field>
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="GSTIN" hint="For B2B customers — printed on tax invoices">
+            <Input
+              placeholder="29AABCM1234K1Z5"
+              value={gstin}
+              onChange={(e) => setGstin(e.target.value.toUpperCase())}
+            />
+          </Field>
+          <Field label="PAN">
+            <Input
+              placeholder="AABCM1234K"
+              value={pan}
+              onChange={(e) => setPan(e.target.value.toUpperCase())}
+            />
+          </Field>
+        </div>
       </form>
     </Modal>
   );

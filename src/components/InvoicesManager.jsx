@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import QRCode from 'qrcode';
 import {
   Receipt,
   Search,
@@ -390,6 +391,17 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
     }
   };
 
+  // Quotation create/edit/delete never touch stock, accounts, or orders — refetching
+  // all five resources after each of those (as fetchAllData does) was pure waste.
+  const refreshQuotations = async () => {
+    try {
+      const quotationsRes = await api.get('/quotations', { limit: 1000 });
+      setQuotations(quotationsRes || []);
+    } catch (err) {
+      showToast(api.message(err, 'Failed to refresh quotations.'), 'error');
+    }
+  };
+
   useEffect(() => {
     fetchAllData();
   }, []);
@@ -560,9 +572,9 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
   const handleDeleteQuotation = async (quotation) => {
     if (!window.confirm(`Delete Quotation ${quotation.quotationNo}?`)) return;
     try {
-      await api.delete(`/quotations/${quotation.id}`);
+      await api.del(`/quotations/${quotation.id}`);
       showToast(`Quotation ${quotation.quotationNo} deleted.`, 'success');
-      fetchAllData();
+      refreshQuotations();
     } catch (err) {
       showToast(api.message(err, 'Failed to delete quotation.'), 'error');
     }
@@ -1304,7 +1316,7 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
           onSaved={() => {
             setQuotationModalOpen(false);
             setEditingQuotation(null);
-            fetchAllData();
+            refreshQuotations();
             showToast(editingQuotation ? 'Quotation updated successfully.' : 'Quotation created successfully.', 'success');
           }}
           showToast={showToast}
@@ -1324,13 +1336,37 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
   const [customerName, setCustomerName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');
   const [customerGstin, setCustomerGstin] = useState('');
+  const [customerPan, setCustomerPan] = useState('');
   const [customerAddress, setCustomerAddress] = useState('');
+  const [customerState, setCustomerState] = useState('');
+  const [customerStateCode, setCustomerStateCode] = useState('');
 
   // Invoice specifics
   const [invoiceDate, setInvoiceDate] = useState(todayISO());
+  const [dueDate, setDueDate] = useState('');
   const [paymentMethod, setPaymentMethod] = useState('Cash');
   const [notes, setNotes] = useState('');
   const [isRoundOff, setIsRoundOff] = useState(true);
+
+  // Dispatch, place of supply & shipping (all optional — shown on the invoice only when filled in)
+  const [placeOfSupply, setPlaceOfSupply] = useState('');
+  const [vendorCode, setVendorCode] = useState('');
+  const [dispatchFrom, setDispatchFrom] = useState('');
+  const [dispatchDate, setDispatchDate] = useState('');
+  const [shipToName, setShipToName] = useState('');
+  const [shipToAddress, setShipToAddress] = useState('');
+  const [vehicleNo, setVehicleNo] = useState('');
+  const [shipBy, setShipBy] = useState('');
+  const [transporterName, setTransporterName] = useState('');
+
+  // Buyer references & terms (all optional — shown on the invoice only when filled in)
+  const [buyerRef, setBuyerRef] = useState('');
+  const [buyerRefDate, setBuyerRefDate] = useState('');
+  const [buyerOrderNo, setBuyerOrderNo] = useState('');
+  const [buyerOrderDate, setBuyerOrderDate] = useState('');
+  const [dispatchDocNo, setDispatchDocNo] = useState('');
+  const [termsOfDelivery, setTermsOfDelivery] = useState('');
+  const [paymentTerms, setPaymentTerms] = useState('');
 
   // Line items
   const [items, setItems] = useState([
@@ -1355,7 +1391,10 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
       setCustomerName('');
       setCustomerPhone('');
       setCustomerGstin('');
+      setCustomerPan('');
       setCustomerAddress('');
+      setCustomerState('');
+      setCustomerStateCode('');
       return;
     }
     const cust = (customers || []).find((c) => c.id === id);
@@ -1363,7 +1402,10 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
       setCustomerName(cust.name || '');
       setCustomerPhone(cust.phone || '');
       setCustomerGstin(cust.gstin || '');
+      setCustomerPan(cust.pan || '');
       setCustomerAddress(cust.address || '');
+      setCustomerState(cust.state || '');
+      setCustomerStateCode(cust.stateCode || '');
     }
   };
 
@@ -1384,6 +1426,7 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
         productId: prod.id || '',
         name: prod.name,
         barcode: prod.barcode || '',
+        hsn: prod.hsn || '',
         unit: prod.unit || next[index]?.unit || 'pcs',
         price: prod.price !== undefined ? prod.price : '',
         taxRate,
@@ -1488,13 +1531,34 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
         customerName: customerName.trim() || 'Walk-in Customer',
         customerPhone: customerPhone.trim() || 'N/A',
         customerGstin: customerGstin.trim() || '',
+        customerPan: customerPan.trim() || '',
         customerAddress: customerAddress.trim() || '',
+        customerState: customerState.trim() || '',
+        customerStateCode: customerStateCode.trim() || '',
         paymentMethod,
         date: invoiceDate ? new Date(invoiceDate).toISOString() : new Date().toISOString(),
+        dueDate: dueDate ? new Date(dueDate).toISOString() : null,
+        placeOfSupply: placeOfSupply.trim() || '',
+        vendorCode: vendorCode.trim() || '',
+        dispatchFrom: dispatchFrom.trim() || '',
+        dispatchDate: dispatchDate ? new Date(dispatchDate).toISOString() : null,
+        shipToName: shipToName.trim() || '',
+        shipToAddress: shipToAddress.trim() || '',
+        vehicleNo: vehicleNo.trim() || '',
+        shipBy: shipBy.trim() || '',
+        transporterName: transporterName.trim() || '',
+        buyerRef: buyerRef.trim() || '',
+        buyerRefDate: buyerRefDate ? new Date(buyerRefDate).toISOString() : null,
+        buyerOrderNo: buyerOrderNo.trim() || '',
+        buyerOrderDate: buyerOrderDate ? new Date(buyerOrderDate).toISOString() : null,
+        dispatchDocNo: dispatchDocNo.trim() || '',
+        termsOfDelivery: termsOfDelivery.trim() || '',
+        paymentTerms: paymentTerms.trim() || '',
         items: validItems.map((i) => ({
           id: i.productId || `custom_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
           name: i.name,
           barcode: i.barcode || '',
+          hsn: i.hsn || '',
           qty: Number(i.qty) || 1,
           unit: i.unit || 'pcs',
           price: Number(i.price) || 0,
@@ -1581,6 +1645,14 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
                 />
               </Field>
 
+              <Field label="PAN">
+                <Input
+                  value={customerPan}
+                  onChange={(e) => setCustomerPan(e.target.value.toUpperCase())}
+                  placeholder="Optional PAN"
+                />
+              </Field>
+
               <Field label="Invoice Date *">
                 <Input
                   type="date"
@@ -1590,6 +1662,16 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
                 />
               </Field>
 
+              <Field label="Due Date">
+                <Input
+                  type="date"
+                  value={dueDate}
+                  onChange={(e) => setDueDate(e.target.value)}
+                />
+              </Field>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <Field label="Payment Method">
                 <Select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)}>
                   <option value="Cash">Cash</option>
@@ -1600,12 +1682,98 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
                 </Select>
               </Field>
 
-              <Field label="Billing / Delivery Address">
+              <Field label="Billing / Delivery Address" className="md:col-span-2">
                 <Input
                   value={customerAddress}
                   onChange={(e) => setCustomerAddress(e.target.value)}
                   placeholder="Customer location / city"
                 />
+              </Field>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Field label="Customer State Name" hint="For GST place-of-supply on the invoice">
+                <Input value={customerState} onChange={(e) => setCustomerState(e.target.value)} placeholder="e.g. Delhi" />
+              </Field>
+              <Field label="Customer State Code">
+                <Input value={customerStateCode} onChange={(e) => setCustomerStateCode(e.target.value)} placeholder="e.g. 07" />
+              </Field>
+            </div>
+          </div>
+
+          {/* Buyer References & Terms — all optional, only prints on the invoice when filled in */}
+          <div className="p-4 rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/70 space-y-3">
+            <span className="text-[11px] font-extrabold uppercase tracking-wider text-[color:var(--text-secondary)] flex items-center gap-1.5">
+              <FileText className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" /> Buyer References & Terms (Optional)
+            </span>
+
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+              <Field label="Buyer's Ref.">
+                <Input value={buyerRef} onChange={(e) => setBuyerRef(e.target.value)} placeholder="e.g. GTI-01" />
+              </Field>
+              <Field label="Buyer's Ref. Date">
+                <Input type="date" value={buyerRefDate} onChange={(e) => setBuyerRefDate(e.target.value)} />
+              </Field>
+              <Field label="Buyer's Order No.">
+                <Input value={buyerOrderNo} onChange={(e) => setBuyerOrderNo(e.target.value)} />
+              </Field>
+              <Field label="Buyer's Order Date">
+                <Input type="date" value={buyerOrderDate} onChange={(e) => setBuyerOrderDate(e.target.value)} />
+              </Field>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <Field label="Despatch Document No.">
+                <Input value={dispatchDocNo} onChange={(e) => setDispatchDocNo(e.target.value)} />
+              </Field>
+              <Field label="Terms of Delivery">
+                <Input value={termsOfDelivery} onChange={(e) => setTermsOfDelivery(e.target.value)} placeholder="e.g. Ex-works, FOB" />
+              </Field>
+              <Field label="Terms of Payment">
+                <Input value={paymentTerms} onChange={(e) => setPaymentTerms(e.target.value)} placeholder="e.g. Net 30 days" />
+              </Field>
+            </div>
+          </div>
+
+          {/* Dispatch, Place of Supply & Shipping — all optional, only prints on the invoice when filled in */}
+          <div className="p-4 rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/70 space-y-3">
+            <span className="text-[11px] font-extrabold uppercase tracking-wider text-[color:var(--text-secondary)] flex items-center gap-1.5">
+              <FileText className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" /> Dispatch, Supply & Shipping (Optional)
+            </span>
+
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+              <Field label="Place of Supply" hint="e.g. DL (07)">
+                <Input value={placeOfSupply} onChange={(e) => setPlaceOfSupply(e.target.value)} />
+              </Field>
+              <Field label="Vendor Code">
+                <Input value={vendorCode} onChange={(e) => setVendorCode(e.target.value)} />
+              </Field>
+              <Field label="Dispatch From">
+                <Input value={dispatchFrom} onChange={(e) => setDispatchFrom(e.target.value)} />
+              </Field>
+              <Field label="Dispatch Date">
+                <Input type="date" value={dispatchDate} onChange={(e) => setDispatchDate(e.target.value)} />
+              </Field>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Field label="Ship To (Name)" hint="Defaults to customer name if left blank">
+                <Input value={shipToName} onChange={(e) => setShipToName(e.target.value)} placeholder={customerName || 'Same as Bill To'} />
+              </Field>
+              <Field label="Ship To (Address)">
+                <Input value={shipToAddress} onChange={(e) => setShipToAddress(e.target.value)} placeholder="Delivery address, if different" />
+              </Field>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <Field label="Vehicle No.">
+                <Input value={vehicleNo} onChange={(e) => setVehicleNo(e.target.value)} placeholder="e.g. MH27GH7271" />
+              </Field>
+              <Field label="Ship By" hint="e.g. Road, Rail, Air, Courier">
+                <Input value={shipBy} onChange={(e) => setShipBy(e.target.value)} />
+              </Field>
+              <Field label="Transporter Name">
+                <Input value={transporterName} onChange={(e) => setTransporterName(e.target.value)} />
               </Field>
             </div>
           </div>
@@ -1910,6 +2078,7 @@ function QuotationEditorModal({ quotation, products = [], customers = [], settin
         productId: prod.id || '',
         name: prod.name,
         barcode: prod.barcode || '',
+        hsn: prod.hsn || '',
         unit: prod.unit || next[index]?.unit || 'pcs',
         price: prod.price !== undefined ? prod.price : '',
         taxRate,
@@ -2011,6 +2180,7 @@ function QuotationEditorModal({ quotation, products = [], customers = [], settin
           productId: i.productId || null,
           name: i.name,
           barcode: i.barcode || '',
+          hsn: i.hsn || '',
           qty: Number(i.qty) || 1,
           unit: i.unit || 'pcs',
           price: Number(i.price) || 0,
@@ -2324,10 +2494,27 @@ function QuotationEditorModal({ quotation, products = [], customers = [], settin
 
 /** Standard Tax Invoice & Thermal Receipt Modal */
 function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onClose, onVoid }) {
-  if (!invoice) return null;
   const company = invoice?.company || settings?.company || { name: tenant?.name || 'Selsolve Store' };
   const billing = invoice?.billing || settings?.billing || {};
   const isVoid = invoice?.status === 'VOID';
+  const isCredit = invoice?.paymentMethod === 'Credit (Udhar)';
+
+  // Client-side UPI payment QR — nothing is sent anywhere, it's just encoded locally.
+  const [qrDataUrl, setQrDataUrl] = useState('');
+  useEffect(() => {
+    if (!billing?.upiId || !invoice) {
+      setQrDataUrl('');
+      return;
+    }
+    let cancelled = false;
+    const upiString = `upi://pay?pa=${encodeURIComponent(billing.upiId)}&pn=${encodeURIComponent(company?.name || 'Merchant')}&am=${Number(invoice?.total || 0).toFixed(2)}&cu=INR&tn=${encodeURIComponent(`Invoice ${invoice?.orderId || ''}`)}`;
+    QRCode.toDataURL(upiString, { margin: 1, width: 160 })
+      .then((url) => { if (!cancelled) setQrDataUrl(url); })
+      .catch(() => { if (!cancelled) setQrDataUrl(''); });
+    return () => { cancelled = true; };
+  }, [billing?.upiId, company?.name, invoice?.total, invoice?.orderId, invoice]);
+
+  if (!invoice) return null;
 
   // GST slabs
   const gstSlabs = {};
@@ -2344,6 +2531,32 @@ function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onC
       gstSlabs[rate].sgst += (amt * (rate / 2)) / 100;
     }
   });
+
+  // HSN/SAC-wise tax summary — GST-invoice-standard breakdown, one row per HSN code
+  const hsnSummary = {};
+  (invoice?.items || []).forEach((item) => {
+    const hsn = item.hsn || item.hsnCode || '—';
+    const rate = Number(item?.taxRate) || 0;
+    const amt = Number(item?.total) || (Number(item?.qty || 1) * Number(item?.price || 0));
+    if (!hsnSummary[hsn]) hsnSummary[hsn] = { taxable: 0, rate, cgst: 0, sgst: 0, igst: 0 };
+    hsnSummary[hsn].taxable += amt;
+    if (billing?.interState) {
+      hsnSummary[hsn].igst += (amt * rate) / 100;
+    } else {
+      hsnSummary[hsn].cgst += (amt * (rate / 2)) / 100;
+      hsnSummary[hsn].sgst += (amt * (rate / 2)) / 100;
+    }
+  });
+  const hsnRows = Object.entries(hsnSummary);
+  const hsnTotals = hsnRows.reduce(
+    (acc, [, v]) => ({
+      taxable: acc.taxable + v.taxable,
+      cgst: acc.cgst + v.cgst,
+      sgst: acc.sgst + v.sgst,
+      igst: acc.igst + v.igst
+    }),
+    { taxable: 0, cgst: 0, sgst: 0, igst: 0 }
+  );
 
   return (
     <Modal
@@ -2394,30 +2607,53 @@ function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onC
     >
       {viewMode === 'TAX_INVOICE' ? (
         /* Standard A4 Tax Invoice */
-        <div id="printable-tax-invoice" className="bg-white text-slate-900 p-6 sm:p-8 rounded-2xl border border-slate-200 font-sans shadow-xs space-y-6">
+        <div id="printable-tax-invoice" className="bg-white text-slate-900 rounded-2xl border border-slate-200 font-sans shadow-xs overflow-hidden">
           {/* Header row */}
-          <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 border-b border-slate-200 pb-6">
-            <div>
-              <div className="text-2xl font-black tracking-tight text-slate-900">
-                {company.name}
-              </div>
-              {company.address && <div className="text-xs text-slate-600 mt-1 max-w-sm">{company.address}</div>}
-              <div className="text-xs text-slate-600 mt-0.5">
-                {company.city} {company.state ? `· ${company.state}` : ''} {company.pincode ? `- ${company.pincode}` : ''}
-              </div>
-              {company.gstin && (
-                <div className="text-xs font-semibold text-slate-800 mt-1">
-                  GSTIN: <span className="font-mono">{company.gstin}</span>
-                </div>
+          <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 p-6 sm:p-8 pb-6">
+            <div className="flex items-start gap-3">
+              {company.logoUrl && (
+                <img src={company.logoUrl} alt={company.name} className="h-12 w-12 shrink-0 rounded-lg object-contain border border-slate-100" />
               )}
-              {company.phone && <div className="text-xs text-slate-600">Phone: {company.phone}</div>}
+              <div>
+                <div className="text-xl font-black tracking-tight text-slate-900">
+                  {company.name}
+                </div>
+                {company.address && <div className="text-xs text-slate-600 mt-1 max-w-sm">{company.address}</div>}
+                <div className="text-xs text-slate-600 mt-0.5">
+                  {company.city} {company.state ? `· ${company.state}` : ''} {company.pincode ? `- ${company.pincode}` : ''}
+                </div>
+                {(company.state || company.stateCode) && (
+                  <div className="text-xs text-slate-600">
+                    State Name: {company.state || '—'}{company.stateCode ? `, Code: ${company.stateCode}` : ''}
+                  </div>
+                )}
+                <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1.5 text-[11px] text-slate-800">
+                  {company.gstin && <span className="font-semibold">GSTIN: <span className="font-mono">{company.gstin}</span></span>}
+                  {company.pan && <span className="font-semibold">PAN: <span className="font-mono">{company.pan}</span></span>}
+                  {company.cin && <span className="font-semibold">CIN No.: <span className="font-mono">{company.cin}</span></span>}
+                  {company.lutBondNo && <span className="font-semibold">LUT Bond No.: <span className="font-mono">{company.lutBondNo}</span></span>}
+                  {company.cstNo && <span className="font-semibold">CST: <span className="font-mono">{company.cstNo}</span></span>}
+                </div>
+                <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-0.5 text-[11px] text-slate-800">
+                  {company.fssaiNo && <span className="font-semibold">FSSAI No.: <span className="font-mono">{company.fssaiNo}</span></span>}
+                  {company.tan && <span className="font-semibold">TAN: <span className="font-mono">{company.tan}</span></span>}
+                  {company.dlNo && <span className="font-semibold">D.L. No.: <span className="font-mono">{company.dlNo}</span></span>}
+                </div>
+                <div className="text-[11px] text-slate-500 mt-0.5">
+                  {[company.website, company.contactName && `Contact: ${company.contactName}`].filter(Boolean).join(' · ')}
+                </div>
+                <div className="text-[11px] text-slate-500">
+                  {[company.phone, company.email].filter(Boolean).join(' · ')}
+                </div>
+              </div>
             </div>
 
-            <div className="text-right sm:min-w-[200px]">
-              <div className="inline-block px-3 py-1 bg-indigo-50 border border-indigo-200 text-indigo-700 text-xs font-extrabold uppercase tracking-wider rounded-lg">
-                TAX INVOICE
+            <div className="text-right sm:min-w-[200px] shrink-0">
+              <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Original for Recipient</div>
+              <div className="text-2xl font-black tracking-tight text-blue-900 mt-1">
+                {billing.invoiceTitle || 'TAX INVOICE'}
               </div>
-              <div className="text-lg font-mono font-bold text-slate-900 mt-2">
+              <div className="text-sm font-mono font-bold text-blue-700 mt-1">
                 #{invoice?.orderId}
               </div>
               {isVoid && (
@@ -2428,144 +2664,390 @@ function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onC
             </div>
           </div>
 
-          {/* Meta & Bill To rows */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 text-xs border-b border-slate-200 pb-6">
-            <div className="space-y-1">
-              <span className="font-bold uppercase tracking-wider text-slate-500 text-[10px]">Bill To:</span>
+          {/* Amount banner + Bill To */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 border-t border-slate-200 text-xs">
+            <div className="p-6 sm:p-8 sm:border-r border-slate-200 space-y-1">
+              <span className="font-bold uppercase tracking-wider text-slate-500 text-[10px]">Bill To</span>
               <div className="text-sm font-bold text-slate-900">{invoice?.customerName || 'Walk-in Customer'}</div>
+              {invoice?.customerAddress && <div className="text-slate-600 max-w-xs">{invoice.customerAddress}</div>}
               {invoice?.customerPhone && invoice.customerPhone !== 'N/A' && (
                 <div className="text-slate-600">Phone: {invoice.customerPhone}</div>
               )}
               {invoice?.customerGstin && (
                 <div className="text-slate-700 font-semibold">GSTIN: {invoice.customerGstin}</div>
               )}
-            </div>
-
-            <div className="space-y-1.5 sm:text-right">
-              <div className="flex sm:justify-end gap-3">
-                <span className="text-slate-500">Invoice Date:</span>
-                <span className="font-bold font-mono">{fmtDate(invoice?.date)}</span>
-              </div>
-              <div className="flex sm:justify-end gap-3">
-                <span className="text-slate-500">Payment Mode:</span>
-                <span className="font-bold">{invoice?.paymentMethod || 'Cash'}</span>
-              </div>
-              {invoice?.cashier && (
-                <div className="flex sm:justify-end gap-3">
-                  <span className="text-slate-500">Cashier:</span>
-                  <span className="font-semibold">{invoice.cashier}</span>
+              {invoice?.customerPan && (
+                <div className="text-slate-700 font-semibold">PAN: {invoice.customerPan}</div>
+              )}
+              {(invoice?.customerState || invoice?.customerStateCode) && (
+                <div className="text-slate-600">
+                  State Name: {invoice.customerState || '—'}{invoice.customerStateCode ? `, Code: ${invoice.customerStateCode}` : ''}
                 </div>
               )}
             </div>
+
+            <div className="flex flex-col">
+              <div className={`px-6 sm:px-8 py-3 flex items-center justify-between text-white ${isVoid ? 'bg-slate-400' : 'bg-blue-900'}`}>
+                <span className="text-xs font-bold uppercase tracking-wider">{isCredit ? 'Amount Due' : 'Amount Paid'}</span>
+                <span className="text-lg font-black font-mono">{money(invoice?.total)}</span>
+              </div>
+              <div className="p-6 sm:p-8 space-y-1.5">
+                <div className="flex justify-between gap-3">
+                  <span className="text-slate-500">Issue Date:</span>
+                  <span className="font-bold font-mono">{fmtDate(invoice?.date)}</span>
+                </div>
+                {invoice?.dueDate && (
+                  <div className="flex justify-between gap-3">
+                    <span className="text-slate-500">Due Date:</span>
+                    <span className="font-bold font-mono">{fmtDate(invoice.dueDate)}</span>
+                  </div>
+                )}
+                {invoice?.paymentTerms && (
+                  <div className="flex justify-between gap-3">
+                    <span className="text-slate-500">Terms of Payment:</span>
+                    <span className="font-bold">{invoice.paymentTerms}</span>
+                  </div>
+                )}
+                {invoice?.buyerRef && (
+                  <div className="flex justify-between gap-3">
+                    <span className="text-slate-500">Buyer's Ref.:</span>
+                    <span className="font-bold">
+                      {invoice.buyerRef}{invoice.buyerRefDate ? ` dt. ${fmtDate(invoice.buyerRefDate)}` : ''}
+                    </span>
+                  </div>
+                )}
+                {invoice?.buyerOrderNo && (
+                  <div className="flex justify-between gap-3">
+                    <span className="text-slate-500">Buyer's Order No.:</span>
+                    <span className="font-bold">
+                      {invoice.buyerOrderNo}{invoice.buyerOrderDate ? ` dt. ${fmtDate(invoice.buyerOrderDate)}` : ''}
+                    </span>
+                  </div>
+                )}
+                {invoice?.dispatchDocNo && (
+                  <div className="flex justify-between gap-3">
+                    <span className="text-slate-500">Despatch Document No.:</span>
+                    <span className="font-bold">{invoice.dispatchDocNo}</span>
+                  </div>
+                )}
+                {invoice?.termsOfDelivery && (
+                  <div className="flex justify-between gap-3">
+                    <span className="text-slate-500">Terms of Delivery:</span>
+                    <span className="font-bold">{invoice.termsOfDelivery}</span>
+                  </div>
+                )}
+                {invoice?.dispatchFrom && (
+                  <div className="flex justify-between gap-3">
+                    <span className="text-slate-500">Dispatch From:</span>
+                    <span className="font-bold">{invoice.dispatchFrom}</span>
+                  </div>
+                )}
+                {invoice?.dispatchDate && (
+                  <div className="flex justify-between gap-3">
+                    <span className="text-slate-500">Dispatch Date:</span>
+                    <span className="font-bold font-mono">{fmtDate(invoice.dispatchDate)}</span>
+                  </div>
+                )}
+                {invoice?.placeOfSupply && (
+                  <div className="flex justify-between gap-3">
+                    <span className="text-slate-500">Place of Supply:</span>
+                    <span className="font-bold">{invoice.placeOfSupply}</span>
+                  </div>
+                )}
+                {invoice?.vendorCode && (
+                  <div className="flex justify-between gap-3">
+                    <span className="text-slate-500">Vendor Code:</span>
+                    <span className="font-bold font-mono">{invoice.vendorCode}</span>
+                  </div>
+                )}
+                <div className="flex justify-between gap-3">
+                  <span className="text-slate-500">Payment Mode:</span>
+                  <span className="font-bold">{invoice?.paymentMethod || 'Cash'}</span>
+                </div>
+                {billing?.showCashier !== false && invoice?.cashier && (
+                  <div className="flex justify-between gap-3">
+                    <span className="text-slate-500">Cashier:</span>
+                    <span className="font-semibold">{invoice.cashier}</span>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
 
-          {/* Line items table */}
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs border-collapse">
-              <thead>
-                <tr className="border-b-2 border-slate-300 text-[11px] font-bold text-slate-700 uppercase tracking-wider bg-slate-50">
-                  <th className="py-2.5 px-3">#</th>
-                  <th className="py-2.5 px-3">Item & Description</th>
-                  <th className="py-2.5 px-3 text-right">Qty</th>
-                  <th className="py-2.5 px-3 text-right">Rate (₹)</th>
-                  <th className="py-2.5 px-3 text-right">Tax (%)</th>
-                  <th className="py-2.5 px-3 text-right">Amount (₹)</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-200">
-                {(invoice?.items || []).map((item, idx) => (
-                  <tr key={idx} className="hover:bg-slate-50/60">
-                    <td className="py-2.5 px-3 text-slate-500 font-mono">{idx + 1}</td>
-                    <td className="py-2.5 px-3">
-                      <div className="font-bold text-slate-900">{item.name}</div>
-                      {item.barcode && <div className="text-[10px] text-slate-500 font-mono">Barcode: {item.barcode}</div>}
-                    </td>
-                    <td className="py-2.5 px-3 text-right font-mono font-semibold">
-                      {item.qty} {item.unit || ''}
-                    </td>
-                    <td className="py-2.5 px-3 text-right font-mono">{Number(item.price || 0).toFixed(2)}</td>
-                    <td className="py-2.5 px-3 text-right font-mono text-slate-600">{item.taxRate ? `${item.taxRate}%` : '0%'}</td>
-                    <td className="py-2.5 px-3 text-right font-mono font-bold text-slate-900">
-                      {Number(item.total || 0).toFixed(2)}
-                    </td>
+          {(invoice?.shipToName || invoice?.shipToAddress || invoice?.vehicleNo || invoice?.shipBy || invoice?.transporterName) && (
+            <div className="px-6 sm:px-8 py-4 border-t border-slate-200 text-xs space-y-1.5">
+              <span className="font-bold uppercase tracking-wider text-slate-500 text-[10px]">Ship To</span>
+              {(invoice?.shipToName || invoice?.customerName) && (
+                <div className="text-sm font-bold text-slate-900">{invoice.shipToName || invoice.customerName}</div>
+              )}
+              {invoice?.shipToAddress && <div className="text-slate-600 max-w-md">{invoice.shipToAddress}</div>}
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-blue-800 font-semibold">
+                {invoice?.vehicleNo && <span>Vehicle No.: {invoice.vehicleNo}</span>}
+                {invoice?.shipBy && <span>Ship by: {invoice.shipBy}</span>}
+                {invoice?.transporterName && <span>Transporter: {invoice.transporterName}</span>}
+              </div>
+            </div>
+          )}
+
+          <div className="px-6 sm:px-8 pb-6 sm:pb-8 space-y-6 border-t border-slate-200 pt-6">
+            {/* Line items table */}
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead>
+                  <tr className="border-b-2 border-slate-300 text-[11px] font-bold text-slate-700 uppercase tracking-wider bg-slate-50">
+                    <th className="py-2.5 px-3">#</th>
+                    <th className="py-2.5 px-3">Item Description</th>
+                    <th className="py-2.5 px-3">HSN/SAC</th>
+                    <th className="py-2.5 px-3 text-right">Qty</th>
+                    <th className="py-2.5 px-3 text-right">Price (₹)</th>
+                    <th className="py-2.5 px-3 text-right">Taxable Value (₹)</th>
+                    <th className="py-2.5 px-3 text-right">Tax (₹)</th>
+                    <th className="py-2.5 px-3 text-right">Amount (₹)</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody className="divide-y divide-slate-200">
+                  {(invoice?.items || []).map((item, idx) => {
+                    const rate = Number(item.taxRate) || 0;
+                    const taxableValue = Number(item.total) || (Number(item.qty || 1) * Number(item.price || 0));
+                    const lineTax = (taxableValue * rate) / 100;
+                    const lineAmount = taxableValue + lineTax;
+                    return (
+                      <tr key={idx} className="hover:bg-slate-50/60">
+                        <td className="py-2.5 px-3 text-slate-500 font-mono">{idx + 1}</td>
+                        <td className="py-2.5 px-3">
+                          <div className="font-bold text-slate-900">{item.name}</div>
+                          {item.barcode && <div className="text-[10px] text-slate-500 font-mono">Barcode: {item.barcode}</div>}
+                        </td>
+                        <td className="py-2.5 px-3 font-mono text-slate-600">{item.hsn || item.hsnCode || '—'}</td>
+                        <td className="py-2.5 px-3 text-right font-mono font-semibold">
+                          {item.qty} {item.unit || ''}
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-mono">{Number(item.price || 0).toFixed(2)}</td>
+                        <td className="py-2.5 px-3 text-right font-mono">{taxableValue.toFixed(2)}</td>
+                        <td className="py-2.5 px-3 text-right font-mono text-slate-600">
+                          {lineTax > 0 ? Number(lineTax).toFixed(2) : '—'}
+                          {rate > 0 && <div className="text-[9.5px] text-slate-400">{rate}%</div>}
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-mono font-bold text-slate-900">
+                          {lineAmount.toFixed(2)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                {billing?.showGstBreakup !== false && Object.keys(gstSlabs).length > 0 && (
+                  <tfoot>
+                    {Object.entries(gstSlabs).map(([rate, vals]) => {
+                      const taxAmt = vals.igst || (vals.cgst + vals.sgst);
+                      return (
+                        <tr key={rate} className="bg-slate-50 font-bold text-slate-800 border-t border-slate-200">
+                          <td colSpan={5} className="py-2 px-3 text-right text-[11px] uppercase tracking-wider">Total @ {rate}%</td>
+                          <td className="py-2 px-3 text-right font-mono">{Number(vals.taxable).toFixed(2)}</td>
+                          <td className="py-2 px-3 text-right font-mono">{Number(taxAmt).toFixed(2)}</td>
+                          <td className="py-2 px-3 text-right font-mono">{Number(vals.taxable + taxAmt).toFixed(2)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tfoot>
+                )}
+              </table>
+            </div>
 
-          {/* Calculations & Total */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 pt-2">
-            <div className="space-y-3">
-              <div>
-                <span className="text-[10.5px] font-bold uppercase tracking-wider text-slate-500">Total in Words:</span>
-                <div className="text-xs font-semibold text-slate-800 italic mt-0.5">
-                  {numberToWords(invoice?.total || 0)}
-                </div>
-              </div>
+            {/* Payment details & Totals */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+              <div className="space-y-3">
+                {(billing?.bankAccountHolder || billing?.bankName || billing?.bankAccountNumber) && (
+                  <div className="rounded-xl bg-slate-50 p-3 border border-slate-200 text-[11px] space-y-1">
+                    <div className="font-bold text-slate-700 uppercase tracking-wider text-[10px] mb-1">Payment Details</div>
+                    {billing.bankAccountHolder && (
+                      <div><span className="text-slate-500">Account Holder Name:</span> <span className="font-semibold">{billing.bankAccountHolder}</span></div>
+                    )}
+                    {billing.bankName && (
+                      <div><span className="text-slate-500">Bank Name:</span> <span className="font-semibold">{billing.bankName}</span></div>
+                    )}
+                    {billing.bankAccountNumber && (
+                      <div><span className="text-slate-500">Account Number:</span> <span className="font-mono font-semibold">{billing.bankAccountNumber}</span></div>
+                    )}
+                    {billing.bankBranch && (
+                      <div><span className="text-slate-500">Branch Name:</span> <span className="font-semibold">{billing.bankBranch}</span></div>
+                    )}
+                    {billing.bankIfsc && (
+                      <div><span className="text-slate-500">IFSC Code:</span> <span className="font-mono font-semibold">{billing.bankIfsc}</span></div>
+                    )}
+                  </div>
+                )}
 
-              {/* GST Slab Breakdown */}
-              {Object.keys(gstSlabs).length > 0 && (
-                <div className="rounded-xl bg-slate-50 p-3 border border-slate-200 text-[11px] space-y-1.5">
-                  <div className="font-bold text-slate-700 uppercase tracking-wider text-[10px]">Tax Slabs Summary</div>
-                  {Object.entries(gstSlabs).map(([rate, vals]) => (
-                    <div key={rate} className="flex justify-between text-slate-600 font-mono">
-                      <span>GST @ {rate}% on {money(vals.taxable)}:</span>
-                      <span className="font-bold">
-                        {money(vals.igst || (vals.cgst + vals.sgst))}
-                      </span>
+                {billing?.upiId && (
+                  <div className="flex items-center gap-3">
+                    {qrDataUrl ? (
+                      <img src={qrDataUrl} alt="Payment QR" className="h-24 w-24 rounded-lg border border-slate-200" />
+                    ) : (
+                      <div className="h-24 w-24 rounded-lg border border-slate-200 flex items-center justify-center text-slate-300">
+                        <QrCode className="h-8 w-8" />
+                      </div>
+                    )}
+                    <div className="text-[11px]">
+                      <div className="font-bold text-slate-700 uppercase tracking-wider text-[10px]">Payment QR Code</div>
+                      <div className="text-slate-600 mt-0.5">UPI ID: <span className="font-mono font-semibold">{billing.upiId}</span></div>
                     </div>
-                  ))}
-                </div>
-              )}
-
-              {billing?.termsText && (
-                <div className="text-[11px] text-slate-600">
-                  <strong className="text-slate-700">Terms & Conditions:</strong> {billing.termsText}
-                </div>
-              )}
-            </div>
-
-            <div className="space-y-2 text-xs">
-              <div className="flex justify-between py-1 border-b border-slate-100">
-                <span className="text-slate-600">Subtotal:</span>
-                <span className="font-mono font-semibold">{money(invoice?.subtotal || invoice?.total)}</span>
+                  </div>
+                )}
               </div>
-              {invoice?.discount > 0 && (
-                <div className="flex justify-between py-1 border-b border-slate-100 text-emerald-600 font-semibold">
-                  <span>Discount:</span>
-                  <span className="font-mono">-{money(invoice.discount)}</span>
-                </div>
-              )}
-              {invoice?.tax > 0 && (
+
+              <div className="space-y-2 text-xs">
                 <div className="flex justify-between py-1 border-b border-slate-100">
-                  <span className="text-slate-600">GST Total:</span>
-                  <span className="font-mono font-semibold">{money(invoice.tax)}</span>
+                  <span className="text-slate-600">Total Taxable Value:</span>
+                  <span className="font-mono font-semibold">{money(invoice?.subtotal || invoice?.total)}</span>
                 </div>
-              )}
-              {invoice?.roundOff !== 0 && invoice?.roundOff && (
-                <div className="flex justify-between py-1 border-b border-slate-100 text-slate-500">
-                  <span>Round Off:</span>
-                  <span className="font-mono">{money(invoice.roundOff)}</span>
+                {invoice?.discount > 0 && (
+                  <div className="flex justify-between py-1 border-b border-slate-100 text-emerald-600 font-semibold">
+                    <span>Discount:</span>
+                    <span className="font-mono">-{money(invoice.discount)}</span>
+                  </div>
+                )}
+                {invoice?.tax > 0 && (
+                  <div className="flex justify-between py-1 border-b border-slate-100">
+                    <span className="text-slate-600">Total Tax Amount:</span>
+                    <span className="font-mono font-semibold">{money(invoice.tax)}</span>
+                  </div>
+                )}
+                {invoice?.roundOff !== 0 && invoice?.roundOff && (
+                  <div className="flex justify-between py-1 border-b border-slate-100 text-slate-500">
+                    <span>Round Off:</span>
+                    <span className="font-mono">{money(invoice.roundOff)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between py-2 border-t-2 border-slate-900 text-sm font-extrabold text-slate-900">
+                  <span>Total Value:</span>
+                  <span className="text-base text-blue-800 font-mono">{money(invoice?.total)}</span>
                 </div>
-              )}
-              <div className="flex justify-between py-2 border-t-2 border-slate-900 text-sm font-extrabold text-slate-900">
-                <span>Grand Total:</span>
-                <span className="text-base text-indigo-600 font-mono">{money(invoice?.total)}</span>
+                {billing?.showWordsTotal !== false && (
+                  <div className="pt-1.5 border-t border-slate-100">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Amount Chargeable (in words):</span>
+                      <span className="text-[10px] italic text-slate-400 shrink-0">E. &amp; O.E</span>
+                    </div>
+                    <div className="text-[11px] font-semibold text-slate-800 italic mt-0.5">
+                      {numberToWords(invoice?.total || 0)}
+                    </div>
+                    {invoice?.tax > 0 && (
+                      <>
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mt-1.5 block">Tax Amount (in words):</span>
+                        <div className="text-[11px] font-semibold text-slate-800 italic mt-0.5">
+                          {numberToWords(invoice.tax)}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
-          </div>
 
-          {/* Footer & Signature */}
-          <div className="flex flex-col sm:flex-row items-end justify-between gap-6 pt-6 border-t border-slate-200 text-xs">
-            <div className="text-slate-500 text-[11px]">
-              {billing?.footerText || 'Thank you for your business!'}
-            </div>
-            <div className="text-center sm:text-right space-y-1">
-              <div className="h-10"></div>
-              <div className="border-t border-slate-400 pt-1 font-bold text-slate-800 text-[11px]">
-                Authorized Signatory
+            {/* HSN/SAC-wise Tax Summary — GST-invoice-standard breakdown table */}
+            {billing?.showGstBreakup !== false && hsnRows.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs border-collapse border border-slate-200">
+                  <thead>
+                    <tr className="border-b-2 border-slate-300 text-[11px] font-bold text-slate-700 uppercase tracking-wider bg-slate-50">
+                      <th rowSpan={2} className="py-2 px-3 border-r border-slate-200 align-bottom">HSN/SAC</th>
+                      <th rowSpan={2} className="py-2 px-3 border-r border-slate-200 text-right align-bottom">Taxable Value (₹)</th>
+                      {billing?.interState ? (
+                        <th colSpan={2} className="py-2 px-3 border-r border-slate-200 text-center">Integrated Tax</th>
+                      ) : (
+                        <>
+                          <th colSpan={2} className="py-2 px-3 border-r border-slate-200 text-center">Central Tax</th>
+                          <th colSpan={2} className="py-2 px-3 border-r border-slate-200 text-center">State Tax</th>
+                        </>
+                      )}
+                      <th rowSpan={2} className="py-2 px-3 text-right align-bottom">Total Tax Amount (₹)</th>
+                    </tr>
+                    <tr className="border-b-2 border-slate-300 text-[10px] font-bold text-slate-600 uppercase bg-slate-50">
+                      {billing?.interState ? (
+                        <>
+                          <th className="py-1.5 px-3 border-r border-slate-200 text-right">Rate</th>
+                          <th className="py-1.5 px-3 border-r border-slate-200 text-right">Amount (₹)</th>
+                        </>
+                      ) : (
+                        <>
+                          <th className="py-1.5 px-3 border-r border-slate-200 text-right">Rate</th>
+                          <th className="py-1.5 px-3 border-r border-slate-200 text-right">Amount (₹)</th>
+                          <th className="py-1.5 px-3 border-r border-slate-200 text-right">Rate</th>
+                          <th className="py-1.5 px-3 border-r border-slate-200 text-right">Amount (₹)</th>
+                        </>
+                      )}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200">
+                    {hsnRows.map(([hsn, v]) => (
+                      <tr key={hsn}>
+                        <td className="py-2 px-3 border-r border-slate-100 font-mono">{hsn}</td>
+                        <td className="py-2 px-3 border-r border-slate-100 text-right font-mono">{v.taxable.toFixed(2)}</td>
+                        {billing?.interState ? (
+                          <>
+                            <td className="py-2 px-3 border-r border-slate-100 text-right font-mono">{v.rate}%</td>
+                            <td className="py-2 px-3 border-r border-slate-100 text-right font-mono">{v.igst.toFixed(2)}</td>
+                          </>
+                        ) : (
+                          <>
+                            <td className="py-2 px-3 border-r border-slate-100 text-right font-mono">{(v.rate / 2)}%</td>
+                            <td className="py-2 px-3 border-r border-slate-100 text-right font-mono">{v.cgst.toFixed(2)}</td>
+                            <td className="py-2 px-3 border-r border-slate-100 text-right font-mono">{(v.rate / 2)}%</td>
+                            <td className="py-2 px-3 border-r border-slate-100 text-right font-mono">{v.sgst.toFixed(2)}</td>
+                          </>
+                        )}
+                        <td className="py-2 px-3 text-right font-mono font-semibold">
+                          {(v.igst || v.cgst + v.sgst).toFixed(2)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="border-t-2 border-slate-300 font-bold text-slate-900 bg-slate-50">
+                      <td className="py-2 px-3 border-r border-slate-200">Total</td>
+                      <td className="py-2 px-3 border-r border-slate-200 text-right font-mono">{hsnTotals.taxable.toFixed(2)}</td>
+                      {billing?.interState ? (
+                        <td colSpan={2} className="py-2 px-3 border-r border-slate-200 text-right font-mono">{hsnTotals.igst.toFixed(2)}</td>
+                      ) : (
+                        <>
+                          <td colSpan={2} className="py-2 px-3 border-r border-slate-200 text-right font-mono">{hsnTotals.cgst.toFixed(2)}</td>
+                          <td colSpan={2} className="py-2 px-3 border-r border-slate-200 text-right font-mono">{hsnTotals.sgst.toFixed(2)}</td>
+                        </>
+                      )}
+                      <td className="py-2 px-3 text-right font-mono">
+                        {(hsnTotals.igst || hsnTotals.cgst + hsnTotals.sgst).toFixed(2)}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
               </div>
+            )}
+
+            {/* Footer & Signature */}
+            <div className="flex flex-col sm:flex-row items-end justify-between gap-6 pt-6 border-t border-slate-200">
+              <div className="text-slate-600 text-[11px] max-w-md space-y-1.5">
+                <div className="font-bold text-slate-700 uppercase tracking-wider text-[10px]">Terms & Conditions</div>
+                {billing?.termsText ? (
+                  <div className="whitespace-pre-line">{billing.termsText}</div>
+                ) : (
+                  <div className="text-slate-400">—</div>
+                )}
+                {billing?.footerText && <div className="mt-2 italic text-slate-500">{billing.footerText}</div>}
+              </div>
+              {billing?.showSignature !== false && (
+                <div className="text-center sm:text-right space-y-1 shrink-0">
+                  {company.name && (
+                    <div className="text-[11px] font-semibold text-slate-700">for {company.name}</div>
+                  )}
+                  <div className="h-10"></div>
+                  <div className="border-t border-slate-400 pt-1 font-bold text-slate-800 text-[11px]">
+                    Authorised Signatory
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="text-center text-[10px] text-slate-400 pt-4">
+              This is a Computer Generated Document
             </div>
           </div>
         </div>

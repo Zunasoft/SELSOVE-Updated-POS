@@ -3,7 +3,7 @@ import {
   Users, Truck, MessageSquare, Plus, Edit3, Trash2, BookOpen, Phone,
   Wallet, ShoppingBag, Save, Search, Download, RefreshCw,
   CheckCircle2, AlertTriangle, ArrowUpRight, ArrowDownRight, Mail,
-  MapPin, FileText, X, Printer, Building2, CreditCard, History, Clock, ArrowRight
+  MapPin, FileText, X, Printer, Building2, CreditCard, History, Clock, ArrowRight, Star
 } from 'lucide-react';
 
 import api, { money, fmtDate, fmtDateTime, todayISO } from '../lib/api';
@@ -244,16 +244,16 @@ export default function CustomerVendorLedger({ showToast }) {
 
             <div className="surface rounded-2xl p-4 border border-[color:var(--border)]">
               <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Total Orders</span>
-                <div className="p-1.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400">
-                  <FileText className="w-4 h-4" />
+                <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Loyalty Points</span>
+                <div className="p-1.5 rounded-lg bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400">
+                  <Star className="w-4 h-4 fill-amber-500 text-amber-500" />
                 </div>
               </div>
-              <div className="mt-2 text-xl font-extrabold text-[color:var(--text-primary)]">
-                {customers.reduce((s, c) => s + (c.billCount || 0), 0)}
+              <div className="mt-2 text-xl font-extrabold text-amber-600 dark:text-amber-400">
+                {customers.reduce((s, c) => s + (c.loyaltyPoints || 0), 0)} <span className="text-xs font-normal">pts</span>
               </div>
               <div className="mt-1 text-[11px] text-[color:var(--text-muted)]">
-                Recorded sales bills
+                Held by {customers.filter(c => (c.loyaltyPoints || 0) > 0).length} customers
               </div>
             </div>
           </>
@@ -385,6 +385,7 @@ export default function CustomerVendorLedger({ showToast }) {
                   <th className="py-3 px-4">Customer</th>
                   <th className="py-3 px-4">Group</th>
                   <th className="py-3 px-4 text-right">Bills</th>
+                  <th className="py-3 px-4 text-right">Loyalty Points</th>
                   <th className="py-3 px-4 text-right">Credit Limit</th>
                   <th className="py-3 px-4 text-right">Outstanding Due</th>
                   <th className="py-3 px-4 text-right">Actions</th>
@@ -433,6 +434,13 @@ export default function CustomerVendorLedger({ showToast }) {
 
                       <td className="py-3 px-4 text-right font-mono text-[11.5px] text-[color:var(--text-secondary)] whitespace-nowrap">
                         {c.billCount || 0}
+                      </td>
+
+                      <td className="py-3 px-4 text-right whitespace-nowrap">
+                        <span className="inline-flex items-center gap-1 font-bold text-[11.5px] px-2 py-0.5 rounded-full bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-800">
+                          <Star className="w-2.5 h-2.5 fill-amber-500 text-amber-500" />
+                          {c.loyaltyPoints || 0} pts
+                        </span>
                       </td>
 
                       <td className="py-3 px-4 text-right font-mono text-[12px] text-[color:var(--text-secondary)] whitespace-nowrap">
@@ -666,11 +674,17 @@ function PartyFormModal({ open, isCustomer, editing, groups, onClose, showToast,
     address: '',
     group: 'Retail',
     creditLimit: '',
+    loyaltyPoints: '',
     gstin: '',
+    pan: '',
+    state: '',
+    stateCode: '',
     category: '',
     contactPerson: '',
     paymentTerms: '',
     openingBalance: '',
+    openingAdvance: '',
+    advanceBalance: '',
     outstandingPayable: '',
     changeReason: ''
   };
@@ -684,6 +698,7 @@ function PartyFormModal({ open, isCustomer, editing, groups, onClose, showToast,
           ? {
               ...blank,
               ...editing,
+              advanceBalance: editing.advance !== undefined ? editing.advance : (editing.advanceBalance || ''),
               outstandingPayable: editing.outstandingPayable !== undefined ? editing.outstandingPayable : (editing.outstanding || ''),
               changeReason: ''
             }
@@ -789,6 +804,26 @@ function PartyFormModal({ open, isCustomer, editing, groups, onClose, showToast,
                 <Field label="Credit Limit (₹)" hint="Warns counter cashier when credit sales exceed limit">
                   <Input type="number" value={form.creditLimit} onChange={set('creditLimit')} placeholder="0" />
                 </Field>
+                <Field label="GSTIN" hint="For B2B customers — printed on tax invoices">
+                  <Input
+                    value={form.gstin}
+                    onChange={(e) => setForm({ ...form, gstin: e.target.value.toUpperCase() })}
+                    placeholder="29AABCM1234K1Z5"
+                  />
+                </Field>
+                <Field label="PAN" hint="Printed on tax invoices">
+                  <Input
+                    value={form.pan}
+                    onChange={(e) => setForm({ ...form, pan: e.target.value.toUpperCase() })}
+                    placeholder="AABCM1234K"
+                  />
+                </Field>
+                <Field label="State Name" hint="For GST place-of-supply on tax invoices">
+                  <Input value={form.state} onChange={set('state')} placeholder="e.g. Delhi" />
+                </Field>
+                <Field label="State Code">
+                  <Input value={form.stateCode} onChange={set('stateCode')} placeholder="e.g. 07" />
+                </Field>
               </>
             ) : (
               <>
@@ -797,6 +832,13 @@ function PartyFormModal({ open, isCustomer, editing, groups, onClose, showToast,
                     value={form.gstin}
                     onChange={(e) => setForm({ ...form, gstin: e.target.value.toUpperCase() })}
                     placeholder="29AABCM1234K1Z5"
+                  />
+                </Field>
+                <Field label="PAN">
+                  <Input
+                    value={form.pan}
+                    onChange={(e) => setForm({ ...form, pan: e.target.value.toUpperCase() })}
+                    placeholder="AABCM1234K"
                   />
                 </Field>
                 <Field label="Supplier Category" hint="e.g. FMCG, Grains, Dairy, Packaging">
@@ -821,19 +863,69 @@ function PartyFormModal({ open, isCustomer, editing, groups, onClose, showToast,
               <Textarea rows={2} value={form.address} onChange={set('address')} placeholder="Door/Street, City, Pincode, State" />
             </Field>
 
+            {/* If Customer: Loyalty Points */}
+            {isCustomer && (
+              <Field
+                label="Loyalty Points (pts)"
+                hint="Points earned based on purchase value (e.g. ₹100 = 1 pt)"
+                className={editing ? 'sm:col-span-2' : ''}
+              >
+                <Input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={form.loyaltyPoints ?? ''}
+                  onChange={set('loyaltyPoints')}
+                  placeholder="0"
+                />
+              </Field>
+            )}
+
             {/* If Customer and not editing */}
             {isCustomer && !editing && (
+              <>
+                <Field
+                  label="Opening Receivable (₹)"
+                  hint="Initial balance owed by customer to shop"
+                >
+                  <Input
+                    type="number"
+                    step="0.01"
+                    value={form.openingBalance}
+                    onChange={set('openingBalance')}
+                    placeholder="0.00"
+                  />
+                </Field>
+                <Field
+                  label="Opening Advance / Store Credit (₹)"
+                  hint="Initial pending balance owed by shop to customer"
+                >
+                  <Input
+                    type="number"
+                    step="0.01"
+                    value={form.openingAdvance}
+                    onChange={set('openingAdvance')}
+                    placeholder="0.00"
+                    className="font-bold text-blue-600 dark:text-blue-400 font-mono"
+                  />
+                </Field>
+              </>
+            )}
+
+            {/* If Customer and editing */}
+            {isCustomer && editing && (
               <Field
-                label="Opening Receivable (₹)"
-                hint="Initial balance owed by customer when starting"
+                label="Advance / Store Credit Balance (₹)"
+                hint="Pending amount owed to customer (deductible on future POS purchases)"
                 className="sm:col-span-2"
               >
                 <Input
                   type="number"
                   step="0.01"
-                  value={form.openingBalance}
-                  onChange={set('openingBalance')}
+                  value={form.advanceBalance ?? ''}
+                  onChange={set('advanceBalance')}
                   placeholder="0.00"
+                  className="font-bold text-blue-600 dark:text-blue-400 font-mono"
                 />
               </Field>
             )}
@@ -1072,6 +1164,32 @@ function PartyLedgerModal({ party, onClose, showToast }) {
         <EmptyState title="No transactions recorded" hint="Invoices, receipts, payments and vouchers will appear in this ledger." />
       ) : (
         <div className="space-y-4">
+          {party?.type === 'CUSTOMER' && (
+            <div className="flex items-center justify-between p-3.5 rounded-2xl bg-amber-50/80 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 shadow-xs">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-amber-100 dark:bg-amber-900/60 flex items-center justify-center text-amber-600 dark:text-amber-400 shrink-0">
+                  <Star className="w-5 h-5 fill-amber-500 text-amber-500" />
+                </div>
+                <div>
+                  <div className="text-xs font-bold text-[color:var(--text-primary)]">
+                    Customer Loyalty Points Balance
+                  </div>
+                  <div className="text-[11px] text-[color:var(--text-muted)]">
+                    Accumulates automatically based on sales purchase value
+                  </div>
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-base font-extrabold text-amber-600 dark:text-amber-400 font-mono">
+                  {party.loyaltyPoints || 0} <span className="text-xs font-bold">pts</span>
+                </div>
+                <div className="text-[10.5px] text-[color:var(--text-muted)] font-semibold">
+                  Redeemable at checkout
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Statement Balance Ribbon */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div className="surface rounded-xl p-3 border border-[color:var(--border)]">

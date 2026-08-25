@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Truck, Plus, Trash2, ClipboardList, Wallet } from 'lucide-react';
+import { Truck, Plus, Trash2, ClipboardList, Wallet, X, Search, Boxes } from 'lucide-react';
 
 import api, { money, fmtDate, todayISO, monthStartISO } from '../lib/api';
 import {
@@ -29,6 +29,7 @@ export default function PurchaseManager({ tenant, token, showToast }) {
 
   const loadPurchases = () => api.get('/purchases', { from: range.from, to: range.to }).then((d) => setPurchases(d || []));
   const loadVendors = () => api.get('/vendors').then((d) => setVendors(d || []));
+  const loadProducts = () => api.get('/products').then((d) => setProducts(d || []));
 
   const load = async () => {
     setLoading(true);
@@ -56,6 +57,18 @@ export default function PurchaseManager({ tenant, token, showToast }) {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [range.from, range.to]);
+
+  const handleVoidPurchase = async (purchase) => {
+    if (!window.confirm(`Are you sure you want to VOID purchase ${purchase.invoiceNo}? This will reverse the received stock and accounting entries.`)) return;
+    try {
+      const res = await api.post(`/purchases/${purchase.id}/void`);
+      showToast(res.message);
+      setDetail(null);
+      load();
+    } catch (err) {
+      showToast(api.message(err, 'Could not void this purchase.'), 'error');
+    }
+  };
 
   // api.get() unwraps to the raw array, so period totals are derived here
   // rather than read from a summary envelope.
@@ -183,10 +196,11 @@ export default function PurchaseManager({ tenant, token, showToast }) {
           setShowNew(false);
           loadPurchases();
           loadVendors();
+          loadProducts();
         }}
       />
 
-      <PurchaseDetailModal purchase={detail} onClose={() => setDetail(null)} />
+      <PurchaseDetailModal purchase={detail} onClose={() => setDetail(null)} onVoid={handleVoidPurchase} />
 
       <PayVendorModal
         vendor={payVendorTarget}
@@ -261,6 +275,9 @@ function VendorPayablesPanel({ vendors, onPay }) {
 
 /** Status + paid-so-far badge shared by the invoice list and the detail modal. */
 function PaymentStatusBadge({ purchase }) {
+  if (purchase.status === 'VOID') {
+    return <Badge tone="danger">VOID</Badge>;
+  }
   const tone = purchase.paymentStatus === 'PAID' ? 'success' : purchase.paymentStatus === 'PARTIAL' ? 'info' : 'warning';
   const label = purchase.paymentStatus === 'PAID' ? 'Paid' : purchase.paymentStatus === 'PARTIAL' ? 'Partial' : 'Unpaid';
   return (
@@ -273,7 +290,8 @@ function PaymentStatusBadge({ purchase }) {
   );
 }
 
-function PurchaseDetailModal({ purchase, onClose }) {
+function PurchaseDetailModal({ purchase, onClose, onVoid }) {
+  const isVoid = purchase?.status === 'VOID';
   return (
     <Modal
       open={Boolean(purchase)}
@@ -282,10 +300,24 @@ function PurchaseDetailModal({ purchase, onClose }) {
       subtitle={purchase ? `${purchase.vendorName} · ${fmtDate(purchase.date)} · Voucher ${purchase.voucherNo}` : ''}
       icon={Truck}
       size="xl"
-      footer={<Button onClick={onClose}>Close</Button>}
+      footer={
+        <>
+          {purchase && !isVoid && (
+            <Button variant="danger" onClick={() => onVoid(purchase)}>
+              Void Purchase
+            </Button>
+          )}
+          <Button onClick={onClose}>Close</Button>
+        </>
+      }
     >
       {purchase && (
         <div className="space-y-3">
+          {isVoid && (
+            <div className="rounded-xl px-3 py-2 text-[11.5px] font-semibold text-rose-600 dark:text-rose-400" style={{ background: 'var(--bg-subtle)' }}>
+              This purchase was voided{purchase.voidedBy ? ` by ${purchase.voidedBy}` : ''}{purchase.voidedAt ? ` on ${fmtDate(purchase.voidedAt)}` : ''}. Stock and accounting entries were reversed.
+            </div>
+          )}
           <div className="grid grid-cols-3 gap-3">
             <Summary label="Payment status" value={<PaymentStatusBadge purchase={purchase} />} />
             <Summary label="Payment mode" value={purchase.paymentMode || '—'} />
@@ -493,7 +525,149 @@ function PayVendorModal({ vendor, accounts, showToast, onClose, onPaid }) {
   );
 }
 
-const blankLine = () => ({ productId: '', name: '', qty: '', rate: '', taxRate: 0 });
+const blankLine = () => ({ productId: '', name: '', qty: '', rate: '', taxRate: 0, unit: 'pcs', hsn: '', isNew: false });
+
+/** Search-as-you-type product picker for purchase line items — mirrors the Invoice section's product picker,
+ * but surfaces purchase price / stock instead of sale price, since this is a goods-inward flow. */
+function PurchaseProductPickerModal({ open, onClose, products = [], onSelectProduct, onAddNew }) {
+  const [search, setSearch] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('ALL');
+
+  useEffect(() => {
+    if (open) {
+      setSearch('');
+      setCategoryFilter('ALL');
+    }
+  }, [open]);
+
+  const categories = useMemo(() => {
+    const cats = new Set();
+    (products || []).forEach((p) => {
+      if (p.category) cats.add(p.category);
+    });
+    return Array.from(cats);
+  }, [products]);
+
+  const filteredProducts = useMemo(() => {
+    const q = search.toLowerCase().trim();
+    return (products || []).filter((p) => {
+      if (categoryFilter !== 'ALL' && p.category !== categoryFilter) return false;
+      if (!q) return true;
+      return (
+        (p.name && p.name.toLowerCase().includes(q)) ||
+        (p.barcode && String(p.barcode).toLowerCase().includes(q)) ||
+        (p.hsn && String(p.hsn).toLowerCase().includes(q)) ||
+        (p.category && p.category.toLowerCase().includes(q))
+      );
+    });
+  }, [products, search, categoryFilter]);
+
+  if (!open) return null;
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Select Product"
+      subtitle={`Choose from ${products.length} catalog products, or add a new one for this purchase.`}
+      icon={Boxes}
+      size="lg"
+      footer={
+        <div className="flex items-center justify-between w-full">
+          <button
+            type="button"
+            onClick={() => {
+              onAddNew();
+              onClose();
+            }}
+            className="text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:underline"
+          >
+            + Add new product (not in catalogue)
+          </button>
+          <Button onClick={onClose}>Close</Button>
+        </div>
+      }
+    >
+      <div className="space-y-3">
+        <div className="flex flex-col sm:flex-row items-center gap-2">
+          <div className="relative flex-1 w-full">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[color:var(--text-muted)]" />
+            <input
+              type="text"
+              placeholder="Search by product name, barcode, HSN, category…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="field-input text-xs pl-8 pr-8 w-full rounded-xl"
+              autoFocus
+            />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch('')}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          {categories.length > 0 && (
+            <select
+              value={categoryFilter}
+              onChange={(e) => setCategoryFilter(e.target.value)}
+              className="field-input text-xs py-2 px-3 min-w-[140px] rounded-xl font-semibold cursor-pointer shrink-0"
+            >
+              <option value="ALL">All Categories</option>
+              {categories.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+
+        <div className="max-h-80 overflow-y-auto rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-surface)] divide-y divide-[color:var(--border-subtle)]">
+          {filteredProducts.length === 0 ? (
+            <div className="p-8 text-center space-y-2">
+              <div className="text-xs font-bold text-[color:var(--text-secondary)]">No products match your search</div>
+              <div className="text-[11px] text-[color:var(--text-muted)]">
+                Try another keyword, or add this as a new product below.
+              </div>
+            </div>
+          ) : (
+            filteredProducts.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => {
+                  onSelectProduct(p);
+                  onClose();
+                }}
+                className="w-full flex items-center justify-between gap-3 p-3 text-left hover:bg-[color:var(--bg-subtle)] transition-colors"
+              >
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-[color:var(--text-primary)] truncate">{p.name}</div>
+                  <div className="text-[10.5px] text-[color:var(--text-muted)]">
+                    {p.unit || 'pcs'}
+                    {p.hsn ? ` · HSN ${p.hsn}` : ''}
+                    {p.category ? ` · ${p.category}` : ''}
+                  </div>
+                </div>
+                <div className="shrink-0 text-right">
+                  <div className="text-xs font-mono font-bold text-[color:var(--text-primary)]">
+                    {money(p.purchasePrice ?? p.price ?? 0)}
+                  </div>
+                  <div className="text-[10px] text-[color:var(--text-muted)]">Stock {p.stock ?? 0}</div>
+                </div>
+              </button>
+            ))
+          )}
+        </div>
+      </div>
+    </Modal>
+  );
+}
 
 function NewPurchaseModal({ open, onClose, vendors, products, accounts, showToast, onSaved }) {
   const blankForm = {
@@ -503,11 +677,13 @@ function NewPurchaseModal({ open, onClose, vendors, products, accounts, showToas
   const [form, setForm] = useState(blankForm);
   const [lines, setLines] = useState([blankLine()]);
   const [saving, setSaving] = useState(false);
+  const [activePickerIndex, setActivePickerIndex] = useState(null);
 
   useEffect(() => {
     if (open) {
       setForm(blankForm);
       setLines([blankLine()]);
+      setActivePickerIndex(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -519,14 +695,23 @@ function NewPurchaseModal({ open, onClose, vendors, products, accounts, showToas
   const removeLine = (idx) => setLines((ls) => ls.filter((_, i) => i !== idx));
 
   const pickProduct = (idx, productId) => {
+    if (productId === '__new__') {
+      setLine(idx, { productId: '', name: '', rate: '', taxRate: 0, unit: 'pcs', hsn: '', isNew: true });
+      return;
+    }
     const p = products.find((pr) => pr.id === productId);
     setLine(idx, {
       productId,
       name: p?.name || '',
       rate: p?.purchasePrice ?? '',
-      taxRate: p?.taxRate ?? 0
+      taxRate: p?.taxRate ?? 0,
+      unit: p?.unit || 'pcs',
+      hsn: p?.hsn || '',
+      isNew: false
     });
   };
+
+  const backToCatalog = (idx) => setLine(idx, { productId: '', name: '', rate: '', taxRate: 0, unit: 'pcs', hsn: '', isNew: false });
 
   const lineAmount = (l) => (Number(l.qty) || 0) * (Number(l.rate) || 0) * (1 + (Number(l.taxRate) || 0) / 100);
   const subtotal = useMemo(() => lines.reduce((s, l) => s + (Number(l.qty) || 0) * (Number(l.rate) || 0), 0), [lines]);
@@ -536,7 +721,8 @@ function NewPurchaseModal({ open, onClose, vendors, products, accounts, showToas
   );
   const grandTotal = subtotal + tax;
 
-  const canSubmit = Boolean(form.vendorId) && lines.some((l) => l.productId && Number(l.qty) > 0);
+  const lineIsValid = (l) => (l.productId || (l.isNew && l.name.trim())) && Number(l.qty) > 0;
+  const canSubmit = Boolean(form.vendorId) && lines.some(lineIsValid);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -548,8 +734,16 @@ function NewPurchaseModal({ open, onClose, vendors, products, accounts, showToas
         vendorName: vendor?.name || '',
         invoiceNo: form.invoiceNo,
         items: lines
-          .filter((l) => l.productId && Number(l.qty) > 0)
-          .map((l) => ({ productId: l.productId, name: l.name, qty: Number(l.qty), rate: Number(l.rate) || 0, taxRate: Number(l.taxRate) || 0 })),
+          .filter(lineIsValid)
+          .map((l) => ({
+            productId: l.productId || null,
+            name: l.name,
+            unit: l.unit || 'pcs',
+            hsn: l.hsn || '',
+            qty: Number(l.qty),
+            rate: Number(l.rate) || 0,
+            taxRate: Number(l.taxRate) || 0
+          })),
         totalAmount: grandTotal,
         tax,
         paymentStatus: form.paymentStatus,
@@ -568,6 +762,7 @@ function NewPurchaseModal({ open, onClose, vendors, products, accounts, showToas
   };
 
   return (
+    <>
     <Modal
       open={open}
       onClose={onClose}
@@ -666,14 +861,51 @@ function NewPurchaseModal({ open, onClose, vendors, products, accounts, showToas
                 {lines.map((line, idx) => (
                   <tr key={idx}>
                     <td>
-                      <Select value={line.productId} onChange={(e) => pickProduct(idx, e.target.value)}>
-                        <option value="">— Select product —</option>
-                        {products.map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.name} ({p.unit})
-                          </option>
-                        ))}
-                      </Select>
+                      {line.isNew ? (
+                        <div className="flex items-center gap-1.5">
+                          <div className="flex-1 space-y-1">
+                            <Input
+                              autoFocus
+                              value={line.name}
+                              onChange={(e) => setLine(idx, { name: e.target.value })}
+                              placeholder="New product name"
+                            />
+                            <div className="flex items-center gap-1.5">
+                              <Input
+                                value={line.unit}
+                                onChange={(e) => setLine(idx, { unit: e.target.value })}
+                                placeholder="Unit (pcs)"
+                                className="w-20 text-xs"
+                              />
+                              <Input
+                                value={line.hsn}
+                                onChange={(e) => setLine(idx, { hsn: e.target.value })}
+                                placeholder="HSN (optional)"
+                                className="w-28 text-xs"
+                              />
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => backToCatalog(idx)}
+                            title="Pick from catalogue instead"
+                            className="rounded-lg p-1.5 text-[color:var(--text-muted)] transition-colors hover:bg-[color:var(--bg-subtle)]"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setActivePickerIndex(idx)}
+                          className="field-input flex items-center justify-between gap-2 w-full text-left text-xs min-h-[36px]"
+                        >
+                          <span className="truncate">
+                            {line.name || <span className="text-[color:var(--text-muted)]">— Select product —</span>}
+                          </span>
+                          <Search className="h-3.5 w-3.5 shrink-0 text-[color:var(--text-muted)]" />
+                        </button>
+                      )}
                     </td>
                     <td>
                       <Input
@@ -734,5 +966,18 @@ function NewPurchaseModal({ open, onClose, vendors, products, accounts, showToas
         </Field>
       </form>
     </Modal>
+
+    <PurchaseProductPickerModal
+      open={activePickerIndex !== null}
+      onClose={() => setActivePickerIndex(null)}
+      products={products}
+      onSelectProduct={(p) => {
+        if (activePickerIndex !== null) pickProduct(activePickerIndex, p.id);
+      }}
+      onAddNew={() => {
+        if (activePickerIndex !== null) pickProduct(activePickerIndex, '__new__');
+      }}
+    />
+    </>
   );
 }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ShoppingCart, Package, Users, BarChart3, LogOut, Database, CheckCircle2,
@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 
 import api, { setSessionExpiredHandler, SESSION_KEYS } from './lib/api';
+import ErrorBoundary from './components/ErrorBoundary';
 import OTPLogin from './components/OTPLogin';
 import ShopDashboard from './components/ShopDashboard';
 import POSTerminal from './components/POSTerminal';
@@ -59,10 +60,15 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [features, setFeatures] = useState(null);
 
-  const showToast = (msg, type = 'success') => {
+  // Stable identity is load-bearing: this is passed to every screen and several
+  // of them put it in a useEffect/useCallback dependency array. A fresh function
+  // reference on every App render (toast display, dark-mode toggle, tab clicks…)
+  // used to re-fire those effects and re-trigger full data reloads on the active
+  // screen — visible as a loading-spinner flash / "buffering" on almost any click.
+  const showToast = useCallback((msg, type = 'success') => {
     setToast({ msg, type, id: Date.now() });
     setTimeout(() => setToast(null), 4000);
-  };
+  }, []);
 
   const toggleFullscreen = async (enable) => {
     const isCurrentlyFs = Boolean(
@@ -108,6 +114,9 @@ export default function App() {
 
   const handleTabClick = (tabId) => {
     setActiveTab(tabId);
+    if (['inventory', 'dashboard', 'pos', 'reports', 'purchases', 'customers'].includes(tabId)) {
+      fetchStoreData();
+    }
   };
 
   // Sync state with native browser fullscreenchange events
@@ -264,7 +273,7 @@ export default function App() {
 
   const screens = {
     dashboard: <ShopDashboard {...shared} onNavigate={handleTabClick} />,
-    pos: <POSTerminal {...shared} settings={settings} />,
+    pos: <POSTerminal {...shared} settings={settings} onSaleCompleted={fetchStoreData} />,
     invoices: <InvoicesManager {...shared} onNavigate={handleTabClick} />,
     inventory: (
       <InventoryManager
@@ -460,7 +469,9 @@ export default function App() {
             </motion.div>
           )}
         </AnimatePresence>
-        {screens[activeTab]}
+        <ErrorBoundary key={activeTab} label="This section hit an unexpected error.">
+          {screens[activeTab]}
+        </ErrorBoundary>
       </main>
     </div>
   );

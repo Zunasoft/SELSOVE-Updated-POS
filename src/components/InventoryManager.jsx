@@ -13,6 +13,8 @@ import {
 } from '../lib/ui';
 import { exportReport } from '../lib/exporters';
 import BarcodePrinterModal from './BarcodePrinterModal';
+import { getProductAutoVisual, getProductImageUrl, fetchRealProductPhoto } from './POSTerminal';
+import { getCategoryTheme, AVAILABLE_CATEGORY_COLORS, getNextAvailableColor } from '../lib/categoryTheme';
 
 const TABS = [
   { id: 'dashboard', label: 'Dashboard', icon: Package },
@@ -71,6 +73,11 @@ export default function InventoryManager({ products, categories, onRefresh, show
     api.get('/warehouses').then((res) => setWarehouses(Array.isArray(res) ? res : res?.data || [])).catch(() => {});
     api.get('/inventory/summary').then((res) => setSummary(res?.data || res)).catch(() => {});
   };
+
+  useEffect(() => {
+    onRefresh?.();
+    fetchAuxData();
+  }, []);
 
   useEffect(() => {
     fetchAuxData();
@@ -447,6 +454,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
   const [showForm, setShowForm] = useState(false);
   const [labelProduct, setLabelProduct] = useState(null);
   const [uploadingImage, setUploadingImage] = useState(false);
+  const [findingPhoto, setFindingPhoto] = useState(false);
 
   const [form, setForm] = useState(blankProduct(categories));
 
@@ -627,6 +635,28 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       showToast(api.message(err, 'Failed to upload image.'), 'error');
     } finally {
       setUploadingImage(false);
+    }
+  };
+
+  const autoFindRealPhoto = async () => {
+    if (!form.name && !form.barcodes && !form.barcode) {
+      showToast('Enter product name or barcode first.', 'error');
+      return;
+    }
+    setFindingPhoto(true);
+    try {
+      const barcode = String(form.barcodes || form.barcode || '').split(',')[0].trim();
+      const photo = await fetchRealProductPhoto(form.name, barcode);
+      if (photo) {
+        setForm((prev) => ({ ...prev, imageUrl: photo }));
+        showToast('Real product photo found & attached!', 'success');
+      } else {
+        showToast('No online photo found for this item name.', 'error');
+      }
+    } catch (err) {
+      showToast('Could not fetch real photo.', 'error');
+    } finally {
+      setFindingPhoto(false);
     }
   };
 
@@ -858,13 +888,33 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                     <tr key={p.id} className="hover:bg-[color:var(--bg-subtle)]/50 transition-colors">
                       <td className="py-3 px-3">
                         <div className="flex items-center gap-3">
-                          {p.imageUrl ? (
-                            <img src={p.imageUrl.startsWith('/') ? `${API_BASE.replace('/api/pos', '')}${p.imageUrl}` : p.imageUrl} alt={p.name} className="h-10 w-10 rounded-lg object-cover border border-[color:var(--border-subtle)]" />
-                          ) : (
-                            <div className="h-10 w-10 rounded-lg bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 flex items-center justify-center text-indigo-600 font-bold text-sm">
-                              {p.name.slice(0, 2).toUpperCase()}
-                            </div>
-                          )}
+                          {(() => {
+                            const imgUrl = getProductImageUrl(p.imageUrl, p.name, p.barcode);
+                            const visual = getProductAutoVisual(p.name);
+                            return (
+                              <div className="h-10 w-10 shrink-0 rounded-lg overflow-hidden border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] flex items-center justify-center relative">
+                                {imgUrl ? (
+                                  <img
+                                    src={imgUrl}
+                                    alt={p.name}
+                                    className="h-full w-full object-cover"
+                                    onError={(e) => {
+                                      e.currentTarget.style.display = 'none';
+                                      if (e.currentTarget.nextSibling) {
+                                        e.currentTarget.nextSibling.style.display = 'flex';
+                                      }
+                                    }}
+                                  />
+                                ) : null}
+                                <div
+                                  className={`h-full w-full bg-gradient-to-br ${visual.gradient} flex items-center justify-center text-white font-bold text-base shadow-xs select-none`}
+                                  style={{ display: imgUrl ? 'none' : 'flex' }}
+                                >
+                                  <span>{visual.icon}</span>
+                                </div>
+                              </div>
+                            );
+                          })()}
                           <div>
                             <div className="font-bold text-sm text-[color:var(--text-primary)]">{p.name}</div>
                             {(p.regionalName || p.printName) && (
@@ -876,10 +926,22 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                       </td>
 
                       <td className="py-3 px-3">
-                        <div className="font-medium text-[color:var(--text-primary)]">
-                          {productCategoryNames.length ? productCategoryNames.join(', ') : '—'}
+                        <div className="flex flex-wrap items-center gap-1">
+                          {productCategoryNames.length ? (
+                            productCategoryNames.map((name, i) => {
+                              const catTheme = getCategoryTheme(name);
+                              return (
+                                <span key={i} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10.5px] font-extrabold tracking-tight ${catTheme.badge}`}>
+                                  <span className={`h-1.5 w-1.5 rounded-full ${catTheme.dot}`} />
+                                  {name}
+                                </span>
+                              );
+                            })
+                          ) : (
+                            <span className="text-[color:var(--text-muted)]">—</span>
+                          )}
                         </div>
-                        <div className="flex flex-wrap items-center gap-1 mt-0.5">
+                        <div className="flex flex-wrap items-center gap-1 mt-1">
                           {(() => {
                             const typeKey = canonicalProductType(p.productType || (Array.isArray(p.productTypes) && p.productTypes.length > 1 ? 'both' : p.productTypes?.[0]));
                             if (typeKey === 'both' || (Array.isArray(p.productTypes) && p.productTypes.includes('standard') && p.productTypes.includes('raw'))) {
@@ -1026,19 +1088,34 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                   <ImageIcon className="h-6 w-6 text-indigo-400" />
                 )}
               </div>
-              <div className="space-y-1 flex-1">
-                <label className="text-xs font-bold text-[color:var(--text-primary)] block">Product Image (Multer Storage)</label>
-                <div className="flex items-center gap-2">
+              <div className="space-y-1.5 flex-1">
+                <label className="text-xs font-bold text-[color:var(--text-primary)] block">Product Image</label>
+                <div className="flex flex-wrap items-center gap-2">
                   <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" id="prod-img-upload" />
-                  <label htmlFor="prod-img-upload" className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-700 transition-all">
+                  <label htmlFor="prod-img-upload" className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-700 transition-all shadow-xs">
                     <Upload className="h-3.5 w-3.5" />
-                    {uploadingImage ? 'Uploading...' : 'Choose Image'}
+                    {uploadingImage ? 'Uploading...' : 'Choose Image (Manual)'}
                   </label>
+
+                  <button
+                    type="button"
+                    onClick={autoFindRealPhoto}
+                    disabled={findingPhoto || (!form.name && !form.barcodes && !form.barcode)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-[color:var(--bg-surface)] text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 transition-all disabled:opacity-50 shadow-2xs"
+                    title="Auto-fetch real product photo online based on product name or barcode"
+                  >
+                    <Search className="h-3.5 w-3.5" />
+                    {findingPhoto ? 'Finding photo...' : '✨ Auto-Find Real Photo'}
+                  </button>
+
                   {form.imageUrl && (
                     <button type="button" onClick={() => setForm((p) => ({ ...p, imageUrl: '' }))} className="text-xs text-red-500 hover:underline">
                       Remove
                     </button>
                   )}
+                </div>
+                <div className="text-[10px] text-[color:var(--text-muted)]">
+                  Manually uploaded images take priority. If no image is provided, a real photo is auto-generated.
                 </div>
               </div>
             </div>
@@ -1785,13 +1862,15 @@ function CategoriesTab({ categories, products, showToast, onRefresh }) {
 
   const openAdd = () => {
     setEditing(null);
-    setForm({ name: '', icon: '📦', description: '', kotPrinter: '' });
+    const newColor = getNextAvailableColor(categories);
+    setForm({ name: '', icon: '📦', description: '', kotPrinter: '', color: newColor });
     setShowModal(true);
   };
 
   const openEdit = (cat) => {
     setEditing(cat);
-    setForm({ name: cat.name, icon: cat.icon || '📦', description: cat.description || '', kotPrinter: cat.kotPrinter || '' });
+    const currentColor = cat.color || getCategoryTheme(cat)?.id || 'indigo';
+    setForm({ name: cat.name, icon: cat.icon || '📦', description: cat.description || '', kotPrinter: cat.kotPrinter || '', color: currentColor });
     setShowModal(true);
   };
 
@@ -1830,25 +1909,32 @@ function CategoriesTab({ categories, products, showToast, onRefresh }) {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        {filtered.map((cat) => (
-          <div key={cat.id} className="p-4 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="text-2xl p-2 bg-[color:var(--bg-subtle)] rounded-xl">{cat.icon || '📦'}</div>
-              <div>
-                <div className="font-bold text-sm text-[color:var(--text-primary)]">{cat.name}</div>
-                <div className="text-xs text-[color:var(--text-muted)]">{(products || []).filter(p => Array.isArray(p.categoryIds) && p.categoryIds.length ? p.categoryIds.includes(cat.id) : p.categoryId === cat.id).length} product(s) assigned</div>
+        {filtered.map((cat) => {
+          const catTheme = getCategoryTheme(cat);
+          const assignedCount = (products || []).filter(p => Array.isArray(p.categoryIds) && p.categoryIds.length ? p.categoryIds.includes(cat.id) : p.categoryId === cat.id).length;
+          return (
+            <div key={cat.id} className={`p-4 rounded-xl border ${catTheme.border} ${catTheme.lightBg} flex items-center justify-between transition-all hover:shadow-sm`}>
+              <div className="flex items-center gap-3">
+                <div className="text-2xl p-2.5 bg-white dark:bg-slate-900 rounded-xl shadow-xs border border-[color:var(--border-subtle)]">{cat.icon || '📦'}</div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className={`h-2.5 w-2.5 rounded-full ${catTheme.dot}`} />
+                    <div className="font-bold text-sm text-[color:var(--text-primary)]">{cat.name}</div>
+                  </div>
+                  <div className="text-xs text-[color:var(--text-muted)] mt-0.5">{assignedCount} product(s) assigned</div>
+                </div>
+              </div>
+              <div className="flex items-center gap-1">
+                <button onClick={() => openEdit(cat)} className="p-1.5 rounded-lg hover:bg-white/80 dark:hover:bg-slate-800 text-[color:var(--text-muted)] hover:text-indigo-600" title="Edit Category">
+                  <Edit3 className="h-4 w-4" />
+                </button>
+                <button onClick={() => removeCategory(cat.id)} className="p-1.5 rounded-lg hover:bg-white/80 dark:hover:bg-slate-800 text-[color:var(--text-muted)] hover:text-red-600" title="Delete Category">
+                  <Trash2 className="h-4 w-4" />
+                </button>
               </div>
             </div>
-            <div className="flex items-center gap-1">
-              <button onClick={() => openEdit(cat)} className="p-1.5 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)] hover:text-indigo-600">
-                <Edit3 className="h-4 w-4" />
-              </button>
-              <button onClick={() => removeCategory(cat.id)} className="p-1.5 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)] hover:text-red-600">
-                <Trash2 className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {showModal && (
@@ -1860,6 +1946,38 @@ function CategoriesTab({ categories, products, showToast, onRefresh }) {
             <Field label="Emoji Icon">
               <Input value={form.icon} onChange={(e) => setForm({ ...form, icon: e.target.value })} placeholder="🍎" />
             </Field>
+
+            <Field label="Category Color Theme">
+              <div className="grid grid-cols-4 sm:grid-cols-5 gap-2 pt-1 max-h-48 overflow-y-auto pr-1">
+                {AVAILABLE_CATEGORY_COLORS.map((col) => {
+                  const isSelected = form.color === col.id;
+                  return (
+                    <button
+                      key={col.id}
+                      type="button"
+                      onClick={() => setForm({ ...form, color: col.id })}
+                      className={`group relative flex flex-col items-center gap-1 p-2 rounded-xl border transition-all cursor-pointer ${
+                        isSelected
+                          ? 'border-indigo-600 dark:border-indigo-400 bg-indigo-50/70 dark:bg-indigo-950/50 ring-2 ring-indigo-500/30'
+                          : 'border-[color:var(--border-subtle)] hover:border-[color:var(--border)] bg-[color:var(--bg-subtle)]/50'
+                      }`}
+                      title={col.label}
+                    >
+                      <div
+                        className="h-6 w-6 rounded-full shadow-xs flex items-center justify-center text-white transition-transform group-hover:scale-110"
+                        style={{ backgroundColor: col.hex }}
+                      >
+                        {isSelected && <Check className="h-3.5 w-3.5 stroke-[3]" />}
+                      </div>
+                      <span className="text-[10px] font-bold text-[color:var(--text-secondary)] truncate max-w-full text-center">
+                        {col.label.split(' ')[0]}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </Field>
+
             <Field label="Description">
               <Textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
             </Field>

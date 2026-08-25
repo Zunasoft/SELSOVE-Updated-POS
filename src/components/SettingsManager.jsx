@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Settings, Plus, Trash2, ShieldCheck, RotateCcw, Check, X as XIcon } from 'lucide-react';
+import { Settings, Plus, Trash2, ShieldCheck, RotateCcw, Check, X as XIcon, Star } from 'lucide-react';
 
 import api from '../lib/api';
 import {
@@ -76,7 +76,7 @@ export default function SettingsManager({ tenant, token, showToast, onSettingsCh
       </div>
 
       {tab === 'company' && <CompanyTab company={settings.company} saveSection={saveSection} showToast={showToast} />}
-      {tab === 'billing' && <BillingTaxTab billing={settings.billing} tax={settings.tax} saveSection={saveSection} showToast={showToast} />}
+      {tab === 'billing' && <BillingTaxTab billing={settings.billing} tax={settings.tax} pos={settings.pos} saveSection={saveSection} showToast={showToast} />}
       {tab === 'hardware' && <HardwareTab showToast={showToast} />}
       {tab === 'users' && <UsersTab showToast={showToast} />}
       {tab === 'tables' && <TablesTab enableTables={settings.pos?.enableTables} showToast={showToast} />}
@@ -156,6 +156,9 @@ function CompanyTab({ company, saveSection, showToast }) {
         <Field label="State code">
           <Input value={form.stateCode || ''} onChange={set('stateCode')} />
         </Field>
+        <Field label="PAN">
+          <Input value={form.pan || ''} onChange={(e) => setForm({ ...form, pan: e.target.value.toUpperCase() })} />
+        </Field>
         <Field label="Address" className="sm:col-span-2">
           <Textarea rows={2} value={form.address || ''} onChange={set('address')} />
         </Field>
@@ -180,7 +183,35 @@ function CompanyTab({ company, saveSection, showToast }) {
         <Field label="Logo URL">
           <Input value={form.logoUrl || ''} onChange={set('logoUrl')} />
         </Field>
+        <Field label="Contact Name" hint="Person named on the invoice as point of contact">
+          <Input value={form.contactName || ''} onChange={set('contactName')} />
+        </Field>
       </div>
+
+      <div className="border-t pt-4" style={{ borderColor: 'var(--border-subtle)' }}>
+        <div className="label-eyebrow mb-3">Statutory Registration Numbers (Optional)</div>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Field label="CIN No.">
+            <Input value={form.cin || ''} onChange={(e) => setForm({ ...form, cin: e.target.value.toUpperCase() })} />
+          </Field>
+          <Field label="LUT Bond No.">
+            <Input value={form.lutBondNo || ''} onChange={set('lutBondNo')} />
+          </Field>
+          <Field label="CST No.">
+            <Input value={form.cstNo || ''} onChange={(e) => setForm({ ...form, cstNo: e.target.value.toUpperCase() })} />
+          </Field>
+          <Field label="TAN">
+            <Input value={form.tan || ''} onChange={(e) => setForm({ ...form, tan: e.target.value.toUpperCase() })} />
+          </Field>
+          <Field label="FSSAI No.">
+            <Input value={form.fssaiNo || ''} onChange={set('fssaiNo')} />
+          </Field>
+          <Field label="D.L. No." hint="Drug License Number">
+            <Input value={form.dlNo || ''} onChange={set('dlNo')} />
+          </Field>
+        </div>
+      </div>
+
       <div className="flex justify-end">
         <Button variant="primary" onClick={save} loading={saving}>
           Save Company Details
@@ -194,11 +225,13 @@ function CompanyTab({ company, saveSection, showToast }) {
  * Billing & Tax
  * ------------------------------------------------------------------ */
 
-function BillingTaxTab({ billing, tax, saveSection, showToast }) {
+function BillingTaxTab({ billing, tax, pos, saveSection, showToast }) {
   const [bForm, setBForm] = useState(billing || {});
   const [tForm, setTForm] = useState(tax || {});
+  const [pForm, setPForm] = useState(pos || {});
   const [savingBilling, setSavingBilling] = useState(false);
   const [savingTax, setSavingTax] = useState(false);
+  const [savingPos, setSavingPos] = useState(false);
 
   useEffect(() => {
     setBForm(billing || {});
@@ -206,6 +239,9 @@ function BillingTaxTab({ billing, tax, saveSection, showToast }) {
   useEffect(() => {
     setTForm(tax || {});
   }, [tax]);
+  useEffect(() => {
+    setPForm(pos || {});
+  }, [pos]);
 
   const saveBilling = async () => {
     setSavingBilling(true);
@@ -228,6 +264,18 @@ function BillingTaxTab({ billing, tax, saveSection, showToast }) {
       showToast(api.message(err, 'Could not save tax settings.'), 'error');
     } finally {
       setSavingTax(false);
+    }
+  };
+
+  const savePos = async () => {
+    setSavingPos(true);
+    try {
+      const res = await saveSection('pos', pForm);
+      showToast(res.message || 'Loyalty & POS settings saved.');
+    } catch (err) {
+      showToast(api.message(err, 'Could not save loyalty settings.'), 'error');
+    } finally {
+      setSavingPos(false);
     }
   };
 
@@ -262,6 +310,84 @@ function BillingTaxTab({ billing, tax, saveSection, showToast }) {
             checked={Boolean(bForm.printAfterCheckout)}
             onChange={(v) => setBForm({ ...bForm, printAfterCheckout: v })}
           />
+        </div>
+
+        <div className="flex justify-end pt-2">
+          <Button variant="primary" onClick={saveBilling} loading={savingBilling}>
+            Save Billing Rules
+          </Button>
+        </div>
+      </Panel>
+
+      {/* 2. Customer Loyalty & Rewards Program Panel */}
+      <Panel className="space-y-4">
+        <div className="flex items-center justify-between border-b pb-2" style={{ borderColor: 'var(--border)' }}>
+          <div className="flex items-center gap-2">
+            <Star className="w-4 h-4 text-amber-500 fill-amber-500" />
+            <div className="label-eyebrow">Customer Loyalty & Rewards Program</div>
+          </div>
+          <Badge tone={pForm.enableLoyalty !== false ? 'success' : 'neutral'}>
+            {pForm.enableLoyalty !== false ? 'Active' : 'Disabled'}
+          </Badge>
+        </div>
+
+        <Toggle
+          label="Enable Customer Loyalty Points"
+          hint="Automatically awards points to registered customers on sales bills based on their purchase value"
+          checked={pForm.enableLoyalty !== false}
+          onChange={(v) => setPForm({ ...pForm, enableLoyalty: v })}
+        />
+
+        {pForm.enableLoyalty !== false && (
+          <div className="grid gap-3 sm:grid-cols-3 pt-2 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+            <Field
+              label="Points Earned per ₹100 Spent"
+              hint="Points awarded for every ₹100 purchase value (e.g. 1 pt = 1% return)"
+            >
+              <Input
+                type="number"
+                min="0.1"
+                step="0.5"
+                value={pForm.loyaltyPointsPerHundred ?? '1'}
+                onChange={(e) => setPForm({ ...pForm, loyaltyPointsPerHundred: Number(e.target.value) || 1 })}
+                placeholder="1"
+              />
+            </Field>
+
+            <Field
+              label="Redemption Value per Point (₹)"
+              hint="Rupee discount value given for each redeemed point (e.g. ₹0.50 or ₹1.00)"
+            >
+              <Input
+                type="number"
+                min="0.01"
+                step="0.1"
+                value={pForm.loyaltyRedeemValue ?? '0.5'}
+                onChange={(e) => setPForm({ ...pForm, loyaltyRedeemValue: Number(e.target.value) || 0.5 })}
+                placeholder="0.5"
+              />
+            </Field>
+
+            <Field
+              label="Minimum Points to Redeem"
+              hint="Minimum points required before a customer can redeem points at billing (0 = no min)"
+            >
+              <Input
+                type="number"
+                min="0"
+                step="5"
+                value={pForm.loyaltyMinRedeemPoints ?? '0'}
+                onChange={(e) => setPForm({ ...pForm, loyaltyMinRedeemPoints: Number(e.target.value) || 0 })}
+                placeholder="0"
+              />
+            </Field>
+          </div>
+        )}
+
+        <div className="flex justify-end pt-2">
+          <Button variant="primary" onClick={savePos} loading={savingPos}>
+            Save Loyalty Rules
+          </Button>
         </div>
       </Panel>
 
@@ -335,7 +461,42 @@ function BillingTaxTab({ billing, tax, saveSection, showToast }) {
         </div>
       </Panel>
 
-      {/* 3. Tax Settings Panel */}
+      {/* 3. Bank & Payment Details Panel */}
+      <Panel className="space-y-4">
+        <div className="flex items-center justify-between border-b pb-2" style={{ borderColor: 'var(--border)' }}>
+          <div className="label-eyebrow">Bank & Payment Details</div>
+          <span className="text-[11px] text-[color:var(--text-muted)]">Printed on tax invoices for customer payment</span>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Account Holder Name">
+            <Input value={bForm.bankAccountHolder || ''} onChange={(e) => setBForm({ ...bForm, bankAccountHolder: e.target.value })} />
+          </Field>
+          <Field label="Bank Name">
+            <Input value={bForm.bankName || ''} onChange={(e) => setBForm({ ...bForm, bankName: e.target.value })} />
+          </Field>
+          <Field label="Account Number">
+            <Input value={bForm.bankAccountNumber || ''} onChange={(e) => setBForm({ ...bForm, bankAccountNumber: e.target.value })} />
+          </Field>
+          <Field label="IFSC Code">
+            <Input value={bForm.bankIfsc || ''} onChange={(e) => setBForm({ ...bForm, bankIfsc: e.target.value.toUpperCase() })} />
+          </Field>
+          <Field label="Branch Name">
+            <Input value={bForm.bankBranch || ''} onChange={(e) => setBForm({ ...bForm, bankBranch: e.target.value })} />
+          </Field>
+          <Field label="UPI ID" hint="Used to generate the payment QR code on invoices">
+            <Input value={bForm.upiId || ''} onChange={(e) => setBForm({ ...bForm, upiId: e.target.value })} placeholder="e.g. yourstore@okbank" />
+          </Field>
+        </div>
+
+        <div className="flex justify-end pt-2">
+          <Button variant="primary" onClick={saveBilling} loading={savingBilling}>
+            Save Bank & Payment Details
+          </Button>
+        </div>
+      </Panel>
+
+      {/* 4. Tax Settings Panel */}
       <Panel className="space-y-4">
         <div className="flex items-center justify-between border-b pb-2" style={{ borderColor: 'var(--border)' }}>
           <div className="label-eyebrow">Tax & GST Configuration</div>
