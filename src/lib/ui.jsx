@@ -617,7 +617,15 @@ export function DataTable({
  * Overlays
  * ------------------------------------------------------------------ */
 
-const MODAL_WIDTH = { sm: 'max-w-sm', md: 'max-w-md', lg: 'max-w-2xl', xl: 'max-w-4xl', full: 'max-w-6xl', fullscreen: 'max-w-[96vw] w-[96vw] max-h-[92vh] h-[92vh] flex flex-col justify-between' };
+const MODAL_WIDTH = {
+  sm: 'max-w-sm',
+  md: 'max-w-md',
+  lg: 'max-w-2xl',
+  xl: 'max-w-4xl',
+  '2xl': 'max-w-5xl',
+  full: 'max-w-6xl',
+  fullscreen: 'max-w-[98vw] w-[98vw] max-h-[96vh] h-[96vh] flex flex-col'
+};
 
 export function Modal({ open, onClose, title, subtitle, icon: Icon, size = 'md', className = '', footer, children }) {
   const ref = useRef(null);

@@ -455,6 +455,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
   const [labelProduct, setLabelProduct] = useState(null);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [findingPhoto, setFindingPhoto] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const [form, setForm] = useState(blankProduct(categories));
 
@@ -662,6 +663,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
 
   const save = async (e) => {
     e?.preventDefault();
+    if (saving) return;
     if (!form.name || form.price === undefined || form.price === '') {
       showToast('Product name and selling price are required.', 'error');
       return;
@@ -743,6 +745,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       payload.price = rows.reduce((sum, r) => sum + r.lineCost, 0).toFixed(2);
     }
 
+    setSaving(true);
     try {
       const res = editing
         ? await api.put(`/products/${editing.id}`, payload)
@@ -753,6 +756,8 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       onRefresh();
     } catch (err) {
       showToast(api.message(err, 'Failed to save product.'), 'error');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -1672,7 +1677,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
 
             <div className="flex justify-end gap-2 pt-3 border-t border-[color:var(--border-subtle)]">
               <Button variant="secondary" onClick={() => setShowForm(false)}>Cancel</Button>
-              <Button icon={Save} type="submit">{editing ? 'Update Product' : 'Save Product'}</Button>
+              <Button icon={Save} type="submit" loading={saving} disabled={saving}>{editing ? 'Update Product' : 'Save Product'}</Button>
             </div>
           </form>
         </Modal>
@@ -1860,6 +1865,20 @@ function CategoriesTab({ categories, products, showToast, onRefresh }) {
     return categories.filter((c) => c.name.toLowerCase().includes(query.toLowerCase()));
   }, [categories, query]);
 
+  // Was a full products.filter() per category on every render — O(categories
+  // × products) each time instead of once per actual products change.
+  const categoryProductCounts = useMemo(() => {
+    const counts = new Map();
+    (products || []).forEach((p) => {
+      const ids = Array.isArray(p.categoryIds) && p.categoryIds.length ? p.categoryIds : [p.categoryId];
+      ids.forEach((id) => {
+        if (!id) return;
+        counts.set(id, (counts.get(id) || 0) + 1);
+      });
+    });
+    return counts;
+  }, [products]);
+
   const openAdd = () => {
     setEditing(null);
     const newColor = getNextAvailableColor(categories);
@@ -1911,7 +1930,7 @@ function CategoriesTab({ categories, products, showToast, onRefresh }) {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         {filtered.map((cat) => {
           const catTheme = getCategoryTheme(cat);
-          const assignedCount = (products || []).filter(p => Array.isArray(p.categoryIds) && p.categoryIds.length ? p.categoryIds.includes(cat.id) : p.categoryId === cat.id).length;
+          const assignedCount = categoryProductCounts.get(cat.id) || 0;
           return (
             <div key={cat.id} className={`p-4 rounded-xl border ${catTheme.border} ${catTheme.lightBg} flex items-center justify-between transition-all hover:shadow-sm`}>
               <div className="flex items-center gap-3">
@@ -2510,11 +2529,14 @@ function AdjustTab({ products, showToast, onRefresh }) {
   const [quantity, setQuantity] = useState('');
   const [reason, setReason] = useState('Stock Take Audit');
   const [password, setPassword] = useState('');
+  const [saving, setSaving] = useState(false);
 
   const submit = async (e) => {
     e?.preventDefault();
+    if (saving) return;
     if (!productId || !quantity) return showToast('Product and quantity required.', 'error');
 
+    setSaving(true);
     try {
       const res = await api.post('/inventory/adjust', { productId, mode, quantity, reason, password });
       showToast(res.message || 'Stock adjusted.');
@@ -2522,6 +2544,8 @@ function AdjustTab({ products, showToast, onRefresh }) {
       onRefresh();
     } catch (err) {
       showToast(api.message(err, 'Stock adjustment failed.'), 'error');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -2566,7 +2590,7 @@ function AdjustTab({ products, showToast, onRefresh }) {
           <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Leave blank if not required" />
         </Field>
 
-        <Button icon={Save} type="submit">Save Stock Adjustment</Button>
+        <Button icon={Save} type="submit" loading={saving} disabled={saving}>Save Stock Adjustment</Button>
       </form>
     </Panel>
   );

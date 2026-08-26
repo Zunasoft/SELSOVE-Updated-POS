@@ -36,11 +36,13 @@ import {
   Sparkles,
   PackageCheck,
   Store,
-  Boxes
+  Boxes,
+  Truck,
+  Package
 } from 'lucide-react';
 
 import api, { money, fmtDate, fmtDateTime, todayISO, monthStartISO } from '../lib/api';
-import { Panel, SectionHeader, StatTile, Badge, Button, Spinner, EmptyState, DataTable, Modal, Field, Input, Select } from '../lib/ui';
+import { Panel, SectionHeader, StatTile, Badge, Button, Spinner, EmptyState, DataTable, Modal, Field, Input, Select, Textarea } from '../lib/ui';
 import { exportReport } from '../lib/exporters';
 
 /** Converts number to Indian words (Rupees) */
@@ -344,7 +346,7 @@ function ProductItemCell({ row, index, onOpenPicker, onUpdateName }) {
 }
 
 export default function InvoicesManager({ tenant, showToast, onNavigate }) {
-  const [mainTab, setMainTab] = useState('INVOICES'); // 'INVOICES' | 'QUOTATIONS'
+  const [mainTab, setMainTab] = useState('INVOICES'); // 'INVOICES' | 'DRAFTS' | 'QUOTATIONS'
   const [invoices, setInvoices] = useState([]);
   const [quotations, setQuotations] = useState([]);
   const [products, setProducts] = useState([]);
@@ -359,6 +361,9 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
   const [selectedInvoice, setSelectedInvoice] = useState(null);
   const [viewMode, setViewMode] = useState('TAX_INVOICE'); // TAX_INVOICE, THERMAL
   const [invoiceModalOpen, setInvoiceModalOpen] = useState(false);
+  const [editingInvoice, setEditingInvoice] = useState(null);
+  const [paymentModalInvoice, setPaymentModalInvoice] = useState(null);
+  const [issueModalInvoice, setIssueModalInvoice] = useState(null);
 
   // Quotations state & modals
   const [quotationSearch, setQuotationSearch] = useState('');
@@ -406,42 +411,67 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
     fetchAllData();
   }, []);
 
-  // Filter calculations for Invoices
+  // Separate regular Tax Invoices from Draft Invoices
+  const taxInvoices = useMemo(() => (invoices || []).filter((i) => i.status !== 'DRAFT'), [invoices]);
+  const draftInvoicesList = useMemo(() => (invoices || []).filter((i) => i.status === 'DRAFT'), [invoices]);
+
+  // Filter calculations for Tax Invoices
   const filteredInvoices = useMemo(() => {
     const now = new Date();
-    const todayStr = todayISO();
-    const monthStart = monthStartISO();
+                  const todayStr = todayISO();
+                  const monthStart = monthStartISO();
 
-    return (invoices || []).filter((inv) => {
-      const isVoid = inv.status === 'VOID';
-      const isDue = (inv.outstanding || inv.dueAmount || 0) > 0;
-      if (statusFilter === 'PAID' && (isVoid || isDue)) return false;
-      if (statusFilter === 'DUE' && (!isDue || isVoid)) return false;
-      if (statusFilter === 'VOID' && !isVoid) return false;
+                  return taxInvoices.filter((inv) => {
+                    const isVoid = inv.status === 'VOID';
+                    const tot = Number(inv.total || inv.grossTotal || 0);
+                    const paid = Number(inv.paidAmount !== undefined ? inv.paidAmount : (inv.status === 'PAID' || inv.paymentStatus === 'PAID' ? tot : 0));
+                    const due = Number(inv.balanceDue !== undefined ? inv.balanceDue : (isVoid ? 0 : Math.max(0, tot - paid)));
+                    const isPartiallyPaid = !isVoid && (inv.status === 'PARTIALLY_PAID' || inv.paymentStatus === 'PARTIALLY_PAID' || (paid > 0 && due > 0));
+                    const isFullyUnpaid = !isVoid && !isPartiallyPaid && (inv.status === 'UNPAID' || inv.paymentStatus === 'UNPAID' || due >= tot);
+                    const isPaid = !isVoid && !isPartiallyPaid && !isFullyUnpaid;
 
-      if (inv.date) {
-        const invDateStr = String(inv.date).slice(0, 10);
-        if (dateFilter === 'TODAY' && invDateStr !== todayStr) return false;
-        if (dateFilter === 'THIS_MONTH' && invDateStr < monthStart) return false;
-        if (dateFilter === 'THIS_WEEK') {
-          const pastWeek = new Date();
-          pastWeek.setDate(now.getDate() - 7);
-          if (invDateStr < pastWeek.toISOString().slice(0, 10)) return false;
-        }
-      }
+                    if (statusFilter === 'PAID' && !isPaid) return false;
+                    if (statusFilter === 'PARTIAL' && !isPartiallyPaid) return false;
+                    if (statusFilter === 'DUE' && !(isFullyUnpaid || isPartiallyPaid)) return false;
+                    if (statusFilter === 'VOID' && !isVoid) return false;
 
+                    if (inv.date) {
+                      const invDateStr = String(inv.date).slice(0, 10);
+                      if (dateFilter === 'TODAY' && invDateStr !== todayStr) return false;
+                      if (dateFilter === 'THIS_MONTH' && invDateStr < monthStart) return false;
+                      if (dateFilter === 'THIS_WEEK') {
+                        const pastWeek = new Date();
+                        pastWeek.setDate(now.getDate() - 7);
+                        if (invDateStr < pastWeek.toISOString().slice(0, 10)) return false;
+                      }
+                    }
+
+                    if (search.trim()) {
+                      const q = search.toLowerCase();
+                      const matchId = String(inv.orderId || '').toLowerCase().includes(q);
+                      const matchCust = String(inv.customerName || '').toLowerCase().includes(q);
+                      const matchPhone = String(inv.customerPhone || '').includes(q);
+                      const matchMode = String(inv.paymentMethod || '').toLowerCase().includes(q);
+                      if (!matchId && !matchCust && !matchPhone && !matchMode) return false;
+                    }
+
+                    return true;
+                  });
+                }, [taxInvoices, statusFilter, dateFilter, search]);
+
+  // Filter calculations for Drafts
+  const filteredDrafts = useMemo(() => {
+    return draftInvoicesList.filter((inv) => {
       if (search.trim()) {
         const q = search.toLowerCase();
         const matchId = String(inv.orderId || '').toLowerCase().includes(q);
         const matchCust = String(inv.customerName || '').toLowerCase().includes(q);
         const matchPhone = String(inv.customerPhone || '').includes(q);
-        const matchMode = String(inv.paymentMethod || '').toLowerCase().includes(q);
-        if (!matchId && !matchCust && !matchPhone && !matchMode) return false;
+        if (!matchId && !matchCust && !matchPhone) return false;
       }
-
       return true;
     });
-  }, [invoices, statusFilter, dateFilter, search]);
+  }, [draftInvoicesList, search]);
 
   // Filter calculations for Quotations
   const filteredQuotations = useMemo(() => {
@@ -482,14 +512,14 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
     let totalDue = 0;
     let voidCount = 0;
 
-    (invoices || []).forEach((inv) => {
+    taxInvoices.forEach((inv) => {
       if (inv.status === 'VOID') {
         voidCount++;
         return;
       }
       const tot = Number(inv.total || inv.grossTotal || 0);
-      const due = Number(inv.outstanding || inv.dueAmount || 0);
-      const paid = Math.max(0, tot - due);
+      const paid = Number(inv.paidAmount !== undefined ? inv.paidAmount : (inv.status === 'PAID' || inv.paymentStatus === 'PAID' ? tot : 0));
+      const due = Number(inv.balanceDue !== undefined ? inv.balanceDue : Math.max(0, tot - paid));
 
       totalAmount += tot;
       totalPaid += paid;
@@ -497,13 +527,22 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
     });
 
     return {
-      count: (invoices || []).filter((i) => i.status !== 'VOID').length,
+      count: taxInvoices.filter((i) => i.status !== 'VOID').length,
       totalAmount,
       totalPaid,
       totalDue,
       voidCount
     };
-  }, [invoices]);
+  }, [taxInvoices]);
+
+  // Draft Stats
+  const draftStats = useMemo(() => {
+    const totalVal = draftInvoicesList.reduce((s, d) => s + Number(d.total || 0), 0);
+    return {
+      count: draftInvoicesList.length,
+      totalVal
+    };
+  }, [draftInvoicesList]);
 
   // Quotation Stats
   const quotationStats = useMemo(() => {
@@ -535,6 +574,17 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
     };
   }, [quotations]);
 
+  const handleDeleteDraft = async (draft) => {
+    if (!window.confirm(`Delete Draft Invoice #${draft.orderId}?`)) return;
+    try {
+      await api.del(`/orders/${draft.orderId}`);
+      showToast(`Draft Invoice #${draft.orderId} deleted.`, 'success');
+      fetchAllData();
+    } catch (err) {
+      showToast(api.message(err, 'Failed to delete draft invoice.'), 'error');
+    }
+  };
+
   const handleVoidInvoice = async (invoice) => {
     if (!window.confirm(`Are you sure you want to VOID invoice #${invoice.orderId}? This will reverse stock and accounting entries.`)) return;
     try {
@@ -544,6 +594,23 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
       fetchAllData();
     } catch (err) {
       showToast(api.message(err, 'Failed to void invoice.'), 'error');
+    }
+  };
+
+  const handleDeleteInvoice = async (invoice) => {
+    const isUnpaid = invoice.status === 'UNPAID' || invoice.paymentStatus === 'UNPAID' || invoice.status === 'DRAFT' || invoice.status === 'VOID';
+    const confirmMsg = isUnpaid
+      ? `Are you sure you want to DELETE Invoice #${invoice.orderId}? This will permanently remove the invoice and restore product inventory stock.`
+      : `Are you sure you want to DELETE Invoice #${invoice.orderId}? This will restore inventory stock and reverse accounting entries.`;
+
+    if (!window.confirm(confirmMsg)) return;
+    try {
+      await api.del(`/orders/${invoice.orderId}`);
+      showToast(`Invoice #${invoice.orderId} deleted successfully.`, 'success');
+      setSelectedInvoice(null);
+      fetchAllData();
+    } catch (err) {
+      showToast(api.message(err, 'Failed to delete invoice.'), 'error');
     }
   };
 
@@ -581,23 +648,30 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
   };
 
   const exportInvoices = (format) => {
-    const rows = filteredInvoices.map((inv) => ({
-      'Invoice #': inv.orderId,
-      Date: fmtDate(inv.date),
-      'Customer Name': inv.customerName || 'Walk-in',
-      Phone: inv.customerPhone || '—',
-      'Payment Mode': inv.paymentMethod || 'Cash',
-      Status: inv.status || 'COMPLETED',
-      'Subtotal (₹)': inv.subtotal || inv.total,
-      'Tax (₹)': inv.tax || 0,
-      'Discount (₹)': inv.discount || 0,
-      'Total (₹)': inv.total
-    }));
+    const rows = filteredInvoices.map((inv) => {
+      const tot = Number(inv.total || inv.grossTotal || 0);
+      const paid = Number(inv.paidAmount !== undefined ? inv.paidAmount : (inv.status === 'PAID' ? tot : 0));
+      const due = Number(inv.balanceDue !== undefined ? inv.balanceDue : Math.max(0, tot - paid));
+      return {
+        'Invoice #': inv.orderId,
+        Date: fmtDate(inv.date),
+        'Customer Name': inv.customerName || 'Walk-in',
+        Phone: inv.customerPhone || '—',
+        'Payment Mode': inv.paymentMethod || 'Cash',
+        Status: inv.status || 'COMPLETED',
+        'Subtotal (₹)': inv.subtotal || inv.total,
+        'Tax (₹)': inv.tax || 0,
+        'Discount (₹)': inv.discount || 0,
+        'Total (₹)': inv.total,
+        'Paid Amount (₹)': paid,
+        'Balance Due (₹)': due
+      };
+    });
     exportReport({
       title: 'Sales_Invoices_Register',
       filename: `Sales_Invoices_${todayISO()}`,
       format,
-      columns: ['Invoice #', 'Date', 'Customer Name', 'Phone', 'Payment Mode', 'Status', 'Subtotal (₹)', 'Tax (₹)', 'Discount (₹)', 'Total (₹)'],
+      columns: ['Invoice #', 'Date', 'Customer Name', 'Phone', 'Payment Mode', 'Status', 'Subtotal (₹)', 'Tax (₹)', 'Discount (₹)', 'Total (₹)', 'Paid Amount (₹)', 'Balance Due (₹)'],
       data: rows
     });
     showToast(`Exported ${rows.length} invoices to ${format.toUpperCase()}.`, 'success');
@@ -607,10 +681,10 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
     const rows = filteredQuotations.map((qt) => ({
       'Quotation #': qt.quotationNo,
       Date: fmtDate(qt.date),
-      'Valid Until': fmtDate(qt.validUntil),
+      'Valid Until': qt.validUntil ? fmtDate(qt.validUntil) : '—',
       'Customer Name': qt.customerName || 'Walk-in',
       Phone: qt.customerPhone || '—',
-      Status: qt.status || 'PENDING',
+      Status: qt.status,
       'Items Count': (qt.items || []).length,
       'Subtotal (₹)': qt.subtotal || qt.total,
       'Tax (₹)': qt.tax || 0,
@@ -675,21 +749,41 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
         }
       />
 
-      {/* Main Tab Selector (Invoices vs Quotations) */}
-      <div className="flex items-center gap-2 border-b border-[color:var(--border)] pb-2">
+      {/* Main Tab Bar */}
+      <div className="flex items-center gap-2 p-1 rounded-2xl bg-[color:var(--bg-subtle)] border border-[color:var(--border)] w-fit">
         <button
           type="button"
           onClick={() => setMainTab('INVOICES')}
           className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
             mainTab === 'INVOICES'
               ? 'bg-indigo-600 text-white shadow-sm'
-              : 'text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-subtle)]'
+              : 'text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
           }`}
         >
           <Receipt className="w-4 h-4" />
           <span>Tax Invoices</span>
-          <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${mainTab === 'INVOICES' ? 'bg-white/20 text-white' : 'bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)]'}`}>
-            {(invoices || []).length}
+          <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+            mainTab === 'INVOICES' ? 'bg-white/20 text-white' : 'bg-[color:var(--border)] text-[color:var(--text-secondary)]'
+          }`}>
+            {taxInvoices.length}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setMainTab('DRAFTS')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+            mainTab === 'DRAFTS'
+              ? 'bg-indigo-600 text-white shadow-sm'
+              : 'text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
+          }`}
+        >
+          <FileText className="w-4 h-4" />
+          <span>Draft Invoices</span>
+          <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+            mainTab === 'DRAFTS' ? 'bg-white/20 text-white' : 'bg-[color:var(--border)] text-[color:var(--text-secondary)]'
+          }`}>
+            {draftInvoicesList.length}
           </span>
         </button>
 
@@ -699,39 +793,42 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
           className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
             mainTab === 'QUOTATIONS'
               ? 'bg-indigo-600 text-white shadow-sm'
-              : 'text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-subtle)]'
+              : 'text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
           }`}
         >
           <FileCheck className="w-4 h-4" />
-          <span>Quotations & Estimates</span>
-          <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${mainTab === 'QUOTATIONS' ? 'bg-white/20 text-white' : 'bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)]'}`}>
+          <span>Quotations &amp; Estimates</span>
+          <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+            mainTab === 'QUOTATIONS' ? 'bg-white/20 text-white' : 'bg-[color:var(--border)] text-[color:var(--text-secondary)]'
+          }`}>
             {(quotations || []).length}
           </span>
         </button>
       </div>
 
-      {mainTab === 'INVOICES' ? (
+      {/* Main Tab Content */}
+      {mainTab === 'INVOICES' && (
         <>
           {/* Invoices KPI Ribbon */}
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <div className="surface rounded-2xl p-4 border border-[color:var(--border)]">
               <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Total Invoiced</span>
+                <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Issued Invoices</span>
                 <div className="p-1.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400">
                   <Receipt className="w-4 h-4" />
                 </div>
               </div>
               <div className="mt-2 text-xl font-extrabold text-[color:var(--text-primary)]">
-                {money(invoiceStats.totalAmount, { decimals: false })}
+                {invoiceStats.count}
               </div>
               <div className="mt-1 text-[11px] text-[color:var(--text-muted)]">
-                {invoiceStats.count} {invoiceStats.count === 1 ? 'invoice' : 'invoices'}
+                Total Billed: <span className="font-semibold font-mono text-[color:var(--text-secondary)]">{money(invoiceStats.totalAmount, { decimals: false })}</span>
               </div>
             </div>
 
             <div className="surface rounded-2xl p-4 border border-[color:var(--border)]">
               <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Received / Paid</span>
+                <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Collected (Paid)</span>
                 <div className="p-1.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400">
                   <CheckCircle2 className="w-4 h-4" />
                 </div>
@@ -739,14 +836,14 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
               <div className="mt-2 text-xl font-extrabold text-emerald-600 dark:text-emerald-400">
                 {money(invoiceStats.totalPaid, { decimals: false })}
               </div>
-              <div className="mt-1 text-[11px] text-emerald-600/80 dark:text-emerald-400/80 font-semibold">
-                Fully collected
+              <div className="mt-1 text-[11px] text-[color:var(--text-muted)]">
+                Fully / partially realized
               </div>
             </div>
 
             <div className="surface rounded-2xl p-4 border border-[color:var(--border)]">
               <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Due / Outstanding</span>
+                <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Balance Due</span>
                 <div className="p-1.5 rounded-lg bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400">
                   <Clock className="w-4 h-4" />
                 </div>
@@ -755,7 +852,7 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
                 {money(invoiceStats.totalDue, { decimals: false })}
               </div>
               <div className="mt-1 text-[11px] text-[color:var(--text-muted)]">
-                Customer receivables
+                Pending collection
               </div>
             </div>
 
@@ -782,8 +879,9 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
               <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0">
                 {[
                   { key: 'ALL', label: 'All Invoices' },
-                  { key: 'PAID', label: 'Paid' },
-                  { key: 'DUE', label: 'Due / Credit' },
+                  { key: 'PAID', label: 'Fully Paid' },
+                  { key: 'PARTIAL', label: 'Partially Paid' },
+                  { key: 'DUE', label: 'Unpaid / Due' },
                   { key: 'VOID', label: 'Void' }
                 ].map((tab) => (
                   <button
@@ -846,7 +944,14 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
                 title="No Invoices Found"
                 hint="Click 'Create Invoice' to generate a new tax invoice with auto-filled customer details and products."
                 action={
-                  <Button variant="primary" icon={Plus} onClick={() => setInvoiceModalOpen(true)}>
+                  <Button
+                    variant="primary"
+                    icon={Plus}
+                    onClick={() => {
+                      setEditingInvoice(null);
+                      setInvoiceModalOpen(true);
+                    }}
+                  >
                     Create First Invoice
                   </Button>
                 }
@@ -859,17 +964,21 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
                       <th className="py-3 px-4">Date</th>
                       <th className="py-3 px-4">Invoice #</th>
                       <th className="py-3 px-4">Customer</th>
-                      <th className="py-3 px-4">Payment</th>
+                      <th className="py-3 px-4">Payment Mode</th>
                       <th className="py-3 px-4 text-center">Items</th>
                       <th className="py-3 px-4 text-right">Total Amount</th>
-                      <th className="py-3 px-4 text-center">Status</th>
+                      <th className="py-3 px-4 text-center">Payment Status</th>
                       <th className="py-3 px-4 text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[color:var(--border-subtle)]">
                     {filteredInvoices.map((inv) => {
                       const isVoid = inv.status === 'VOID';
-                      const isDue = (inv.outstanding || inv.dueAmount || 0) > 0;
+                      const tot = Number(inv.total || inv.grossTotal || 0);
+                      const paid = Number(inv.paidAmount !== undefined ? inv.paidAmount : (inv.status === 'PAID' || inv.paymentStatus === 'PAID' ? tot : 0));
+                      const due = Number(inv.balanceDue !== undefined ? inv.balanceDue : (isVoid ? 0 : Math.max(0, tot - paid)));
+                      const isPartiallyPaid = !isVoid && (inv.status === 'PARTIALLY_PAID' || inv.paymentStatus === 'PARTIALLY_PAID' || (paid > 0 && due > 0));
+                      const isFullyUnpaid = !isVoid && !isPartiallyPaid && (inv.status === 'UNPAID' || inv.paymentStatus === 'UNPAID' || due >= tot);
 
                       return (
                         <tr
@@ -903,6 +1012,11 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
                               <CreditCard className="w-3 h-3 opacity-60" />
                               {inv.paymentMethod || 'Cash'}
                             </span>
+                            {inv.paymentRef && (
+                              <div className="text-[10px] text-indigo-600 dark:text-indigo-400 font-mono truncate max-w-[120px]" title={inv.paymentRef}>
+                                Ref: {inv.paymentRef}
+                              </div>
+                            )}
                           </td>
 
                           <td className="py-3 px-4 text-center font-mono font-semibold text-[color:var(--text-secondary)]">
@@ -911,11 +1025,16 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
 
                           <td className="py-3 px-4 text-right whitespace-nowrap">
                             <div className="font-extrabold font-mono text-[13px] text-[color:var(--text-primary)]">
-                              {money(inv.total)}
+                              {money(tot)}
                             </div>
-                            {isDue && (
-                              <div className="text-[10px] text-amber-600 font-bold">
-                                Due: {money(inv.outstanding || inv.dueAmount)}
+                            {isPartiallyPaid && (
+                              <div className="text-[10px] font-bold text-amber-600 dark:text-amber-400">
+                                Paid: {money(paid)} · Due: {money(due)}
+                              </div>
+                            )}
+                            {isFullyUnpaid && (
+                              <div className="text-[10px] font-bold text-rose-600 dark:text-rose-400">
+                                Due: {money(due)}
                               </div>
                             )}
                           </td>
@@ -923,8 +1042,12 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
                           <td className="py-3 px-4 text-center">
                             {isVoid ? (
                               <Badge tone="danger">VOID</Badge>
-                            ) : isDue ? (
-                              <Badge tone="warning">CREDIT / DUE</Badge>
+                            ) : isPartiallyPaid ? (
+                              <Badge tone="warning" className="bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border-amber-300">
+                                PARTIAL
+                              </Badge>
+                            ) : isFullyUnpaid ? (
+                              <Badge tone="warning">UNPAID</Badge>
                             ) : (
                               <Badge tone="success">PAID</Badge>
                             )}
@@ -932,6 +1055,17 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
 
                           <td className="py-3 px-4 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center justify-end gap-1.5">
+                              {(isFullyUnpaid || isPartiallyPaid) && !isVoid && (
+                                <Button
+                                  size="xs"
+                                  variant="primary"
+                                  icon={CheckCircle2}
+                                  onClick={() => setPaymentModalInvoice(inv)}
+                                  title={isPartiallyPaid ? 'Record partial or full balance payment' : 'Record payment for invoice'}
+                                >
+                                  {isPartiallyPaid ? 'Add Payment' : 'Mark Paid'}
+                                </Button>
+                              )}
                               <Button
                                 size="xs"
                                 variant="outline"
@@ -941,7 +1075,7 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
                                   setViewMode('TAX_INVOICE');
                                 }}
                               >
-                                View / Print
+                                View
                               </Button>
                               <Button
                                 size="xs"
@@ -952,8 +1086,16 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
                                   setViewMode('THERMAL');
                                 }}
                               >
-                                Thermal
+                                Print
                               </Button>
+                              <Button
+                                size="xs"
+                                variant="ghost"
+                                icon={Trash2}
+                                onClick={() => handleDeleteInvoice(inv)}
+                                className="text-rose-500 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/40"
+                                title={isFullyUnpaid ? 'Delete unpaid invoice & restore stock' : 'Delete invoice'}
+                              />
                             </div>
                           </td>
                         </tr>
@@ -965,7 +1107,207 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
             )}
           </Panel>
         </>
-      ) : (
+      )}
+
+      {mainTab === 'DRAFTS' && (
+        <>
+          {/* Drafts KPI Ribbon */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="surface rounded-2xl p-4 border border-[color:var(--border)]">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Total Draft Invoices</span>
+                <div className="p-1.5 rounded-lg bg-sky-50 dark:bg-sky-950/60 text-sky-600 dark:text-sky-400">
+                  <FileText className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-2 text-xl font-extrabold text-[color:var(--text-primary)]">
+                {draftStats.count} {draftStats.count === 1 ? 'draft' : 'drafts'}
+              </div>
+              <div className="mt-1 text-[11px] text-[color:var(--text-muted)]">
+                Unissued commercial bills
+              </div>
+            </div>
+
+            <div className="surface rounded-2xl p-4 border border-[color:var(--border)]">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Draft Estimated Value</span>
+                <div className="p-1.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400">
+                  <Receipt className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-2 text-xl font-extrabold text-indigo-600 dark:text-indigo-400">
+                {money(draftStats.totalVal, { decimals: false })}
+              </div>
+              <div className="mt-1 text-[11px] text-[color:var(--text-muted)]">
+                Pending confirmation / stock hold
+              </div>
+            </div>
+
+            <div className="surface rounded-2xl p-4 border border-[color:var(--border)] flex flex-col justify-between">
+              <div>
+                <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Draft Invoicing</span>
+                <div className="text-xs text-[color:var(--text-secondary)] mt-1">
+                  Prepare invoices in advance before issuing.
+                </div>
+              </div>
+              <Button
+                variant="primary"
+                size="sm"
+                icon={Plus}
+                onClick={() => {
+                  setEditingInvoice(null);
+                  setInvoiceModalOpen(true);
+                }}
+                className="mt-2 w-full justify-center"
+              >
+                Create New Draft
+              </Button>
+            </div>
+          </div>
+
+          {/* Drafts Table Panel */}
+          <Panel className="space-y-3">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+              <span className="text-xs font-bold text-[color:var(--text-secondary)]">
+                Draft Invoices List ({filteredDrafts.length})
+              </span>
+
+              <div className="relative min-w-[240px]">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[color:var(--text-muted)]" />
+                <input
+                  type="text"
+                  placeholder="Search Draft #, customer, phone…"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="field-input text-xs"
+                  style={{ paddingLeft: '2.1rem' }}
+                />
+              </div>
+            </div>
+
+            {loading ? (
+              <Spinner label="Loading draft invoices…" />
+            ) : filteredDrafts.length === 0 ? (
+              <EmptyState
+                icon={FileText}
+                title="No Draft Invoices"
+                hint="You don't have any saved draft invoices. Create a draft to prepare billing before finalizing."
+                action={
+                  <Button
+                    variant="primary"
+                    icon={Plus}
+                    onClick={() => {
+                      setEditingInvoice(null);
+                      setInvoiceModalOpen(true);
+                    }}
+                  >
+                    Create Draft Invoice
+                  </Button>
+                }
+              />
+            ) : (
+              <div className="overflow-x-auto rounded-xl border border-[color:var(--border)]">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="border-b border-[color:var(--border)] bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-secondary)] uppercase tracking-wider text-[10.5px]">
+                      <th className="py-3 px-4">Draft Date</th>
+                      <th className="py-3 px-4">Draft #</th>
+                      <th className="py-3 px-4">Customer</th>
+                      <th className="py-3 px-4">Payment Mode</th>
+                      <th className="py-3 px-4 text-center">Items</th>
+                      <th className="py-3 px-4 text-right">Draft Amount</th>
+                      <th className="py-3 px-4 text-center">Status</th>
+                      <th className="py-3 px-4 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                    {filteredDrafts.map((draft) => (
+                      <tr key={draft.orderId} className="hover:bg-[color:var(--bg-subtle)]/70 transition-colors">
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          <div className="font-semibold text-[color:var(--text-primary)]">{fmtDate(draft.date)}</div>
+                          <div className="text-[10px] text-[color:var(--text-muted)]">{draft.date ? String(draft.date).slice(11, 16) : ''}</div>
+                        </td>
+
+                        <td className="py-3 px-4 font-mono font-bold text-sky-600 dark:text-sky-400 whitespace-nowrap">
+                          #{draft.orderId}
+                        </td>
+
+                        <td className="py-3 px-4">
+                          <div className="font-bold text-[color:var(--text-primary)] truncate max-w-[160px]">
+                            {draft.customerName || 'Walk-in Customer'}
+                          </div>
+                          {draft.customerPhone && draft.customerPhone !== 'N/A' && (
+                            <div className="text-[10.5px] text-[color:var(--text-muted)]">{draft.customerPhone}</div>
+                          )}
+                        </td>
+
+                        <td className="py-3 px-4">
+                          <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[color:var(--text-secondary)]">
+                            <CreditCard className="w-3 h-3 opacity-60" />
+                            {draft.paymentMethod || 'Cash'}
+                          </span>
+                        </td>
+
+                        <td className="py-3 px-4 text-center font-mono font-semibold text-[color:var(--text-secondary)]">
+                          {(draft.items || []).length}
+                        </td>
+
+                        <td className="py-3 px-4 text-right whitespace-nowrap">
+                          <div className="font-extrabold font-mono text-[13px] text-[color:var(--text-primary)]">
+                            {money(draft.total)}
+                          </div>
+                        </td>
+
+                        <td className="py-3 px-4 text-center">
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-sky-100 dark:bg-sky-950 text-sky-700 dark:text-sky-300">
+                            DRAFT
+                          </span>
+                        </td>
+
+                        <td className="py-3 px-4 text-right whitespace-nowrap">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <Button
+                              size="xs"
+                              variant="primary"
+                              icon={Receipt}
+                              onClick={() => setIssueModalInvoice(draft)}
+                              title="Issue this draft as an official tax invoice"
+                            >
+                              Issue Invoice
+                            </Button>
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              icon={Edit3}
+                              onClick={() => {
+                                setEditingInvoice(draft);
+                                setInvoiceModalOpen(true);
+                              }}
+                              title="Edit draft invoice details"
+                            >
+                              Edit
+                            </Button>
+                            <Button
+                              size="xs"
+                              variant="ghost"
+                              icon={Trash2}
+                              onClick={() => handleDeleteDraft(draft)}
+                              className="text-rose-500 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/40"
+                              title="Delete draft invoice"
+                            />
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Panel>
+        </>
+      )}
+
+      {mainTab === 'QUOTATIONS' && (
         <>
           {/* Quotations KPI Ribbon */}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -1256,7 +1598,7 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
         </>
       )}
 
-      {/* Professional Tax Invoice View/Print Modal */}
+      {/* Dedicated Tax Invoice & Thermal Receipt Modal */}
       {selectedInvoice && (
         <TaxInvoiceModal
           invoice={selectedInvoice}
@@ -1266,6 +1608,8 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
           setViewMode={setViewMode}
           onClose={() => setSelectedInvoice(null)}
           onVoid={() => handleVoidInvoice(selectedInvoice)}
+          onDelete={() => handleDeleteInvoice(selectedInvoice)}
+          onMarkPaid={(inv) => setPaymentModalInvoice(inv)}
         />
       )}
 
@@ -1281,20 +1625,65 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
         />
       )}
 
-      {/* Dedicated New Tax Invoice Sheet / Creation Modal */}
+      {/* Dedicated Tax Invoice Sheet / Creation & Draft Editing Modal */}
       {invoiceModalOpen && (
         <NewInvoiceModal
+          invoice={editingInvoice}
           products={products}
           customers={customers}
           settings={settings}
-          onClose={() => setInvoiceModalOpen(false)}
-          onSaved={(createdOrder) => {
+          onClose={() => {
             setInvoiceModalOpen(false);
+            setEditingInvoice(null);
+          }}
+          onSaved={(createdOrder, targetStatus) => {
+            setInvoiceModalOpen(false);
+            setEditingInvoice(null);
             fetchAllData();
             const invNum = createdOrder?.orderId || createdOrder?.data?.orderId || '';
-            showToast(invNum ? `Invoice #${invNum} generated successfully!` : 'Tax Invoice generated successfully!', 'success');
-            if (createdOrder) {
+            const msg = targetStatus === 'DRAFT'
+              ? `Draft invoice ${invNum ? `#${invNum}` : ''} saved!`
+              : targetStatus === 'UNPAID'
+              ? `Invoice ${invNum ? `#${invNum}` : ''} issued (Unpaid)!`
+              : `Invoice ${invNum ? `#${invNum}` : ''} issued & marked as Paid!`;
+            showToast(msg, 'success');
+            if (targetStatus === 'DRAFT') {
+              setMainTab('DRAFTS');
+            } else if (createdOrder) {
               setSelectedInvoice(createdOrder?.data || createdOrder);
+              setViewMode('TAX_INVOICE');
+            }
+          }}
+          showToast={showToast}
+        />
+      )}
+
+      {/* Record Payment Modal */}
+      {paymentModalInvoice && (
+        <PaymentConfirmModal
+          invoice={paymentModalInvoice}
+          onClose={() => setPaymentModalInvoice(null)}
+          onPaid={(updatedOrder) => {
+            setPaymentModalInvoice(null);
+            fetchAllData();
+            if (selectedInvoice?.orderId === updatedOrder?.orderId) {
+              setSelectedInvoice(updatedOrder);
+            }
+          }}
+          showToast={showToast}
+        />
+      )}
+
+      {/* Issue Draft Modal */}
+      {issueModalInvoice && (
+        <IssueDraftModal
+          draft={issueModalInvoice}
+          onClose={() => setIssueModalInvoice(null)}
+          onIssued={(issuedOrder) => {
+            setIssueModalInvoice(null);
+            fetchAllData();
+            if (issuedOrder) {
+              setSelectedInvoice(issuedOrder?.data || issuedOrder);
               setViewMode('TAX_INVOICE');
             }
           }}
@@ -1326,63 +1715,112 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
   );
 }
 
-/** Dedicated New Tax Invoice Creation Modal / Sheet */
-function NewInvoiceModal({ products = [], customers = [], settings, onClose, onSaved, showToast }) {
+/** Dedicated New Tax Invoice Creation & Draft Editing Modal / Sheet */
+function NewInvoiceModal({ invoice = null, products = [], customers = [], settings, onClose, onSaved, showToast }) {
   const [loading, setLoading] = useState(false);
   const [activePickerIndex, setActivePickerIndex] = useState(null);
 
   // Customer fields
-  const [selectedCustomerId, setSelectedCustomerId] = useState('');
-  const [customerName, setCustomerName] = useState('');
-  const [customerPhone, setCustomerPhone] = useState('');
-  const [customerGstin, setCustomerGstin] = useState('');
-  const [customerPan, setCustomerPan] = useState('');
-  const [customerAddress, setCustomerAddress] = useState('');
-  const [customerState, setCustomerState] = useState('');
-  const [customerStateCode, setCustomerStateCode] = useState('');
+  const [selectedCustomerId, setSelectedCustomerId] = useState(invoice?.customerId || '');
+  const [customerName, setCustomerName] = useState(invoice?.customerName || '');
+  const [customerPhone, setCustomerPhone] = useState(invoice?.customerPhone && invoice?.customerPhone !== 'N/A' ? invoice.customerPhone : '');
+  const [customerGstin, setCustomerGstin] = useState(invoice?.customerGstin || '');
+  const [customerPan, setCustomerPan] = useState(invoice?.customerPan || '');
+  const [customerAddress, setCustomerAddress] = useState(invoice?.customerAddress || '');
+  const [customerState, setCustomerState] = useState(invoice?.customerState || '');
+  const [customerStateCode, setCustomerStateCode] = useState(invoice?.customerStateCode || '');
 
   // Invoice specifics
-  const [invoiceDate, setInvoiceDate] = useState(todayISO());
-  const [dueDate, setDueDate] = useState('');
-  const [paymentMethod, setPaymentMethod] = useState('Cash');
-  const [notes, setNotes] = useState('');
-  const [isRoundOff, setIsRoundOff] = useState(true);
+  const [invoiceDate, setInvoiceDate] = useState(() => (invoice?.date ? String(invoice.date).slice(0, 10) : todayISO()));
+  const [dueDate, setDueDate] = useState(() => (invoice?.dueDate ? String(invoice.dueDate).slice(0, 10) : ''));
+  const [paymentType, setPaymentType] = useState(() => (
+    invoice?.status === 'PARTIALLY_PAID' || (invoice?.paidAmount > 0 && invoice?.paidAmount < invoice?.total)
+      ? 'PARTIAL'
+      : invoice?.status === 'UNPAID' || invoice?.paymentStatus === 'UNPAID'
+      ? 'UNPAID'
+      : 'FULL'
+  ));
+  const [initialPaidAmount, setInitialPaidAmount] = useState(() => (invoice?.paidAmount !== undefined && invoice.paidAmount > 0 ? String(invoice.paidAmount) : ''));
+  const [paymentMethod, setPaymentMethod] = useState(invoice?.paymentMethod || 'Cash');
+  const [paymentRef, setPaymentRef] = useState(invoice?.paymentRef || '');
+  const [notes, setNotes] = useState(invoice?.notes || '');
+  const [isRoundOff, setIsRoundOff] = useState(() => {
+    // Whether rounding was applied isn't stored as its own flag — infer it
+    // from the saved total. If the un-rounded net (recomputed from the saved
+    // items) still carries the exact same fractional total that was saved,
+    // rounding must have been off; Math.round() would otherwise have landed
+    // on a whole-rupee figure. Ambiguous cases (already whole, or no items)
+    // fall back to the original default of on.
+    if (!invoice?.items?.length) return true;
+    const netBeforeRound = invoice.items.reduce((sum, i) => {
+      const qty = Number(i.qty) || 0;
+      const price = Number(i.price) || 0;
+      const taxRate = Number(i.taxRate) || 0;
+      const disc = Number(i.discount) || 0;
+      return sum + qty * price + (qty * price * taxRate) / 100 - disc;
+    }, 0);
+    const net = Math.max(0, netBeforeRound);
+    const savedTotal = Number(invoice.total) || 0;
+    const matchesUnrounded = Math.abs(savedTotal - net) < 0.005;
+    const matchesRounded = Math.abs(savedTotal - Math.round(net)) < 0.005;
+    if (matchesUnrounded && !matchesRounded) return false;
+    return true;
+  });
 
-  // Dispatch, place of supply & shipping (all optional — shown on the invoice only when filled in)
-  const [placeOfSupply, setPlaceOfSupply] = useState('');
-  const [vendorCode, setVendorCode] = useState('');
-  const [dispatchFrom, setDispatchFrom] = useState('');
-  const [dispatchDate, setDispatchDate] = useState('');
-  const [shipToName, setShipToName] = useState('');
-  const [shipToAddress, setShipToAddress] = useState('');
-  const [vehicleNo, setVehicleNo] = useState('');
-  const [shipBy, setShipBy] = useState('');
-  const [transporterName, setTransporterName] = useState('');
+  // Dispatch, place of supply & shipping
+  const [placeOfSupply, setPlaceOfSupply] = useState(invoice?.placeOfSupply || '');
+  const [vendorCode, setVendorCode] = useState(invoice?.vendorCode || '');
+  const [dispatchFrom, setDispatchFrom] = useState(invoice?.dispatchFrom || '');
+  const [dispatchDate, setDispatchDate] = useState(() => (invoice?.dispatchDate ? String(invoice.dispatchDate).slice(0, 10) : ''));
+  const [shipToName, setShipToName] = useState(invoice?.shipToName || '');
+  const [shipToAddress, setShipToAddress] = useState(invoice?.shipToAddress || '');
+  const [vehicleNo, setVehicleNo] = useState(invoice?.vehicleNo || '');
+  const [shipBy, setShipBy] = useState(invoice?.shipBy || '');
+  const [transporterName, setTransporterName] = useState(invoice?.transporterName || '');
 
-  // Buyer references & terms (all optional — shown on the invoice only when filled in)
-  const [buyerRef, setBuyerRef] = useState('');
-  const [buyerRefDate, setBuyerRefDate] = useState('');
-  const [buyerOrderNo, setBuyerOrderNo] = useState('');
-  const [buyerOrderDate, setBuyerOrderDate] = useState('');
-  const [dispatchDocNo, setDispatchDocNo] = useState('');
-  const [termsOfDelivery, setTermsOfDelivery] = useState('');
-  const [paymentTerms, setPaymentTerms] = useState('');
+  // Buyer references & terms
+  const [buyerRef, setBuyerRef] = useState(invoice?.buyerRef || '');
+  const [buyerRefDate, setBuyerRefDate] = useState(() => (invoice?.buyerRefDate ? String(invoice.buyerRefDate).slice(0, 10) : ''));
+  const [buyerOrderNo, setBuyerOrderNo] = useState(invoice?.buyerOrderNo || '');
+  const [buyerOrderDate, setBuyerOrderDate] = useState(() => (invoice?.buyerOrderDate ? String(invoice.buyerOrderDate).slice(0, 10) : ''));
+  const [dispatchDocNo, setDispatchDocNo] = useState(invoice?.dispatchDocNo || '');
+  const [termsOfDelivery, setTermsOfDelivery] = useState(invoice?.termsOfDelivery || '');
+  const [paymentTerms, setPaymentTerms] = useState(invoice?.paymentTerms || '');
 
   // Line items
-  const [items, setItems] = useState([
-    {
-      productId: '',
-      name: '',
-      barcode: '',
-      qty: 1,
-      unit: 'pcs',
-      price: '',
-      taxRate: 0,
-      discount: 0,
-      total: 0,
-      isCustom: false
+  const [items, setItems] = useState(() => {
+    if (invoice?.items?.length) {
+      return invoice.items.map((i) => ({
+        productId: i.productId || i.id || '',
+        name: i.name || '',
+        barcode: i.barcode || '',
+        hsn: i.hsn || '',
+        qty: Number(i.qty) || 1,
+        unit: i.unit || 'pcs',
+        price: i.price !== undefined ? i.price : '',
+        taxRate: Number(i.taxRate) || 0,
+        discount: Number(i.discount) || 0,
+        total: Number(i.total) || 0,
+        isCustom: !i.productId
+      }));
     }
-  ]);
+    return [
+      {
+        productId: '',
+        name: '',
+        barcode: '',
+        qty: 1,
+        unit: 'pcs',
+        price: '',
+        taxRate: 0,
+        discount: 0,
+        total: 0,
+        isCustom: false
+      }
+    ];
+  });
+
+  const isSoftMoney = ['UPI', 'Card', 'Net Banking', 'Bank Transfer', 'Cheque'].includes(paymentMethod);
 
   // Handle Customer Selection & Auto-fill
   const handleCustomerChange = (id) => {
@@ -1434,6 +1872,25 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
         total,
         isCustom: !!prod.isCustom
       };
+
+      // Auto-create next product select option if this is the last line or no blank row exists below
+      const hasEmptyRowBelow = next.some((r, i) => i > index && (!r.name || !r.name.trim()));
+      if (!hasEmptyRowBelow) {
+        next.push({
+          productId: '',
+          name: '',
+          barcode: '',
+          hsn: '',
+          qty: 1,
+          unit: 'pcs',
+          price: '',
+          taxRate: 0,
+          discount: 0,
+          total: 0,
+          isCustom: false
+        });
+      }
+
       return next;
     });
   };
@@ -1468,7 +1925,7 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
         taxRate: 0,
         discount: 0,
         total: 0,
-        isCustom: false
+        isCustom: true
       }
     ]);
   };
@@ -1478,7 +1935,7 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
     setItems((prev) => prev.filter((_, i) => i !== index));
   };
 
-  // Live Totals calculation
+  // Grand financial summary
   const totals = useMemo(() => {
     let subtotal = 0;
     let taxTotal = 0;
@@ -1487,10 +1944,11 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
     items.forEach((item) => {
       const qty = Number(item.qty) || 0;
       const price = Number(item.price) || 0;
-      const rate = Number(item.taxRate) || 0;
+      const taxRate = Number(item.taxRate) || 0;
       const disc = Number(item.discount) || 0;
+
       const lineSub = qty * price;
-      const lineTax = (lineSub * rate) / 100;
+      const lineTax = (lineSub * taxRate) / 100;
 
       subtotal += lineSub;
       taxTotal += lineTax;
@@ -1510,10 +1968,13 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
     };
   }, [items, isRoundOff]);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-
-    const validItems = items.filter((i) => i.name && i.name.trim() && (Number(i.qty) > 0 || Number(i.price) > 0));
+  const handleSaveWithStatus = async (targetStatus, customPaidAmount) => {
+    const validItems = items.filter((i) => {
+      if (!i.name || !i.name.trim()) return false;
+      const qtyNum = Number(i.qty) || 0;
+      const priceNum = Number(i.price) || 0;
+      return qtyNum >= 0 && priceNum >= 0 && (qtyNum > 0 || priceNum > 0);
+    });
     if (validItems.length === 0) {
       showToast('Please select or enter at least one item for the invoice.', 'error');
       return;
@@ -1522,6 +1983,25 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
     if (paymentMethod === 'Credit (Udhar)' && !customerName.trim()) {
       showToast('Customer name is required for credit / udhar sale.', 'error');
       return;
+    }
+
+    let finalPaid = 0;
+    if (targetStatus === 'DRAFT' || targetStatus === 'UNPAID') {
+      finalPaid = 0;
+    } else if (targetStatus === 'PARTIALLY_PAID') {
+      finalPaid = Math.min(totals.total, Math.max(0, Number(customPaidAmount !== undefined ? customPaidAmount : initialPaidAmount) || 0));
+      if (finalPaid <= 0) {
+        showToast('Please enter an initial payment amount greater than zero for partial payment.', 'error');
+        return;
+      }
+    } else if (targetStatus === 'PAID') {
+      finalPaid = totals.total;
+    }
+
+    // Soft money verification prompt
+    if (finalPaid > 0 && isSoftMoney && !paymentRef.trim()) {
+      const ok = window.confirm(`You are issuing this invoice via ${paymentMethod} without entering a Transaction Reference/UTR. Confirm that payment of ${money(finalPaid)} has been verified and received?`);
+      if (!ok) return;
     }
 
     setLoading(true);
@@ -1536,6 +2016,9 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
         customerState: customerState.trim() || '',
         customerStateCode: customerStateCode.trim() || '',
         paymentMethod,
+        paymentRef: paymentRef.trim() || '',
+        status: targetStatus,
+        paidAmount: finalPaid,
         date: invoiceDate ? new Date(invoiceDate).toISOString() : new Date().toISOString(),
         dueDate: dueDate ? new Date(dueDate).toISOString() : null,
         placeOfSupply: placeOfSupply.trim() || '',
@@ -1556,6 +2039,7 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
         paymentTerms: paymentTerms.trim() || '',
         items: validItems.map((i) => ({
           id: i.productId || `custom_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          productId: i.productId || i.id,
           name: i.name,
           barcode: i.barcode || '',
           hsn: i.hsn || '',
@@ -1574,11 +2058,27 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
         notes
       };
 
-      const res = await api.post('/orders', payload);
+      let res;
+      if (invoice?.orderId && invoice?.status === 'DRAFT') {
+        if (targetStatus === 'DRAFT') {
+          res = await api.put(`/orders/${invoice.orderId}`, payload);
+        } else {
+          await api.put(`/orders/${invoice.orderId}`, payload);
+          res = await api.post(`/orders/${invoice.orderId}/issue`, {
+            status: targetStatus,
+            paidAmount: finalPaid,
+            paymentMethod,
+            paymentRef: paymentRef.trim() || ''
+          });
+        }
+      } else {
+        res = await api.post('/orders', payload);
+      }
+
       const created = res?.data || res;
-      onSaved(created);
+      onSaved(created, targetStatus);
     } catch (err) {
-      showToast(api.message(err, 'Failed to create tax invoice.'), 'error');
+      showToast(api.message(err, 'Failed to process invoice.'), 'error');
     } finally {
       setLoading(false);
     }
@@ -1589,12 +2089,16 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
       <Modal
         open
         onClose={onClose}
-        title="Create Tax Invoice"
-        subtitle="Directly generate a formal tax sales invoice with customer details, product items, GST taxes, and stock deduction."
+        title={invoice?.status === 'DRAFT' ? `Edit Draft Invoice #${invoice.orderId}` : 'Create Tax Invoice'}
+        subtitle={invoice?.status === 'DRAFT' ? 'Update draft items and details, or issue as a finalized tax invoice.' : 'Generate a formal tax sales invoice with customer details, product items, GST taxes, and stock deduction.'}
         icon={Receipt}
         size="xl"
       >
-        <form onSubmit={handleSubmit} className="space-y-4">
+        {/* No field in this form is a submit trigger — every save action (Draft /
+            Issue Unpaid / Partial / Paid) is an explicit type="button" below, so
+            an Enter keypress while typing in any input must not silently pick
+            one of them (it used to always fire the "mark PAID" action). */}
+        <form onSubmit={(e) => e.preventDefault()} className="space-y-4">
           {/* Customer Information & Auto-fill Card */}
           <div className="p-4 rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/70 space-y-3">
             <div className="flex items-center justify-between">
@@ -1671,18 +2175,36 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
               </Field>
             </div>
 
+            {/* Payment Method and Payment Status / Terms */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <Field label="Payment Method">
                 <Select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)}>
-                  <option value="Cash">Cash</option>
-                  <option value="UPI">UPI</option>
-                  <option value="Card">Card</option>
+                  <option value="Cash">Cash (In Hand)</option>
+                  <option value="UPI">UPI / QR Code</option>
+                  <option value="Card">Credit / Debit Card</option>
+                  <option value="Net Banking">Net Banking / Bank Transfer</option>
                   <option value="Credit (Udhar)">Credit (Udhar)</option>
-                  <option value="Net Banking">Net Banking</option>
+                  <option value="Cheque">Bank Cheque</option>
                 </Select>
               </Field>
 
-              <Field label="Billing / Delivery Address" className="md:col-span-2">
+              <Field label="Payment Status / Terms">
+                <Select
+                  value={paymentType}
+                  onChange={(e) => {
+                    setPaymentType(e.target.value);
+                    if (e.target.value === 'PARTIAL' && !initialPaidAmount) {
+                      setInitialPaidAmount(String(Math.round(totals.total / 2)));
+                    }
+                  }}
+                >
+                  <option value="FULL">Full Payment (Paid in Full)</option>
+                  <option value="PARTIAL">Partial Payment (Advance + Balance Due)</option>
+                  <option value="UNPAID">Unpaid / Pay Later (Full Balance Due)</option>
+                </Select>
+              </Field>
+
+              <Field label="Billing / Delivery Address">
                 <Input
                   value={customerAddress}
                   onChange={(e) => setCustomerAddress(e.target.value)}
@@ -1691,201 +2213,277 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
               </Field>
             </div>
 
+            {/* Partial Payment Configuration Card */}
+            {paymentType === 'PARTIAL' && (
+              <div className="p-3.5 rounded-xl bg-amber-50/80 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-xs text-amber-900 dark:text-amber-300 flex items-center gap-1.5">
+                    <CreditCard className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                    Partial / Advance Payment Setup
+                  </span>
+                  <span className="text-[11px] font-bold text-amber-700 dark:text-amber-300">
+                    Grand Total: {money(totals.total)}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+                  <Field label="Amount Paid Now (₹) *">
+                    <Input
+                      type="number"
+                      min="0.01"
+                      max={totals.total}
+                      step="0.01"
+                      value={initialPaidAmount}
+                      onChange={(e) => setInitialPaidAmount(e.target.value)}
+                      placeholder="Enter advance/partial amount"
+                      className="font-bold font-mono text-sm bg-white dark:bg-slate-900"
+                    />
+                  </Field>
+
+                  <div className="rounded-xl p-3 bg-white/80 dark:bg-slate-900/80 border border-amber-200 dark:border-amber-800 text-xs space-y-1">
+                    <div className="flex justify-between text-[11px] text-[color:var(--text-secondary)]">
+                      <span>Advance Paid Now:</span>
+                      <span className="font-bold font-mono text-emerald-600 dark:text-emerald-400">{money(Number(initialPaidAmount) || 0)}</span>
+                    </div>
+                    <div className="flex justify-between font-bold text-amber-800 dark:text-amber-300 border-t border-amber-100 dark:border-amber-900/60 pt-1">
+                      <span>Remaining Balance Due:</span>
+                      <span className="font-mono">{money(Math.max(0, totals.total - (Number(initialPaidAmount) || 0)))}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {isSoftMoney && (
+              <div className="p-3 rounded-xl bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <CreditCard className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  <div>
+                    <div className="font-bold text-xs text-indigo-900 dark:text-indigo-300">
+                      Soft Money Mode: {paymentMethod}
+                    </div>
+                    <div className="text-[10.5px] text-indigo-700/80 dark:text-indigo-300/80">
+                      Enter transaction reference / UTR code for digital verification before confirming payment.
+                    </div>
+                  </div>
+                </div>
+                <div className="min-w-[220px]">
+                  <Input
+                    value={paymentRef}
+                    onChange={(e) => setPaymentRef(e.target.value)}
+                    placeholder="e.g. UTR / Ref / Auth #"
+                    className="bg-white dark:bg-slate-900"
+                  />
+                </div>
+              </div>
+            )}
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <Field label="Customer State Name" hint="For GST place-of-supply on the invoice">
                 <Input value={customerState} onChange={(e) => setCustomerState(e.target.value)} placeholder="e.g. Delhi" />
               </Field>
-              <Field label="Customer State Code">
-                <Input value={customerStateCode} onChange={(e) => setCustomerStateCode(e.target.value)} placeholder="e.g. 07" />
+              <Field label="Customer State Code (2-digit GST code)" hint="e.g. 07 for Delhi, 27 for Maharashtra, 33 for Tamil Nadu">
+                <Input value={customerStateCode} onChange={(e) => setCustomerStateCode(e.target.value)} placeholder="e.g. 07" maxLength={2} />
               </Field>
             </div>
           </div>
 
-          {/* Buyer References & Terms — all optional, only prints on the invoice when filled in */}
-          <div className="p-4 rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/70 space-y-3">
-            <span className="text-[11px] font-extrabold uppercase tracking-wider text-[color:var(--text-secondary)] flex items-center gap-1.5">
-              <FileText className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" /> Buyer References & Terms (Optional)
-            </span>
+          {/* Optional Shipping, Dispatch & Transport Section */}
+          <details className="rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/40 p-4 group">
+            <summary className="text-xs font-bold text-[color:var(--text-secondary)] cursor-pointer select-none flex items-center justify-between">
+              <span className="flex items-center gap-2">
+                <Truck className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                <span>Transport, Dispatch & E-Way Bill Fields (Optional)</span>
+              </span>
+              <span className="text-[10.5px] font-normal text-[color:var(--text-muted)] group-open:hidden">Click to expand</span>
+            </summary>
+            <div className="mt-3 space-y-3 pt-3 border-t border-[color:var(--border)] text-xs">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <Field label="Place of Supply">
+                  <Input value={placeOfSupply} onChange={(e) => setPlaceOfSupply(e.target.value)} placeholder="e.g. Maharashtra (27)" />
+                </Field>
+                <Field label="Dispatch From Address / Hub">
+                  <Input value={dispatchFrom} onChange={(e) => setDispatchFrom(e.target.value)} placeholder="Warehouse / Branch location" />
+                </Field>
+                <Field label="Dispatch Date">
+                  <Input type="date" value={dispatchDate} onChange={(e) => setDispatchDate(e.target.value)} />
+                </Field>
+              </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-              <Field label="Buyer's Ref.">
-                <Input value={buyerRef} onChange={(e) => setBuyerRef(e.target.value)} placeholder="e.g. GTI-01" />
-              </Field>
-              <Field label="Buyer's Ref. Date">
-                <Input type="date" value={buyerRefDate} onChange={(e) => setBuyerRefDate(e.target.value)} />
-              </Field>
-              <Field label="Buyer's Order No.">
-                <Input value={buyerOrderNo} onChange={(e) => setBuyerOrderNo(e.target.value)} />
-              </Field>
-              <Field label="Buyer's Order Date">
-                <Input type="date" value={buyerOrderDate} onChange={(e) => setBuyerOrderDate(e.target.value)} />
-              </Field>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <Field label="Ship-To Consignee Name" hint="If different from buyer">
+                  <Input value={shipToName} onChange={(e) => setShipToName(e.target.value)} placeholder="Consignee / Site receiver" />
+                </Field>
+                <Field label="Ship-To Delivery Address" className="md:col-span-2">
+                  <Input value={shipToAddress} onChange={(e) => setShipToAddress(e.target.value)} placeholder="Delivery destination address" />
+                </Field>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <Field label="Vehicle No.">
+                  <Input value={vehicleNo} onChange={(e) => setVehicleNo(e.target.value.toUpperCase())} placeholder="e.g. MH12AB1234" />
+                </Field>
+                <Field label="Ship By / Mode">
+                  <Input value={shipBy} onChange={(e) => setShipBy(e.target.value)} placeholder="Road / Air / Courier" />
+                </Field>
+                <Field label="Transporter Name">
+                  <Input value={transporterName} onChange={(e) => setTransporterName(e.target.value)} placeholder="Logistics Partner" />
+                </Field>
+                <Field label="Dispatch Doc / LR No.">
+                  <Input value={dispatchDocNo} onChange={(e) => setDispatchDocNo(e.target.value)} placeholder="e.g. LR-99882" />
+                </Field>
+              </div>
             </div>
+          </details>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <Field label="Despatch Document No.">
-                <Input value={dispatchDocNo} onChange={(e) => setDispatchDocNo(e.target.value)} />
-              </Field>
-              <Field label="Terms of Delivery">
-                <Input value={termsOfDelivery} onChange={(e) => setTermsOfDelivery(e.target.value)} placeholder="e.g. Ex-works, FOB" />
-              </Field>
-              <Field label="Terms of Payment">
-                <Input value={paymentTerms} onChange={(e) => setPaymentTerms(e.target.value)} placeholder="e.g. Net 30 days" />
-              </Field>
+          {/* Optional Buyer References Section */}
+          <details className="rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/40 p-4 group">
+            <summary className="text-xs font-bold text-[color:var(--text-secondary)] cursor-pointer select-none flex items-center justify-between">
+              <span className="flex items-center gap-2">
+                <FileText className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                <span>Buyer References, PO Numbers & Terms (Optional)</span>
+              </span>
+              <span className="text-[10.5px] font-normal text-[color:var(--text-muted)] group-open:hidden">Click to expand</span>
+            </summary>
+            <div className="mt-3 space-y-3 pt-3 border-t border-[color:var(--border)] text-xs">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <Field label="Buyer Order / PO No.">
+                  <Input value={buyerOrderNo} onChange={(e) => setBuyerOrderNo(e.target.value)} placeholder="e.g. PO-2026-009" />
+                </Field>
+                <Field label="Buyer Order Date">
+                  <Input type="date" value={buyerOrderDate} onChange={(e) => setBuyerOrderDate(e.target.value)} />
+                </Field>
+                <Field label="Buyer Reference / Enquiry No.">
+                  <Input value={buyerRef} onChange={(e) => setBuyerRef(e.target.value)} placeholder="e.g. ENQ-445" />
+                </Field>
+                <Field label="Buyer Reference Date">
+                  <Input type="date" value={buyerRefDate} onChange={(e) => setBuyerRefDate(e.target.value)} />
+                </Field>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <Field label="Vendor Code (assigned by buyer)">
+                  <Input value={vendorCode} onChange={(e) => setVendorCode(e.target.value)} placeholder="e.g. VEN-8812" />
+                </Field>
+                <Field label="Terms of Delivery">
+                  <Input value={termsOfDelivery} onChange={(e) => setTermsOfDelivery(e.target.value)} placeholder="e.g. Door Delivery / FOB" />
+                </Field>
+                <Field label="Terms of Payment">
+                  <Input value={paymentTerms} onChange={(e) => setPaymentTerms(e.target.value)} placeholder="e.g. 30 Days Net" />
+                </Field>
+              </div>
             </div>
-          </div>
-
-          {/* Dispatch, Place of Supply & Shipping — all optional, only prints on the invoice when filled in */}
-          <div className="p-4 rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/70 space-y-3">
-            <span className="text-[11px] font-extrabold uppercase tracking-wider text-[color:var(--text-secondary)] flex items-center gap-1.5">
-              <FileText className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" /> Dispatch, Supply & Shipping (Optional)
-            </span>
-
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-              <Field label="Place of Supply" hint="e.g. DL (07)">
-                <Input value={placeOfSupply} onChange={(e) => setPlaceOfSupply(e.target.value)} />
-              </Field>
-              <Field label="Vendor Code">
-                <Input value={vendorCode} onChange={(e) => setVendorCode(e.target.value)} />
-              </Field>
-              <Field label="Dispatch From">
-                <Input value={dispatchFrom} onChange={(e) => setDispatchFrom(e.target.value)} />
-              </Field>
-              <Field label="Dispatch Date">
-                <Input type="date" value={dispatchDate} onChange={(e) => setDispatchDate(e.target.value)} />
-              </Field>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <Field label="Ship To (Name)" hint="Defaults to customer name if left blank">
-                <Input value={shipToName} onChange={(e) => setShipToName(e.target.value)} placeholder={customerName || 'Same as Bill To'} />
-              </Field>
-              <Field label="Ship To (Address)">
-                <Input value={shipToAddress} onChange={(e) => setShipToAddress(e.target.value)} placeholder="Delivery address, if different" />
-              </Field>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <Field label="Vehicle No.">
-                <Input value={vehicleNo} onChange={(e) => setVehicleNo(e.target.value)} placeholder="e.g. MH27GH7271" />
-              </Field>
-              <Field label="Ship By" hint="e.g. Road, Rail, Air, Courier">
-                <Input value={shipBy} onChange={(e) => setShipBy(e.target.value)} />
-              </Field>
-              <Field label="Transporter Name">
-                <Input value={transporterName} onChange={(e) => setTransporterName(e.target.value)} />
-              </Field>
-            </div>
-          </div>
+          </details>
 
           {/* Line Items Table */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-[11px] font-extrabold uppercase tracking-wider text-[color:var(--text-secondary)] flex items-center gap-1.5">
-                <Tag className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" /> Invoice Items ({items.length})
+              <span className="text-[11px] font-extrabold uppercase tracking-wider text-[color:var(--text-secondary)]">
+                Line Items &amp; Products ({items.length})
               </span>
-              <Button type="button" size="xs" variant="secondary" icon={Plus} onClick={addItemRow}>
-                Add Product Line
+              <Button size="xs" variant="outline" icon={Plus} onClick={addItemRow}>
+                Add Blank Row
               </Button>
             </div>
 
-            <div className="overflow-x-auto rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-surface)]">
+            <div className="overflow-x-auto rounded-2xl border border-[color:var(--border)]">
               <table className="w-full text-left text-xs border-collapse">
                 <thead>
-                  <tr className="border-b border-[color:var(--border)] bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-secondary)] uppercase text-[10.5px]">
-                    <th className="py-2.5 px-3 min-w-[260px]">Product / Item Description *</th>
-                    <th className="py-2.5 px-2 w-20 text-right">Qty</th>
-                    <th className="py-2.5 px-2 w-16 text-center">Unit</th>
-                    <th className="py-2.5 px-2 w-28 text-right">Rate (₹)</th>
-                    <th className="py-2.5 px-2 w-20 text-right">GST %</th>
-                    <th className="py-2.5 px-2 w-24 text-right">Disc (₹)</th>
-                    <th className="py-2.5 px-3 w-28 text-right">Amount (₹)</th>
-                    <th className="py-2.5 px-2 w-10 text-center"></th>
+                  <tr className="border-b border-[color:var(--border)] bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-secondary)] text-[10.5px] uppercase tracking-wider">
+                    <th className="py-2.5 px-3 w-8 text-center">#</th>
+                    <th className="py-2.5 px-3 min-w-[220px]">Product / Service Description</th>
+                    <th className="py-2.5 px-3 w-24">HSN/SAC</th>
+                    <th className="py-2.5 px-3 w-24 text-right">Qty</th>
+                    <th className="py-2.5 px-3 w-20">Unit</th>
+                    <th className="py-2.5 px-3 w-28 text-right">Rate (₹)</th>
+                    <th className="py-2.5 px-3 w-20 text-right">GST %</th>
+                    <th className="py-2.5 px-3 w-24 text-right">Disc (₹)</th>
+                    <th className="py-2.5 px-3 w-28 text-right">Total (₹)</th>
+                    <th className="py-2.5 px-3 w-10 text-center"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[color:var(--border-subtle)]">
-                  {items.map((row, idx) => (
-                    <tr key={idx} className="hover:bg-[color:var(--bg-subtle)]/30 transition-colors">
-                      {/* Solid Product Selection Item Cell */}
-                      <td className="py-2.5 px-3">
+                  {items.map((item, idx) => (
+                    <tr key={idx} className="hover:bg-[color:var(--bg-subtle)]/50">
+                      <td className="py-2 px-3 text-center text-slate-400 font-mono text-[11px]">{idx + 1}</td>
+
+                      <td className="py-2.5 px-3 min-w-[240px]">
                         <ProductItemCell
-                          row={row}
+                          row={item}
                           index={idx}
                           onOpenPicker={(i) => setActivePickerIndex(i)}
                           onUpdateName={(i, name) => handleItemChange(i, 'name', name)}
                         />
                       </td>
 
-                      <td className="py-2.5 px-2 text-right">
-                        <input
+                      <td className="py-2 px-3">
+                        <Input
+                          value={item.hsn}
+                          onChange={(e) => handleItemChange(idx, 'hsn', e.target.value)}
+                          placeholder="HSN"
+                          className="text-xs font-mono"
+                        />
+                      </td>
+
+                      <td className="py-2 px-3">
+                        <Input
                           type="number"
                           step="any"
-                          min="0.001"
-                          className="field-input text-xs py-1.5 px-2 text-right w-full font-mono font-bold rounded-xl"
-                          value={row.qty}
+                          value={item.qty}
                           onChange={(e) => handleItemChange(idx, 'qty', e.target.value)}
-                          required
+                          className="text-right text-xs font-mono font-bold"
                         />
                       </td>
 
-                      <td className="py-2.5 px-2 text-center">
-                        <input
-                          type="text"
-                          className="field-input text-xs py-1.5 px-1 text-center w-full rounded-xl font-medium text-[color:var(--text-secondary)]"
-                          value={row.unit}
+                      <td className="py-2 px-3">
+                        <Input
+                          value={item.unit}
                           onChange={(e) => handleItemChange(idx, 'unit', e.target.value)}
-                          placeholder="pcs"
+                          className="text-xs"
                         />
                       </td>
 
-                      <td className="py-2.5 px-2 text-right">
-                        <input
+                      <td className="py-2 px-3">
+                        <Input
                           type="number"
                           step="any"
-                          min="0"
-                          className="field-input text-xs py-1.5 px-2 text-right w-full font-mono rounded-xl font-semibold"
-                          value={row.price}
+                          value={item.price}
                           onChange={(e) => handleItemChange(idx, 'price', e.target.value)}
                           placeholder="0.00"
-                          required
+                          className="text-right text-xs font-mono font-bold"
                         />
                       </td>
 
-                      <td className="py-2.5 px-2 text-right">
-                        <input
+                      <td className="py-2 px-3">
+                        <Input
                           type="number"
                           step="any"
-                          min="0"
-                          className="field-input text-xs py-1.5 px-2 text-right w-full font-mono rounded-xl"
-                          value={row.taxRate}
+                          value={item.taxRate}
                           onChange={(e) => handleItemChange(idx, 'taxRate', e.target.value)}
-                          placeholder="0"
+                          className="text-right text-xs font-mono"
                         />
                       </td>
 
-                      <td className="py-2.5 px-2 text-right">
-                        <input
+                      <td className="py-2 px-3">
+                        <Input
                           type="number"
                           step="any"
-                          min="0"
-                          className="field-input text-xs py-1.5 px-2 text-right w-full font-mono text-emerald-600 rounded-xl"
-                          value={row.discount}
+                          value={item.discount}
                           onChange={(e) => handleItemChange(idx, 'discount', e.target.value)}
-                          placeholder="0"
+                          className="text-right text-xs font-mono"
                         />
                       </td>
 
-                      <td className="py-2.5 px-3 text-right font-mono font-extrabold text-[13px] text-[color:var(--text-primary)]">
-                        {money(row.total)}
+                      <td className="py-2 px-3 text-right font-mono font-bold text-xs text-[color:var(--text-primary)]">
+                        {money(item.total)}
                       </td>
 
-                      <td className="py-2.5 px-2 text-center">
+                      <td className="py-2 px-3 text-center">
                         <button
                           type="button"
                           onClick={() => removeItemRow(idx)}
                           disabled={items.length === 1}
-                          className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 disabled:opacity-20 transition-colors"
-                          title="Remove row"
+                          className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/60 transition-colors disabled:opacity-30"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -1897,16 +2495,15 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
             </div>
           </div>
 
-          {/* Notes & Financial Summary Card */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
+          {/* Bottom Summary & Notes */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
             <div className="space-y-3">
-              <Field label="Invoice Notes / Special Remarks">
-                <textarea
-                  className="field-input text-xs p-2.5 w-full rounded-xl resize-none"
-                  rows="3"
-                  placeholder="Optional invoice remarks, transport details, PO reference, etc."
+              <Field label="Invoice Notes / Remarks">
+                <Textarea
+                  rows={3}
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
+                  placeholder="Remarks, terms, or bank payment reference notes shown on invoice…"
                 />
               </Field>
 
@@ -1921,15 +2518,15 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
               </label>
             </div>
 
-            <div className="p-4 rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/70 flex flex-col justify-between space-y-2 text-xs">
-              <div className="space-y-1.5">
-                <div className="flex justify-between py-1 border-b border-[color:var(--border)]">
-                  <span className="text-[color:var(--text-secondary)] font-medium">Subtotal:</span>
-                  <span className="font-mono font-bold text-[color:var(--text-primary)]">{money(totals.subtotal)}</span>
+            <div className="p-4 rounded-2xl bg-[color:var(--bg-subtle)] border border-[color:var(--border)] space-y-2">
+              <div className="space-y-1.5 text-xs">
+                <div className="flex justify-between py-1 border-b border-[color:var(--border)] text-[color:var(--text-secondary)]">
+                  <span>Subtotal (Taxable):</span>
+                  <span className="font-mono font-semibold text-[color:var(--text-primary)]">{money(totals.subtotal)}</span>
                 </div>
                 {totals.discount > 0 && (
-                  <div className="flex justify-between py-1 border-b border-[color:var(--border)] text-emerald-600 font-semibold">
-                    <span>Discount:</span>
+                  <div className="flex justify-between py-1 border-b border-[color:var(--border)] text-emerald-600 dark:text-emerald-400 font-semibold">
+                    <span>Total Discount:</span>
                     <span className="font-mono">-{money(totals.discount)}</span>
                   </div>
                 )}
@@ -1960,13 +2557,52 @@ function NewInvoiceModal({ products = [], customers = [], settings, onClose, onS
           </div>
 
           {/* Footer Actions */}
-          <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-[color:var(--border)]">
+          <div className="flex flex-wrap items-center justify-between gap-2.5 pt-3 border-t border-[color:var(--border)]">
             <Button type="button" onClick={onClose}>
               Cancel
             </Button>
-            <Button type="submit" variant="primary" loading={loading} icon={Receipt}>
-              Save & Generate Invoice
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                loading={loading}
+                icon={FileText}
+                onClick={() => handleSaveWithStatus('DRAFT')}
+              >
+                {invoice?.status === 'DRAFT' ? 'Update Draft' : 'Save as Draft'}
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                loading={loading}
+                icon={Clock}
+                onClick={() => handleSaveWithStatus('UNPAID')}
+              >
+                Issue as Unpaid
+              </Button>
+              {paymentType === 'PARTIAL' ? (
+                <Button
+                  type="button"
+                  variant="primary"
+                  loading={loading}
+                  icon={CheckCircle2}
+                  onClick={() => handleSaveWithStatus('PARTIALLY_PAID', Number(initialPaidAmount) || 0)}
+                  className="bg-amber-600 hover:bg-amber-700 text-white"
+                >
+                  Issue with Partial (₹{Number(initialPaidAmount) || 0})
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  variant="primary"
+                  loading={loading}
+                  icon={CheckCircle2}
+                  onClick={() => handleSaveWithStatus('PAID')}
+                >
+                  Issue &amp; Mark Paid
+                </Button>
+              )}
+            </div>
           </div>
         </form>
       </Modal>
@@ -2086,6 +2722,25 @@ function QuotationEditorModal({ quotation, products = [], customers = [], settin
         total,
         isCustom: !!prod.isCustom
       };
+
+      // Auto-create next product select option if this is the last line or no blank row exists below
+      const hasEmptyRowBelow = next.some((r, i) => i > index && (!r.name || !r.name.trim()));
+      if (!hasEmptyRowBelow) {
+        next.push({
+          productId: '',
+          name: '',
+          barcode: '',
+          hsn: '',
+          qty: 1,
+          unit: 'pcs',
+          price: '',
+          taxRate: 0,
+          discount: 0,
+          total: 0,
+          isCustom: false
+        });
+      }
+
       return next;
     });
   };
@@ -2161,7 +2816,17 @@ function QuotationEditorModal({ quotation, products = [], customers = [], settin
   const handleSubmit = async (e) => {
     e.preventDefault();
 
-    const validItems = items.filter((i) => i.name && i.name.trim() && (Number(i.qty) > 0 || Number(i.price) > 0));
+    // A row needs at least one of qty/price to be positive (the other can be
+    // left blank — qty defaults to 1, price to 0, below), but neither may be
+    // negative: `Number(i.qty) > 0 || Number(i.price) > 0` alone let a negative
+    // qty through whenever price was positive, and that negative value then
+    // went straight into the payload instead of being rejected.
+    const validItems = items.filter((i) => {
+      if (!i.name || !i.name.trim()) return false;
+      const qtyNum = Number(i.qty) || 0;
+      const priceNum = Number(i.price) || 0;
+      return qtyNum >= 0 && priceNum >= 0 && (qtyNum > 0 || priceNum > 0);
+    });
     if (validItems.length === 0) {
       showToast('Please select or enter at least one item for the quotation.', 'error');
       return;
@@ -2336,7 +3001,7 @@ function QuotationEditorModal({ quotation, products = [], customers = [], settin
                           className="field-input text-xs py-1.5 px-2 text-right w-full font-mono font-bold rounded-xl"
                           value={row.qty}
                           onChange={(e) => handleItemChange(idx, 'qty', e.target.value)}
-                          required
+                          required={Boolean(row.name?.trim())}
                         />
                       </td>
 
@@ -2359,7 +3024,7 @@ function QuotationEditorModal({ quotation, products = [], customers = [], settin
                           value={row.price}
                           onChange={(e) => handleItemChange(idx, 'price', e.target.value)}
                           placeholder="0.00"
-                          required
+                          required={Boolean(row.name?.trim())}
                         />
                       </td>
 
@@ -2492,12 +3157,302 @@ function QuotationEditorModal({ quotation, products = [], customers = [], settin
   );
 }
 
+/** Record Payment Modal for Unpaid / Partially Paid Invoices */
+function PaymentConfirmModal({ invoice, onClose, onPaid, showToast }) {
+  const [loading, setLoading] = useState(false);
+  const total = Number(invoice?.total || 0);
+  const currentPaid = Number(invoice?.paidAmount !== undefined ? invoice.paidAmount : (invoice?.status === 'PAID' ? total : 0));
+  const currentDue = Number(invoice?.balanceDue !== undefined ? invoice.balanceDue : Math.max(0, total - currentPaid));
+
+  const [paymentAmount, setPaymentAmount] = useState(String(currentDue > 0 ? currentDue : total));
+  const [paymentMethod, setPaymentMethod] = useState(invoice?.paymentMethod && invoice.paymentMethod !== 'Credit (Udhar)' ? invoice.paymentMethod : 'Cash');
+  const [paymentRef, setPaymentRef] = useState('');
+  const [notes, setNotes] = useState('');
+
+  const numPay = Math.max(0, Math.min(currentDue, Number(paymentAmount) || 0));
+  const remainingDueAfter = Math.max(0, Math.round((currentDue - numPay) * 100) / 100);
+  const isSettleFull = remainingDueAfter === 0;
+
+  const isSoftMoney = ['UPI', 'Card', 'Net Banking', 'Bank Transfer', 'Cheque'].includes(paymentMethod);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (numPay <= 0) {
+      showToast('Please enter a payment amount greater than zero.', 'error');
+      return;
+    }
+    if (isSoftMoney && !paymentRef.trim()) {
+      const ok = window.confirm(`You have not entered a Transaction Reference/UTR for ${paymentMethod}. Confirm that the payment of ${money(numPay)} has been verified?`);
+      if (!ok) return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await api.post(`/orders/${invoice.orderId}/pay`, {
+        amount: numPay,
+        paymentMethod,
+        paymentRef: paymentRef.trim(),
+        notes: notes.trim()
+      });
+      showToast(res.message || `Payment of ${money(numPay)} recorded for Invoice #${invoice.orderId}!`, 'success');
+      onPaid(res?.data || res);
+    } catch (err) {
+      showToast(api.message(err, 'Failed to record payment.'), 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={`Record Payment — Invoice #${invoice?.orderId}`}
+      subtitle={`Collect full or partial payment and update drawer & customer balance for ${invoice?.customerName || 'Customer'}.`}
+      icon={CreditCard}
+      size="md"
+    >
+      <form onSubmit={handleSubmit} className="space-y-4 text-xs">
+        <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 space-y-2">
+          <div className="flex justify-between items-center text-amber-900 dark:text-amber-200">
+            <div>
+              <span className="text-[11px] uppercase tracking-wider font-bold block text-amber-800 dark:text-amber-400">Total Invoice</span>
+              <span className="text-xs font-semibold">{money(total)}</span>
+            </div>
+            <div className="text-right">
+              <span className="text-[11px] uppercase tracking-wider font-bold block text-amber-800 dark:text-amber-400">Current Balance Due</span>
+              <span className="text-xl font-mono font-extrabold text-amber-700 dark:text-amber-300">{money(currentDue)}</span>
+            </div>
+          </div>
+          {currentPaid > 0 && (
+            <div className="text-[11px] text-emerald-700 dark:text-emerald-400 font-semibold border-t border-amber-200/60 dark:border-amber-800/60 pt-1.5 flex justify-between">
+              <span>Previously Paid:</span>
+              <span className="font-mono">{money(currentPaid)}</span>
+            </div>
+          )}
+          <div className="text-[11px] text-amber-700/80 dark:text-amber-300/80">
+            Customer: <span className="font-semibold">{invoice?.customerName || 'Walk-in Customer'}</span> {invoice?.customerPhone && invoice.customerPhone !== 'N/A' ? `(${invoice.customerPhone})` : ''}
+          </div>
+        </div>
+
+        <div className="space-y-1.5">
+          <Field label="Payment Amount to Collect Now (₹) *">
+            <Input
+              type="number"
+              min="0.01"
+              max={currentDue}
+              step="0.01"
+              value={paymentAmount}
+              onChange={(e) => setPaymentAmount(e.target.value)}
+              className="text-base font-bold font-mono py-2 bg-white dark:bg-slate-900"
+              required
+              autoFocus
+            />
+          </Field>
+
+          {/* Quick preset amount buttons */}
+          <div className="flex flex-wrap gap-1.5 pt-0.5">
+            <button
+              type="button"
+              onClick={() => setPaymentAmount(String(currentDue))}
+              className="px-2.5 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800/60 text-[11px] font-bold hover:bg-indigo-100 transition-colors"
+            >
+              Full Due: {money(currentDue)}
+            </button>
+            {currentDue > 10 && (
+              <button
+                type="button"
+                onClick={() => setPaymentAmount(String(Math.round(currentDue / 2)))}
+                className="px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[11px] font-bold hover:bg-slate-200 transition-colors"
+              >
+                50%: {money(Math.round(currentDue / 2))}
+              </button>
+            )}
+            {[500, 1000, 2000].filter(amt => amt < currentDue).map(amt => (
+              <button
+                key={amt}
+                type="button"
+                onClick={() => setPaymentAmount(String(amt))}
+                className="px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[11px] font-bold hover:bg-slate-200 transition-colors"
+              >
+                ₹{amt}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Live Status Preview */}
+        <div className={`p-3 rounded-xl border text-xs space-y-1 ${
+          isSettleFull
+            ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
+            : 'bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-200'
+        }`}>
+          <div className="flex justify-between font-semibold">
+            <span>Resulting Invoice Status:</span>
+            <span className="font-bold uppercase tracking-wider">
+              {isSettleFull ? '✅ FULLY PAID' : '⚠️ PARTIALLY PAID'}
+            </span>
+          </div>
+          {!isSettleFull && (
+            <div className="flex justify-between text-[11px] border-t border-amber-200/60 dark:border-amber-800/60 pt-1">
+              <span>Remaining Balance Due:</span>
+              <span className="font-bold font-mono">{money(remainingDueAfter)}</span>
+            </div>
+          )}
+        </div>
+
+        <Field label="Payment Mode *">
+          <Select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)} required>
+            <option value="Cash">Cash (In Hand / Session Drawer)</option>
+            <option value="UPI">UPI / QR Payment</option>
+            <option value="Card">Credit / Debit Card</option>
+            <option value="Net Banking">Net Banking / Direct Transfer</option>
+            <option value="Cheque">Bank Cheque</option>
+          </Select>
+        </Field>
+
+        {isSoftMoney && (
+          <div className="p-3 rounded-xl bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800/60 space-y-1.5">
+            <div className="font-bold text-indigo-900 dark:text-indigo-300 flex items-center gap-1.5">
+              <CreditCard className="w-3.5 h-3.5" /> Soft Money Verification
+            </div>
+            <p className="text-[11px] text-indigo-700/80 dark:text-indigo-300/80">
+              Enter the bank/UPI reference or UTR number received for digital record keeping:
+            </p>
+            <Input
+              value={paymentRef}
+              onChange={(e) => setPaymentRef(e.target.value)}
+              placeholder="e.g. UPI Ref / UTR / Auth Code"
+              className="bg-white dark:bg-slate-900"
+            />
+          </div>
+        )}
+
+        <Field label="Payment Remarks / Notes">
+          <Input
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="e.g. Installment / Advance payment received"
+          />
+        </Field>
+
+        <div className="flex items-center justify-end gap-2 pt-3 border-t border-[color:var(--border)]">
+          <Button type="button" onClick={onClose}>Cancel</Button>
+          <Button type="submit" variant="primary" loading={loading} icon={CheckCircle2}>
+            {isSettleFull ? `Confirm Full Payment (${money(numPay)})` : `Record Partial Payment (${money(numPay)})`}
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+/** Issue Draft Modal */
+function IssueDraftModal({ draft, onClose, onIssued, showToast }) {
+  const [loading, setLoading] = useState(false);
+  const [targetStatus, setTargetStatus] = useState('PAID');
+  const [paymentMethod, setPaymentMethod] = useState(draft?.paymentMethod || 'Cash');
+  const [paymentRef, setPaymentRef] = useState(draft?.paymentRef || '');
+
+  const isSoftMoney = ['UPI', 'Card', 'Net Banking', 'Bank Transfer', 'Cheque'].includes(paymentMethod);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (targetStatus === 'PAID' && isSoftMoney && !paymentRef.trim()) {
+      const ok = window.confirm(`You are marking this issued invoice as PAID via ${paymentMethod} without entering a Transaction Reference/UTR. Confirm that payment of ${money(draft.total)} is received?`);
+      if (!ok) return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await api.post(`/orders/${draft.orderId}/issue`, {
+        status: targetStatus,
+        paymentMethod,
+        paymentRef: paymentRef.trim()
+      });
+      showToast(`Draft Invoice #${draft.orderId} issued successfully as ${targetStatus}!`, 'success');
+      onIssued(res?.data || res);
+    } catch (err) {
+      showToast(api.message(err, 'Failed to issue draft invoice.'), 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={`Issue Draft Invoice #${draft?.orderId}`}
+      subtitle="Finalize this draft invoice, deduct product inventory stock, and post sales records."
+      icon={Send}
+      size="md"
+    >
+      <form onSubmit={handleSubmit} className="space-y-4 text-xs">
+        <div className="p-4 rounded-2xl bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800/60 space-y-1.5">
+          <div className="flex justify-between items-center text-sky-900 dark:text-sky-200">
+            <span className="font-bold">Total Invoice Amount</span>
+            <span className="text-lg font-mono font-extrabold text-sky-700 dark:text-sky-300">{money(draft?.total)}</span>
+          </div>
+          <div className="text-[11px] text-sky-700/80 dark:text-sky-300/80">
+            Customer: <span className="font-semibold">{draft?.customerName || 'Walk-in Customer'}</span> · Items: <span className="font-semibold">{draft?.items?.length || 0}</span>
+          </div>
+        </div>
+
+        <Field label="Issuance Status *">
+          <Select value={targetStatus} onChange={(e) => setTargetStatus(e.target.value)} required>
+            <option value="PAID">Issue & Mark as PAID (Payment Received)</option>
+            <option value="UNPAID">Issue as UNPAID (Payment Pending / Collect Later)</option>
+          </Select>
+        </Field>
+
+        <Field label="Payment Mode">
+          <Select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)}>
+            <option value="Cash">Cash</option>
+            <option value="UPI">UPI</option>
+            <option value="Card">Card</option>
+            <option value="Net Banking">Net Banking</option>
+            <option value="Credit (Udhar)">Credit (Udhar)</option>
+            <option value="Cheque">Cheque</option>
+          </Select>
+        </Field>
+
+        {targetStatus === 'PAID' && isSoftMoney && (
+          <div className="p-3 rounded-xl bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800/60 space-y-1.5">
+            <div className="font-bold text-indigo-900 dark:text-indigo-300 flex items-center gap-1.5">
+              <CreditCard className="w-3.5 h-3.5" /> Soft Money Verification ({paymentMethod})
+            </div>
+            <Input
+              value={paymentRef}
+              onChange={(e) => setPaymentRef(e.target.value)}
+              placeholder="e.g. UTR / Ref Number"
+              className="bg-white dark:bg-slate-900"
+            />
+          </div>
+        )}
+
+        <div className="flex items-center justify-end gap-2 pt-3 border-t border-[color:var(--border)]">
+          <Button type="button" onClick={onClose}>Cancel</Button>
+          <Button type="submit" variant="primary" loading={loading} icon={Send}>
+            {targetStatus === 'PAID' ? 'Issue & Mark Paid' : 'Issue as Unpaid'}
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 /** Standard Tax Invoice & Thermal Receipt Modal */
-function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onClose, onVoid }) {
+function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onClose, onVoid, onMarkPaid, onDelete }) {
   const company = invoice?.company || settings?.company || { name: tenant?.name || 'Selsolve Store' };
   const billing = invoice?.billing || settings?.billing || {};
   const isVoid = invoice?.status === 'VOID';
-  const isCredit = invoice?.paymentMethod === 'Credit (Udhar)';
+  const isDraft = invoice?.status === 'DRAFT';
+  const totalAmt = Number(invoice?.total || 0);
+  const paidAmt = Number(invoice?.paidAmount !== undefined ? invoice.paidAmount : (invoice?.status === 'PAID' ? totalAmt : 0));
+  const dueAmt = Number(invoice?.balanceDue !== undefined ? invoice.balanceDue : (isVoid ? 0 : Math.max(0, totalAmt - paidAmt)));
+  const isPartiallyPaid = !isVoid && (invoice?.status === 'PARTIALLY_PAID' || invoice?.paymentStatus === 'PARTIALLY_PAID' || (paidAmt > 0 && dueAmt > 0));
+  const isFullyUnpaid = !isVoid && !isPartiallyPaid && (invoice?.status === 'UNPAID' || invoice?.paymentStatus === 'UNPAID' || dueAmt >= totalAmt);
 
   // Client-side UPI payment QR — nothing is sent anywhere, it's just encoded locally.
   const [qrDataUrl, setQrDataUrl] = useState('');
@@ -2507,12 +3462,13 @@ function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onC
       return;
     }
     let cancelled = false;
-    const upiString = `upi://pay?pa=${encodeURIComponent(billing.upiId)}&pn=${encodeURIComponent(company?.name || 'Merchant')}&am=${Number(invoice?.total || 0).toFixed(2)}&cu=INR&tn=${encodeURIComponent(`Invoice ${invoice?.orderId || ''}`)}`;
+    const amountToQr = dueAmt > 0 ? dueAmt : totalAmt;
+    const upiString = `upi://pay?pa=${encodeURIComponent(billing.upiId)}&pn=${encodeURIComponent(company?.name || 'Merchant')}&am=${Number(amountToQr).toFixed(2)}&cu=INR&tn=${encodeURIComponent(`Invoice ${invoice?.orderId || ''}`)}`;
     QRCode.toDataURL(upiString, { margin: 1, width: 160 })
       .then((url) => { if (!cancelled) setQrDataUrl(url); })
       .catch(() => { if (!cancelled) setQrDataUrl(''); });
     return () => { cancelled = true; };
-  }, [billing?.upiId, company?.name, invoice?.total, invoice?.orderId, invoice]);
+  }, [billing?.upiId, company?.name, dueAmt, totalAmt, invoice?.orderId, invoice]);
 
   if (!invoice) return null;
 
@@ -2569,8 +3525,13 @@ function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onC
       footer={
         <div className="flex w-full items-center justify-between">
           <div className="flex items-center gap-2">
+            {onDelete && (
+              <Button variant="danger" size="sm" icon={Trash2} onClick={onDelete}>
+                Delete Invoice
+              </Button>
+            )}
             {!isVoid && (
-              <Button variant="danger" size="sm" onClick={onVoid}>
+              <Button variant="outline" size="sm" onClick={onVoid}>
                 Void Invoice
               </Button>
             )}
@@ -2591,12 +3552,26 @@ function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onC
                   viewMode === 'THERMAL' ? 'bg-indigo-600 text-white shadow-xs' : 'text-[color:var(--text-secondary)]'
                 }`}
               >
-                Thermal Slip (3")
+                Bill
               </button>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
+            {!isVoid && (isFullyUnpaid || isPartiallyPaid) && onMarkPaid && (
+              <Button
+                variant="primary"
+                size="sm"
+                icon={CheckCircle2}
+                onClick={() => {
+                  onClose();
+                  onMarkPaid(invoice);
+                }}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white"
+              >
+                {isPartiallyPaid ? 'Record Payment / Installment' : 'Record Payment'}
+              </Button>
+            )}
             <Button onClick={onClose}>Close</Button>
             <Button variant="primary" icon={Printer} onClick={() => window.print()}>
               Print Invoice
@@ -2656,9 +3631,25 @@ function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onC
               <div className="text-sm font-mono font-bold text-blue-700 mt-1">
                 #{invoice?.orderId}
               </div>
-              {isVoid && (
+              {isVoid ? (
                 <div className="text-xs font-extrabold text-rose-600 uppercase tracking-widest mt-1">
                   [ VOID / CANCELLED ]
+                </div>
+              ) : isDraft ? (
+                <div className="text-xs font-extrabold text-sky-600 uppercase tracking-widest mt-1">
+                  [ DRAFT INVOICE ]
+                </div>
+              ) : isPartiallyPaid ? (
+                <div className="text-xs font-extrabold text-amber-600 uppercase tracking-widest mt-1">
+                  [ PARTIALLY PAID ]
+                </div>
+              ) : isFullyUnpaid ? (
+                <div className="text-xs font-extrabold text-rose-600 uppercase tracking-widest mt-1">
+                  [ PAYMENT PENDING / UNPAID ]
+                </div>
+              ) : (
+                <div className="text-xs font-extrabold text-emerald-600 uppercase tracking-widest mt-1">
+                  [ PAID ]
                 </div>
               )}
             </div>
@@ -2687,8 +3678,19 @@ function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onC
             </div>
 
             <div className="flex flex-col">
-              <div className={`px-6 sm:px-8 py-3 flex items-center justify-between text-white ${isVoid ? 'bg-slate-400' : 'bg-blue-900'}`}>
-                <span className="text-xs font-bold uppercase tracking-wider">{isCredit ? 'Amount Due' : 'Amount Paid'}</span>
+              <div className={`px-6 sm:px-8 py-3 flex items-center justify-between text-white ${
+                isVoid ? 'bg-slate-400' : isDraft ? 'bg-sky-700' : isPartiallyPaid ? 'bg-amber-600' : isFullyUnpaid ? 'bg-rose-700' : 'bg-blue-900'
+              }`}>
+                <div>
+                  <span className="text-xs font-bold uppercase tracking-wider block">
+                    {isDraft ? 'Draft Total' : isPartiallyPaid ? 'Partially Paid' : isFullyUnpaid ? 'Amount Due (Unpaid)' : 'Amount Paid'}
+                  </span>
+                  {isPartiallyPaid && (
+                    <span className="text-[10px] opacity-90 block">
+                      Paid: {money(paidAmt)} · Due: {money(dueAmt)}
+                    </span>
+                  )}
+                </div>
                 <span className="text-lg font-black font-mono">{money(invoice?.total)}</span>
               </div>
               <div className="p-6 sm:p-8 space-y-1.5">
@@ -2807,30 +3809,25 @@ function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onC
                 </thead>
                 <tbody className="divide-y divide-slate-200">
                   {(invoice?.items || []).map((item, idx) => {
-                    const rate = Number(item.taxRate) || 0;
-                    const taxableValue = Number(item.total) || (Number(item.qty || 1) * Number(item.price || 0));
-                    const lineTax = (taxableValue * rate) / 100;
-                    const lineAmount = taxableValue + lineTax;
+                    const qty = Number(item.qty) || 1;
+                    const price = Number(item.price) || 0;
+                    const taxRate = Number(item.taxRate) || 0;
+                    const taxable = Math.round(qty * price * 100) / 100;
+                    const tax = Math.round(((taxable * taxRate) / 100) * 100) / 100;
+                    const total = Number(item.total) || Math.round((taxable + tax) * 100) / 100;
+
                     return (
-                      <tr key={idx} className="hover:bg-slate-50/60">
+                      <tr key={idx} className="hover:bg-slate-50/70">
                         <td className="py-2.5 px-3 text-slate-500 font-mono">{idx + 1}</td>
-                        <td className="py-2.5 px-3">
-                          <div className="font-bold text-slate-900">{item.name}</div>
-                          {item.barcode && <div className="text-[10px] text-slate-500 font-mono">Barcode: {item.barcode}</div>}
+                        <td className="py-2.5 px-3 font-semibold text-slate-900">{item.name}</td>
+                        <td className="py-2.5 px-3 text-slate-600 font-mono">{item.hsn || item.hsnCode || '—'}</td>
+                        <td className="py-2.5 px-3 text-right font-mono">{qty} {item.unit || 'pcs'}</td>
+                        <td className="py-2.5 px-3 text-right font-mono">{price.toFixed(2)}</td>
+                        <td className="py-2.5 px-3 text-right font-mono">{taxable.toFixed(2)}</td>
+                        <td className="py-2.5 px-3 text-right font-mono">
+                          {tax.toFixed(2)} {taxRate ? `(${taxRate}%)` : ''}
                         </td>
-                        <td className="py-2.5 px-3 font-mono text-slate-600">{item.hsn || item.hsnCode || '—'}</td>
-                        <td className="py-2.5 px-3 text-right font-mono font-semibold">
-                          {item.qty} {item.unit || ''}
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-mono">{Number(item.price || 0).toFixed(2)}</td>
-                        <td className="py-2.5 px-3 text-right font-mono">{taxableValue.toFixed(2)}</td>
-                        <td className="py-2.5 px-3 text-right font-mono text-slate-600">
-                          {lineTax > 0 ? Number(lineTax).toFixed(2) : '—'}
-                          {rate > 0 && <div className="text-[9.5px] text-slate-400">{rate}%</div>}
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-mono font-bold text-slate-900">
-                          {lineAmount.toFixed(2)}
-                        </td>
+                        <td className="py-2.5 px-3 text-right font-mono font-bold text-slate-900">{total.toFixed(2)}</td>
                       </tr>
                     );
                   })}
@@ -2840,7 +3837,7 @@ function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onC
                     {Object.entries(gstSlabs).map(([rate, vals]) => {
                       const taxAmt = vals.igst || (vals.cgst + vals.sgst);
                       return (
-                        <tr key={rate} className="bg-slate-50 font-bold text-slate-800 border-t border-slate-200">
+                        <tr key={rate} className="border-t border-slate-200 bg-slate-50/50 font-bold text-slate-700">
                           <td colSpan={5} className="py-2 px-3 text-right text-[11px] uppercase tracking-wider">Total @ {rate}%</td>
                           <td className="py-2 px-3 text-right font-mono">{Number(vals.taxable).toFixed(2)}</td>
                           <td className="py-2 px-3 text-right font-mono">{Number(taxAmt).toFixed(2)}</td>
@@ -2918,9 +3915,23 @@ function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onC
                   </div>
                 )}
                 <div className="flex justify-between py-2 border-t-2 border-slate-900 text-sm font-extrabold text-slate-900">
-                  <span>Total Value:</span>
+                  <span>Total Invoice Value:</span>
                   <span className="text-base text-blue-800 font-mono">{money(invoice?.total)}</span>
                 </div>
+                {(paidAmt > 0 || dueAmt > 0) && !isDraft && (
+                  <div className="space-y-1 pt-1 border-t border-slate-100 font-mono text-xs">
+                    <div className="flex justify-between text-emerald-700 font-bold">
+                      <span>Total Amount Paid:</span>
+                      <span>{money(paidAmt)}</span>
+                    </div>
+                    {dueAmt > 0 && (
+                      <div className="flex justify-between text-rose-700 font-bold">
+                        <span>Balance Due:</span>
+                        <span>{money(dueAmt)}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
                 {billing?.showWordsTotal !== false && (
                   <div className="pt-1.5 border-t border-slate-100">
                     <div className="flex items-baseline justify-between gap-2">
@@ -2942,6 +3953,42 @@ function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onC
                 )}
               </div>
             </div>
+
+            {/* Payment Receipts / Installments History */}
+            {invoice?.payments && invoice.payments.length > 0 && (
+              <div className="space-y-1.5 pt-4 border-t border-slate-200">
+                <div className="text-[11px] font-bold text-slate-700 uppercase tracking-wider flex items-center justify-between">
+                  <span>Payment Receipts &amp; Installments History</span>
+                  <span className="text-[10px] text-slate-500 font-normal">
+                    Total Paid: <strong className="font-mono text-slate-800">{money(paidAmt)}</strong>
+                  </span>
+                </div>
+                <div className="overflow-x-auto rounded-xl border border-slate-200">
+                  <table className="w-full text-left text-[11px] border-collapse">
+                    <thead>
+                      <tr className="bg-slate-50 border-b border-slate-200 font-bold text-slate-600 text-[10px] uppercase">
+                        <th className="py-1.5 px-3">Date &amp; Time</th>
+                        <th className="py-1.5 px-3">Payment Mode</th>
+                        <th className="py-1.5 px-3">Reference / UTR</th>
+                        <th className="py-1.5 px-3">Remarks / Cashier</th>
+                        <th className="py-1.5 px-3 text-right">Amount Paid (₹)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {invoice.payments.map((p, idx) => (
+                        <tr key={p.id || idx}>
+                          <td className="py-1.5 px-3 whitespace-nowrap text-slate-600">{fmtDateTime(p.paidAt)}</td>
+                          <td className="py-1.5 px-3 font-semibold text-slate-800">{p.paymentMethod || 'Cash'}</td>
+                          <td className="py-1.5 px-3 font-mono text-slate-600">{p.paymentRef || '—'}</td>
+                          <td className="py-1.5 px-3 text-slate-500">{p.notes || p.receivedBy || '—'}</td>
+                          <td className="py-1.5 px-3 text-right font-mono font-bold text-emerald-700">{money(p.amount)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
 
             {/* HSN/SAC-wise Tax Summary — GST-invoice-standard breakdown table */}
             {billing?.showGstBreakup !== false && hsnRows.length > 0 && (
@@ -3096,6 +4143,14 @@ function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onC
             <div className="text-[13px] font-bold border-t border-dashed border-black pt-1">
               TOTAL: {money(invoice?.total)}
             </div>
+            {paidAmt > 0 && (
+              <div className="text-[11px] text-black">PAID: {money(paidAmt)}</div>
+            )}
+            {dueAmt > 0 && (
+              <div className="text-[11.5px] font-bold text-black border-t border-dashed border-black pt-0.5">
+                BALANCE DUE: {money(dueAmt)}
+              </div>
+            )}
           </div>
           <div className="text-center text-[10px] mt-3 border-t border-dashed border-black pt-2">
             {billing?.footerText || 'Thank you, visit again!'}
@@ -3111,7 +4166,7 @@ function QuotationDocumentModal({ quotation, settings, tenant, onClose, onConver
   if (!quotation) return null;
   const company = quotation?.company || settings?.company || { name: tenant?.name || 'Selsolve Store' };
   const billing = quotation?.billing || settings?.billing || {};
-  const isConverted = quotation?.status === 'CONVERTED';
+  const isConverted = quotation?.status === 'CONVERTED' || !!quotation?.convertedOrderId;
 
   // GST slabs
   const gstSlabs = {};

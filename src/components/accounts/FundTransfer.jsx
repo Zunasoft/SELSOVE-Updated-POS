@@ -67,7 +67,7 @@ export default function FundTransfer({ showToast }) {
 
   const submit = async (e) => {
     e?.preventDefault();
-    if (error) return;
+    if (saving || error) return;
     setSaving(true);
     try {
       const res = await api.post('/accounts/transfers', { ...form, amount, charges });

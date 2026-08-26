@@ -412,6 +412,7 @@ function LedgerModal({ account, onClose, showToast, onChanged }) {
   }, [account]);
 
   const remove = async () => {
+    if (!window.confirm(`Delete ledger account "${account.code} · ${account.name}"? This cannot be undone.`)) return;
     try {
       const res = await api.del(`/accounts/chart/${account.id}`);
       showToast(res.message);

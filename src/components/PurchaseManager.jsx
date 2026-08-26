@@ -400,7 +400,7 @@ function PayVendorModal({ vendor, accounts, showToast, onClose, onPaid }) {
 
   const submit = async (e) => {
     e.preventDefault();
-    if (!canSubmit) return;
+    if (saving || !canSubmit) return;
     setSaving(true);
     try {
       const res = await api.post(`/vendors/${vendor.id}/pay`, {
@@ -700,14 +700,27 @@ function NewPurchaseModal({ open, onClose, vendors, products, accounts, showToas
       return;
     }
     const p = products.find((pr) => pr.id === productId);
-    setLine(idx, {
-      productId,
-      name: p?.name || '',
-      rate: p?.purchasePrice ?? '',
-      taxRate: p?.taxRate ?? 0,
-      unit: p?.unit || 'pcs',
-      hsn: p?.hsn || '',
-      isNew: false
+    setLines((ls) => {
+      const next = ls.map((l, i) =>
+        i === idx
+          ? {
+              ...l,
+              productId,
+              name: p?.name || '',
+              rate: p?.purchasePrice ?? '',
+              taxRate: p?.taxRate ?? 0,
+              unit: p?.unit || 'pcs',
+              hsn: p?.hsn || '',
+              isNew: false
+            }
+          : l
+      );
+
+      const hasEmptyBelow = next.some((l, i) => i > idx && !l.productId && !l.name.trim());
+      if (!hasEmptyBelow) {
+        next.push(blankLine());
+      }
+      return next;
     });
   };
 
@@ -726,7 +739,7 @@ function NewPurchaseModal({ open, onClose, vendors, products, accounts, showToas
 
   const submit = async (e) => {
     e.preventDefault();
-    if (!canSubmit) return;
+    if (saving || !canSubmit) return;
     setSaving(true);
     try {
       const res = await api.post('/purchases', {

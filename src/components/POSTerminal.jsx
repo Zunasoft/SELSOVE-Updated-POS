@@ -4,7 +4,9 @@ import {
   Search, ShoppingCart, Trash2, Plus, Minus, Printer, Scale, Barcode,
   QrCode, PauseCircle, X, Receipt, User, UserPlus, Lock, Unlock, ArrowDownToLine,
   ArrowUpFromLine, LayoutGrid, Star, RotateCcw, Wallet, CheckCircle2,
-  Flame, ArrowUpDown, Clock, History, Zap, FileCheck, CreditCard
+  Flame, ArrowUpDown, Clock, History, Zap, FileCheck, CreditCard,
+  Coins, Building2, Sparkles, PlusCircle, MinusCircle, AlertCircle, CheckCheck,
+  TrendingUp, TrendingDown, Filter, ArrowRight, Users
 } from 'lucide-react';
 
 import api, { money, fmtDateTime, fmtDate, API_BASE } from '../lib/api';
@@ -14,7 +16,7 @@ import {
 } from '../lib/ui';
 import { getCategoryTheme } from '../lib/categoryTheme';
 
-const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Credit (Udhar)'];
+const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Credit (Udhar)', 'Partial Payment'];
 const DISCOUNT_PRESETS = [0, 5, 10, 15, 20];
 
 export function getProductImageUrl(url, name = '', barcode = '') {
@@ -531,7 +533,7 @@ export function resolveProductPricing(product, customer, priceSheets = [], overr
   let discountPercent = 0;
   let ruleSource = null;
 
-  // 1. Direct customer custom price override (REQ-02) — skipped when a sheet is picked manually for this bill
+  // 1. Direct customer custom price override — skipped when a sheet is picked manually for this bill
   if (!overrideSheetId && customer?.customPrices && customer.customPrices[product.id] !== undefined) {
     const custPrice = Number(customer.customPrices[product.id]);
     if (Number.isFinite(custPrice) && custPrice >= 0) {
@@ -543,7 +545,7 @@ export function resolveProductPricing(product, customer, priceSheets = [], overr
     }
   }
 
-  // 2. Manually-picked bill sheet > Customer's assigned Price Sheet > Customer Group Price Sheet (REQ-01 & REQ-02)
+  // 2. Manually-picked bill sheet > Customer's assigned Price Sheet > Customer Group Price Sheet
   const targetSheetId = overrideSheetId || customer?.priceSheetId;
   const targetGroup = overrideSheetId ? null : customer?.group;
   const activeSheet = priceSheets.find(
@@ -620,6 +622,9 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   const [showCheckout, setShowCheckout] = useState(false);
   const [paymentMode, setPaymentMode] = useState('Cash');
   const [cashTendered, setCashTendered] = useState('');
+  const [partialPaidAmount, setPartialPaidAmount] = useState('');
+  const [partialPaymentMethod, setPartialPaymentMethod] = useState('Cash');
+  const [paymentRef, setPaymentRef] = useState('');
   const [redeemPoints, setRedeemPoints] = useState(0);
   const [redeemAdvance, setRedeemAdvance] = useState(0);
   const [checkingOut, setCheckingOut] = useState(false);
@@ -674,7 +679,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
     load(true);
   }, [load]);
 
-  // Customer-Specific Pricing & Price Sheet Auto-Application (REQ-01 & REQ-02)
+  // Customer-Specific Pricing & Price Sheet Auto-Application
   useEffect(() => {
     const cust = customers.find((c) => c.id === customerId);
     if (!cust && !priceSheetId) return;
@@ -795,10 +800,42 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
   const changeDue = Math.max(0, (parseFloat(cashTendered) || 0) - payable);
 
+  // Per-category product counts for the category tab bar — was previously a
+  // full products.filter() re-run for every category on every render (cart
+  // edits, search keystrokes, etc.), i.e. O(categories × products) each time
+  // instead of once per actual products/categories change.
+  const categoryProductCounts = useMemo(() => {
+    const counts = new Map();
+    products.forEach((p) => {
+      const ids = p.categoryIds || [p.categoryId];
+      ids.forEach((id) => {
+        if (!id) return;
+        counts.set(id, (counts.get(id) || 0) + 1);
+      });
+    });
+    return counts;
+  }, [products]);
+
+  // O(1) product-by-id lookup for the cart list render below, which previously
+  // ran a full products.find() per cart line on every render — O(cart size ×
+  // catalog size) each time, for a value that only actually changes when the
+  // catalog itself changes.
+  const productsById = useMemo(() => {
+    const map = new Map();
+    products.forEach((p) => map.set(p.id, p));
+    return map;
+  }, [products]);
+
   /* ------------------------- adding items ------------------------- */
 
   const addToCart = useCallback(
     (product, qty = 1) => {
+      if (session?.status !== 'open') {
+        setShowSession(true);
+        showToast('Cash Counter is closed. Please open drawer to start billing.', 'error');
+        return;
+      }
+
       const cust = customers.find((c) => c.id === customerId);
       const pricing = resolveProductPricing(product, cust, priceSheets, priceSheetId);
       const options = getProductUnitOptions({ ...product, price: pricing.price });
@@ -847,7 +884,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         ];
       });
     },
-    [customerId, customers, priceSheets, priceSheetId, showToast]
+    [customerId, customers, priceSheets, priceSheetId, showToast, session]
   );
 
   const removeFromCart = useCallback((product, qty = 1) => {
@@ -884,6 +921,12 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
     async (code) => {
       const trimmed = code.trim();
       if (!trimmed) return;
+
+      if (session?.status !== 'open') {
+        setShowSession(true);
+        showToast('Cash Counter is closed. Please open drawer to start billing.', 'error');
+        return;
+      }
 
       const prefix = settings?.hardware?.weighingScale?.embeddedBarcodePrefix || '21';
 
@@ -933,7 +976,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         showToast(`No product matches barcode ${trimmed}`, 'error');
       }
     },
-    [products, addToCart, showToast, settings]
+    [products, addToCart, showToast, settings, session]
   );
 
   // Global keyboard-wedge capture: a scanner types fast and ends with Enter.
@@ -1104,6 +1147,11 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   /* ------------------------- bill actions ------------------------- */
 
   const holdBill = async () => {
+    if (session?.status !== 'open') {
+      setShowSession(true);
+      showToast('Cash Counter is closed. Please open drawer to start billing.', 'error');
+      return;
+    }
     if (cart.length === 0) return;
     try {
       const res = await api.post('/bills/hold', {
@@ -1123,6 +1171,11 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   };
 
   const saveAsQuotation = async () => {
+    if (session?.status !== 'open') {
+      setShowSession(true);
+      showToast('Cash Counter is closed. Please open drawer to start billing.', 'error');
+      return;
+    }
     if (cart.length === 0) return;
     try {
       const res = await api.post('/quotations', {
@@ -1180,12 +1233,23 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
     // requests each create their own order, deduct stock and post accounting
     // entries independently, since the backend has no dedup/idempotency check.
     if (checkingOut) return;
-    if (paymentMode === 'Credit (Udhar)' && !customer) {
-      showToast('Select a customer for a credit sale.', 'error');
+
+    if ((paymentMode === 'Credit (Udhar)' || paymentMode === 'Partial Payment') && !customer) {
+      showToast('Select a customer for credit / partial payment sales.', 'error');
       return;
     }
-    if (customer?.creditLimit > 0 && paymentMode === 'Credit (Udhar)') {
-      const projected = (customer.outstanding || 0) + payable;
+
+    const isPartial = paymentMode === 'Partial Payment';
+    const partialPaid = isPartial ? Math.min(payable, Math.max(0, Number(partialPaidAmount) || 0)) : 0;
+    if (isPartial && partialPaid <= 0) {
+      showToast('Please enter an upfront partial amount greater than zero.', 'error');
+      return;
+    }
+
+    const creditPortion = isPartial ? Math.max(0, payable - partialPaid) : (paymentMode === 'Credit (Udhar)' ? payable : 0);
+
+    if (customer?.creditLimit > 0 && creditPortion > 0) {
+      const projected = (customer.outstanding || 0) + creditPortion;
       if (projected > customer.creditLimit) {
         showToast(
           `Warning: ${customer.name} will exceed their ${money(customer.creditLimit)} credit limit (${money(projected)}).`,
@@ -1196,7 +1260,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
     setCheckingOut(true);
     try {
-      const actualPaymentMode = payable === 0 && advanceCredit.applied > 0 ? 'Advance / Store Credit' : paymentMode;
+      const actualPaymentMode = payable === 0 && advanceCredit.applied > 0 ? 'Advance / Store Credit' : (isPartial ? partialPaymentMethod : paymentMode);
       const res = await api.post('/orders', {
         customerId: customer?.id || null,
         customerName: customer?.name || 'Walk-in Customer',
@@ -1207,6 +1271,9 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         customerState: customer?.state || '',
         customerStateCode: customer?.stateCode || '',
         paymentMethod: actualPaymentMode,
+        paymentRef: paymentRef.trim() || '',
+        status: isPartial ? 'PARTIALLY_PAID' : undefined,
+        paidAmount: isPartial ? partialPaid : undefined,
         subtotal: totals.subtotal,
         tax: totals.tax,
         discount: totals.discountAmount,
@@ -1223,6 +1290,8 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
       setShowCheckout(false);
       clearCart();
       setCashTendered('');
+      setPartialPaidAmount('');
+      setPaymentRef('');
       setRedeemPoints(0);
       setRedeemAdvance(0);
 
@@ -1354,9 +1423,45 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   const sessionOpen = session?.status === 'open';
 
   return (
-    <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-10">
-      {/* ----------------------------- Catalogue (70%) ----------------------------- */}
-      <div className="space-y-3 lg:col-span-7">
+    <div className="relative min-h-[80vh] w-full rounded-2xl">
+      {/* Drawer Closed / Shift Ended Lock Popup inside Billing Section */}
+      {!sessionOpen && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-slate-950/70 backdrop-blur-md p-4 sm:p-6 rounded-2xl animate-in fade-in duration-200">
+          <div className="w-full max-w-md rounded-3xl bg-[color:var(--bg-surface)] border border-[color:var(--border)] p-6 sm:p-8 text-center shadow-2xl space-y-5">
+            <div className="mx-auto flex h-16 w-16 sm:h-20 sm:w-20 items-center justify-center rounded-3xl bg-amber-500/15 border border-amber-500/30 text-amber-600 dark:text-amber-400 shadow-inner">
+              <Lock className="h-8 w-8 sm:h-10 sm:w-10" />
+            </div>
+
+            <div className="space-y-2">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300">
+                <span className="h-2 w-2 rounded-full bg-amber-500 animate-ping" />
+                Shift Inactive · Counter Closed
+              </div>
+              <h3 className="text-xl sm:text-2xl font-black text-[color:var(--text-primary)] tracking-tight">
+                Cash Counter is Closed
+              </h3>
+              <p className="text-xs sm:text-sm text-[color:var(--text-muted)] max-w-sm mx-auto leading-relaxed">
+                Billing and checkout are locked while the counter shift is closed. Please open the cash drawer and record your opening cash float to begin billing.
+              </p>
+            </div>
+
+            <div className="pt-2">
+              <button
+                type="button"
+                onClick={() => setShowSession(true)}
+                className="w-full flex items-center justify-center gap-2.5 py-3.5 px-6 rounded-2xl bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-bold text-sm sm:text-base shadow-xl shadow-indigo-500/30 hover:from-indigo-700 hover:to-purple-700 active:scale-[0.99] transition-all cursor-pointer"
+              >
+                <Unlock className="h-5 w-5" />
+                Open Cash Drawer to Start Billing
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-10">
+        {/* ----------------------------- Catalogue (70%) ----------------------------- */}
+        <div className="space-y-3 lg:col-span-7">
         <Panel className="flex flex-wrap items-center gap-2 relative">
           <div className="relative min-w-[220px] flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[color:var(--text-muted)]" />
@@ -1376,7 +1481,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
               }}
             />
 
-            {/* Search with Dropdown selection (REQ-12) */}
+            {/* Search with Dropdown selection */}
             {searchQuery.trim().length > 0 && (
               <div className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-2xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] p-2 shadow-2xl backdrop-blur-md max-h-72 overflow-y-auto">
                 <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[color:var(--text-muted)] flex justify-between items-center">
@@ -1539,7 +1644,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
           </button>
 
           {categories.map((cat) => {
-            const count = products.filter((p) => (p.categoryIds || [p.categoryId]).includes(cat.id)).length;
+            const count = categoryProductCounts.get(cat.id) || 0;
             const catTheme = getCategoryTheme(cat);
             const isSelected = selectedCategory === cat.id;
             return (
@@ -1570,7 +1675,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
             />
           </Panel>
         ) : (
-          <div className="grid max-h-[calc(100vh-18rem)] grid-cols-2 gap-2.5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-4 2xl:grid-cols-4 overflow-y-auto pr-1 pb-12">
+          <div className="grid max-h-[calc(100vh+11.5rem)] grid-cols-2 gap-2.5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-4 2xl:grid-cols-4 overflow-y-auto pr-1 pb-2">
             {visibleProductCards.map(({ product: p, stockInfo, out, isLow, pricing, isRecent, imgUrl, autoVisual, catTheme }) => {
               return (
                 <motion.button
@@ -1822,7 +1927,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
               />
             ) : (
               cart.map((item) => {
-                const prod = products.find((p) => p.id === item.id) || item;
+                const prod = productsById.get(item.id) || item;
                 const unitOpts = getProductUnitOptions(prod);
                 const stockInfo = getProductRemainingStock(prod, cart, products);
                 const imgUrl = getProductImageUrl(prod?.imageUrl || item?.imageUrl, item.name || prod?.name, item.barcode || prod?.barcode);
@@ -1991,7 +2096,20 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
             <Button variant="secondary" icon={FileCheck} onClick={saveAsQuotation} disabled={cart.length === 0} title="Save items as Quotation" className="px-2 text-xs">
               Quote
             </Button>
-            <Button variant="primary" size="lg" onClick={() => setShowCheckout(true)} disabled={cart.length === 0} className="px-2">
+            <Button
+              variant="primary"
+              size="lg"
+              onClick={() => {
+                if (session?.status !== 'open') {
+                  setShowSession(true);
+                  showToast('Cash Counter is closed. Please open drawer to start billing.', 'error');
+                  return;
+                }
+                setShowCheckout(true);
+              }}
+              disabled={cart.length === 0}
+              className="px-2"
+            >
               Pay
             </Button>
           </div>
@@ -2360,7 +2478,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                 <button
                   key={mode}
                   type="button"
-                  onClick={() => setPaymentMode(mode)}
+                  onClick={() => { setPaymentMode(mode); setPaymentRef(''); }}
                   className={`rounded-xl border px-3 py-2.5 text-[12px] font-bold transition-all ${
                     paymentMode === mode
                       ? 'border-indigo-600 bg-indigo-600 text-white shadow-sm'
@@ -2428,6 +2546,74 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
             </div>
           )}
 
+          {paymentMode === 'Partial Payment' && (
+            <div className="p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 space-y-3">
+              <div className="flex items-center justify-between text-xs font-bold text-amber-900 dark:text-amber-300">
+                <span className="flex items-center gap-1.5">
+                  <CreditCard className="w-4 h-4 text-amber-600" />
+                  Partial / Advance Split
+                </span>
+                <span>Payable: {money(payable)}</span>
+              </div>
+
+              {!customer && (
+                <div className="p-2 rounded-xl bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-300 text-[11px] font-semibold">
+                  ⚠️ Select a registered customer above to record the remaining credit / udhar balance.
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Amount Paid Upfront (₹) *">
+                  <Input
+                    type="number"
+                    min="0.01"
+                    max={payable}
+                    step="0.01"
+                    value={partialPaidAmount}
+                    onChange={(e) => setPartialPaidAmount(e.target.value)}
+                    placeholder={String(Math.round(payable / 2))}
+                    className="font-bold font-mono text-sm bg-white dark:bg-slate-900"
+                    autoFocus
+                  />
+                </Field>
+
+                <Field label="Paid Upfront Mode">
+                  <Select value={partialPaymentMethod} onChange={(e) => { setPartialPaymentMethod(e.target.value); setPaymentRef(''); }}>
+                    <option value="Cash">Cash (Drawer)</option>
+                    <option value="UPI">UPI / QR</option>
+                    <option value="Card">Card</option>
+                    <option value="Net Banking">Net Banking</option>
+                    <option value="Cheque">Cheque</option>
+                  </Select>
+                </Field>
+              </div>
+
+              {['UPI', 'Card', 'Net Banking', 'Cheque'].includes(partialPaymentMethod) && (
+                <Field label="Transaction Ref / UTR">
+                  <Input
+                    value={paymentRef}
+                    onChange={(e) => setPaymentRef(e.target.value)}
+                    placeholder="e.g. UTR / Ref Number"
+                    className="bg-white dark:bg-slate-900 text-xs"
+                  />
+                </Field>
+              )}
+
+              <div className="rounded-xl p-2.5 bg-white/80 dark:bg-slate-900/80 border border-amber-200 dark:border-amber-800 text-xs space-y-1">
+                <div className="flex justify-between text-[11px] text-[color:var(--text-secondary)]">
+                  <span>Paid Upfront Now:</span>
+                  <span className="font-bold font-mono text-emerald-600 dark:text-emerald-400">
+                    {money(Number(partialPaidAmount) || 0)}
+                  </span>
+                </div>
+                <div className="flex justify-between font-bold text-amber-800 dark:text-amber-300 border-t border-amber-100 dark:border-amber-900/60 pt-1">
+                  <span>Added to Customer Udhar (Due):</span>
+                  <span className="font-mono">{money(Math.max(0, payable - (Number(partialPaidAmount) || 0)))}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
           <Field label="Bill note">
             <Textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional note printed on the bill" />
           </Field>
@@ -2474,6 +2660,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
       <SessionModal
         open={showSession}
         session={session}
+        customers={customers}
         vendors={vendors}
         onClose={() => setShowSession(false)}
         showToast={showToast}
@@ -2506,6 +2693,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         priceSheets={priceSheets}
         showToast={showToast}
       />
+    </div>
     </div>
   );
 }
@@ -2705,17 +2893,30 @@ const EXPENSE_CATEGORIES = [
 ];
 
 const CURRENCY_DENOMINATIONS = [
-  { key: '2000', label: '₹2,000', value: 2000 },
-  { key: '500', label: '₹500', value: 500 },
-  { key: '200', label: '₹200', value: 200 },
-  { key: '100', label: '₹100', value: 100 },
-  { key: '50', label: '₹50', value: 50 },
-  { key: '20', label: '₹20', value: 20 },
-  { key: '10', label: '₹10', value: 10 },
-  { key: 'coins', label: 'Coins', value: 1 }
+  { key: '2000', label: '₹2,000', value: 2000, color: 'text-pink-600 dark:text-pink-400 bg-pink-500/10 border-pink-300 dark:border-pink-800' },
+  { key: '500', label: '₹500', value: 500, color: 'text-stone-700 dark:text-stone-300 bg-stone-500/10 border-stone-300 dark:border-stone-700' },
+  { key: '200', label: '₹200', value: 200, color: 'text-amber-600 dark:text-amber-400 bg-amber-500/10 border-amber-300 dark:border-amber-800' },
+  { key: '100', label: '₹100', value: 100, color: 'text-indigo-600 dark:text-indigo-400 bg-indigo-500/10 border-indigo-300 dark:border-indigo-800' },
+  { key: '50', label: '₹50', value: 50, color: 'text-cyan-600 dark:text-cyan-400 bg-cyan-500/10 border-cyan-300 dark:border-cyan-800' },
+  { key: '20', label: '₹20', value: 20, color: 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 border-emerald-300 dark:border-emerald-800' },
+  { key: '10', label: '₹10', value: 10, color: 'text-orange-600 dark:text-orange-400 bg-orange-500/10 border-orange-300 dark:border-orange-800' },
+  { key: 'coins', label: 'Coins', value: 1, color: 'text-slate-600 dark:text-slate-400 bg-slate-500/10 border-slate-300 dark:border-slate-700' }
 ];
 
-function SessionModal({ open, session, vendors = [], onClose, showToast, onChanged }) {
+const PRESET_AMOUNTS = [100, 200, 500, 1000, 2000, 5000];
+
+const EXPENSE_CATEGORY_ICONS = {
+  'Tea & Refreshments': '☕',
+  'Logistics & Delivery': '🚚',
+  'Repairs & Maintenance': '🛠️',
+  'Office Supplies': '📑',
+  'Staff Meal & Welfare': '🍔',
+  'Utilities & Bills': '💡',
+  'Cleaning & Sanitation': '🧹',
+  'Miscellaneous': '🏷️'
+};
+
+function SessionModal({ open, session, customers = [], vendors = [], onClose, showToast, onChanged }) {
   const [openingMode, setOpeningMode] = useState('DENOMINATIONS'); // 'DENOMINATIONS' or 'LUMPSUM'
   const [openingCash, setOpeningCash] = useState('');
   const [denominations, setDenominations] = useState({
@@ -2723,15 +2924,19 @@ function SessionModal({ open, session, vendors = [], onClose, showToast, onChang
   });
 
   const [activeTab, setActiveTab] = useState('CASH_IN'); // 'CASH_IN' | 'CASH_OUT' | 'EXPENSE' | 'CLOSE' | 'HISTORY'
-  const [cashInKind, setCashInKind] = useState('GENERAL'); // 'GENERAL' | 'VENDOR_REPAY'
+  const [historySearch, setHistorySearch] = useState('');
+  const [historyFilter, setHistoryFilter] = useState('ALL'); // 'ALL' | 'IN' | 'OUT' | 'EXPENSE' | 'CUSTOMER' | 'VENDOR'
   const [entry, setEntry] = useState({
     type: 'IN',
     amount: '',
-    reason: CASH_REASONS[0],
-    person: '',
+    partyType: 'OTHER', // 'CUSTOMER' | 'VENDOR' | 'OTHER'
+    customerId: '',
     vendorId: '',
+    person: '',
+    phone: '',
+    address: '',
     purpose: '',
-    classification: 'OFFICIAL', // 'OFFICIAL' | 'UNOFFICIAL' | 'VENDOR_REPAY'
+    classification: 'OFFICIAL', // 'OFFICIAL' | 'UNOFFICIAL'
     expenseCategory: EXPENSE_CATEGORIES[0]
   });
 
@@ -2744,7 +2949,32 @@ function SessionModal({ open, session, vendors = [], onClose, showToast, onChang
 
   const isOpen = session?.status === 'open';
 
-  // Compute opening cash sum from denominations (REQ-03)
+  const resetClosingDenominations = () => {
+    setClosingDenominations({
+      '2000': 0, '500': 0, '200': 0, '100': 0, '50': 0, '20': 0, '10': 0, coins: 0
+    });
+    setCountedCash('');
+  };
+
+  const resetOpeningDenominations = () => {
+    setDenominations({
+      '2000': 0, '500': 0, '200': 0, '100': 0, '50': 0, '20': 0, '10': 0, coins: 0
+    });
+    setOpeningCash('');
+  };
+
+  // Auto-clear previous calculation and notes inputs whenever modal opens or session updates
+  useEffect(() => {
+    if (open) {
+      resetClosingDenominations();
+      resetOpeningDenominations();
+      setActiveTab('CASH_IN');
+      setHistorySearch('');
+      setHistoryFilter('ALL');
+    }
+  }, [open, session?.id, session?.status]);
+
+  // Compute opening cash sum from denominations
   const denominationTotal = useMemo(() => {
     return CURRENCY_DENOMINATIONS.reduce((sum, d) => {
       const count = Number(denominations[d.key]) || 0;
@@ -2752,7 +2982,7 @@ function SessionModal({ open, session, vendors = [], onClose, showToast, onChang
     }, 0);
   }, [denominations]);
 
-  // Compute closing cash sum from denominations (REQ-03)
+  // Compute closing cash sum from denominations
   const closingDenominationTotal = useMemo(() => {
     return CURRENCY_DENOMINATIONS.reduce((sum, d) => {
       const count = Number(closingDenominations[d.key]) || 0;
@@ -2794,32 +3024,41 @@ function SessionModal({ open, session, vendors = [], onClose, showToast, onChang
       return;
     }
 
-    const isRepay = activeTab === 'CASH_IN' && cashInKind === 'VENDOR_REPAY';
+    if (!entry.person?.trim()) {
+      showToast('Please enter or select a name / party.', 'error');
+      return;
+    }
+
+    if (entry.partyType === 'OTHER' && !entry.phone?.trim()) {
+      showToast('Phone number is required.', 'error');
+      return;
+    }
+
+    const isCust = entry.partyType === 'CUSTOMER';
+    const isVend = entry.partyType === 'VENDOR';
     const finalClassification =
       activeTab === 'EXPENSE'
         ? 'EXPENSE'
-        : isRepay
-        ? 'VENDOR_REPAY'
         : entry.classification;
 
     await act(() =>
       api.post('/session/cash-entry', {
         type: activeTab === 'CASH_OUT' || activeTab === 'EXPENSE' ? 'OUT' : 'IN',
         amount: Number(entry.amount),
-        reason:
-          activeTab === 'EXPENSE'
-            ? `Internal Expense: ${entry.expenseCategory}`
-            : isRepay
-            ? `Vendor Debt Repayment: ${entry.person || 'Vendor'}`
-            : entry.purpose || entry.reason,
+        partyType: entry.partyType,
+        customerId: isCust ? entry.customerId : undefined,
+        vendorId: isVend ? entry.vendorId : undefined,
         person: entry.person,
-        vendorId: isRepay ? entry.vendorId : undefined,
+        phone: entry.phone,
+        address: entry.address,
         purpose:
           activeTab === 'EXPENSE'
             ? entry.purpose || entry.expenseCategory
-            : isRepay
-            ? entry.purpose || `Vendor Debt Repayment (${entry.person || 'Vendor'})`
-            : entry.purpose || entry.reason,
+            : entry.purpose || (isCust ? `Customer ${activeTab === 'CASH_IN' ? 'Receipt' : 'Refund'} (${entry.person || 'Customer'})` : isVend ? `Vendor ${activeTab === 'CASH_IN' ? 'Repayment/Refund' : 'Payment'} (${entry.person || 'Vendor'})` : `Cash ${activeTab === 'CASH_IN' ? 'In' : 'Out'}`),
+        reason:
+          activeTab === 'EXPENSE'
+            ? `Internal Expense: ${entry.expenseCategory}`
+            : entry.purpose || (isCust ? `Customer ${activeTab === 'CASH_IN' ? 'Receipt' : 'Refund'}` : isVend ? `Vendor ${activeTab === 'CASH_IN' ? 'Repayment' : 'Payment'}` : `Cash ${activeTab === 'CASH_IN' ? 'In' : 'Out'}`),
         classification: finalClassification,
         expenseCategory: activeTab === 'EXPENSE' ? entry.expenseCategory : undefined
       })
@@ -2828,9 +3067,12 @@ function SessionModal({ open, session, vendors = [], onClose, showToast, onChang
     setEntry({
       type: 'IN',
       amount: '',
-      reason: CASH_REASONS[0],
-      person: '',
+      partyType: 'OTHER',
+      customerId: '',
       vendorId: '',
+      person: '',
+      phone: '',
+      address: '',
       purpose: '',
       classification: 'OFFICIAL',
       expenseCategory: EXPENSE_CATEGORIES[0]
@@ -2851,57 +3093,150 @@ function SessionModal({ open, session, vendors = [], onClose, showToast, onChang
   const cashIn = (session?.cashEntries || []).filter((e) => e.type === 'IN').reduce((s, e) => s + e.amount, 0);
   const cashOut = (session?.cashEntries || []).filter((e) => e.type === 'OUT').reduce((s, e) => s + e.amount, 0);
 
+  const cashInEntries = useMemo(() => {
+    return (session?.cashEntries || []).filter((e) => e.type === 'IN').reverse();
+  }, [session?.cashEntries]);
+
+  const cashOutEntries = useMemo(() => {
+    return (session?.cashEntries || []).filter((e) => e.type === 'OUT' && e.classification !== 'EXPENSE').reverse();
+  }, [session?.cashEntries]);
+
+  const expenseEntries = useMemo(() => {
+    return (session?.cashEntries || []).filter((e) => e.classification === 'EXPENSE' || (e.expenseCategory && e.type === 'OUT')).reverse();
+  }, [session?.cashEntries]);
+
+  const cashOutOnly = useMemo(() => {
+    return cashOutEntries.reduce((s, e) => s + e.amount, 0);
+  }, [cashOutEntries]);
+
+  const expenseTotal = useMemo(() => {
+    return expenseEntries.reduce((s, e) => s + e.amount, 0);
+  }, [expenseEntries]);
+
   const effectiveCounted = closingMode === 'DENOMINATIONS' ? closingDenominationTotal : (countedCash !== '' ? Number(countedCash) : session?.currentCash || 0);
   const variance = effectiveCounted - (session?.currentCash || 0);
+
+  const filteredHistory = useMemo(() => {
+    let entries = [...(session?.cashEntries || [])].reverse();
+    if (historyFilter === 'IN') {
+      entries = entries.filter((e) => e.type === 'IN');
+    } else if (historyFilter === 'OUT') {
+      entries = entries.filter((e) => e.type === 'OUT' && e.classification !== 'EXPENSE');
+    } else if (historyFilter === 'EXPENSE') {
+      entries = entries.filter((e) => e.classification === 'EXPENSE' || (e.expenseCategory && e.type === 'OUT'));
+    } else if (historyFilter === 'CUSTOMER') {
+      entries = entries.filter((e) => e.customerId || e.partyType === 'CUSTOMER');
+    } else if (historyFilter === 'VENDOR') {
+      entries = entries.filter((e) => e.vendorId || e.partyType === 'VENDOR' || e.classification === 'VENDOR_REPAY');
+    }
+
+    if (!historySearch.trim()) return entries;
+    const q = historySearch.toLowerCase();
+    return entries.filter((e) =>
+      (e.person && e.person.toLowerCase().includes(q)) ||
+      (e.reason && e.reason.toLowerCase().includes(q)) ||
+      (e.classification && e.classification.toLowerCase().includes(q)) ||
+      (e.type && e.type.toLowerCase().includes(q)) ||
+      (e.partyType && e.partyType.toLowerCase().includes(q)) ||
+      (e.expenseCategory && e.expenseCategory.toLowerCase().includes(q))
+    );
+  }, [session?.cashEntries, historyFilter, historySearch]);
+
+  const addAmountPreset = (amt) => {
+    const cur = Number(entry.amount) || 0;
+    setEntry((prev) => ({ ...prev, amount: String(cur + amt) }));
+  };
 
   return (
     <Modal
       open={open}
       onClose={onClose}
-      title={isOpen ? 'Counter Cash & Drawer Management' : 'Open Counter Cash Float'}
-      subtitle={
-        isOpen
-          ? `Opened ${fmtDateTime(session.openedAt)} by ${session.openedBy} · Current Drawer Balance: ${money(session.currentCash, { decimals: false })}`
-          : 'Record opening cash denominations and float to start shift.'
+      title={
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 text-white shadow-md">
+            <Wallet className="h-5 w-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-base font-bold text-[color:var(--text-primary)]">
+                {isOpen ? 'Cash Counter' : 'Open Cash Counter Float'}
+              </span>
+              <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                isOpen
+                  ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
+                  : 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
+              }`}>
+                <span className={`h-2 w-2 rounded-full ${isOpen ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+                {isOpen ? 'Live Shift Active' : 'Counter Closed'}
+              </span>
+            </div>
+            <p className="text-[11px] text-[color:var(--text-secondary)]">
+              {isOpen
+                ? `Shift opened at ${fmtDateTime(session.openedAt)} by ${session.openedBy || 'Current Cashier'}`
+                : 'Count note denominations and record initial drawer float to begin sales shift'}
+            </p>
+          </div>
+        </div>
       }
-      icon={Wallet}
-      size="xl"
-      footer={<Button onClick={onClose}>Close</Button>}
+      size="fullscreen"
+      footer={
+        <div className="flex w-full items-center justify-between">
+          <div className="text-xs text-[color:var(--text-muted)] flex items-center gap-2">
+            <span>Esc to close</span>
+            {isOpen && (
+              <>
+                <span>•</span>
+                <span className="font-semibold text-emerald-600 dark:text-emerald-400">
+                  Live Drawer: {money(session.currentCash, { decimals: false })}
+                </span>
+              </>
+            )}
+          </div>
+          <Button variant="subtle" onClick={onClose}>
+            Close Drawer
+          </Button>
+        </div>
+      }
     >
       {!isOpen ? (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between border-b pb-2.5" style={{ borderColor: 'var(--border-subtle)' }}>
+        <div className="space-y-5 p-1 max-w-5xl mx-auto w-full">
+          {/* Header Card for Shift Opening */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-2xl bg-gradient-to-r from-indigo-500/10 via-purple-500/10 to-pink-500/10 border border-indigo-500/20">
             <div>
-              <span className="text-xs font-bold text-[color:var(--text-primary)]">Opening Cash Marking</span>
-              <p className="text-[11px] text-[color:var(--text-muted)]">Count notes by denomination or enter lumpsum opening cash</p>
+              <h4 className="text-sm font-bold text-[color:var(--text-primary)]">Record Opening Cash Float</h4>
+              <p className="text-xs text-[color:var(--text-muted)]">
+                Count notes by denomination or enter a quick lumpsum opening cash float to begin billing.
+              </p>
             </div>
             <SegmentedControl
               value={openingMode}
               onChange={setOpeningMode}
               options={[
-                { value: 'DENOMINATIONS', label: 'By Notes (Denominations)' },
+                { value: 'DENOMINATIONS', label: 'Count by Notes' },
                 { value: 'LUMPSUM', label: 'Quick Lumpsum' }
               ]}
             />
           </div>
 
           {openingMode === 'DENOMINATIONS' ? (
-            <div className="space-y-3">
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 {CURRENCY_DENOMINATIONS.map((d) => {
                   const count = denominations[d.key] || 0;
                   const rowSum = count * d.value;
                   return (
                     <div
                       key={d.key}
-                      className="p-2.5 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] flex flex-col justify-between gap-1.5"
+                      className={`p-3.5 rounded-2xl border bg-[color:var(--bg-surface)] flex flex-col justify-between gap-2.5 transition-all shadow-xs hover:border-indigo-400 dark:hover:border-indigo-600 ${d.color}`}
                     >
-                      <div className="flex items-center justify-between text-xs font-bold">
-                        <span className="text-indigo-600 dark:text-indigo-400 font-mono">{d.label}</span>
-                        <span className="tabular text-[11px] text-[color:var(--text-secondary)]">₹{rowSum.toLocaleString('en-IN')}</span>
+                      <div className="flex items-center justify-between font-bold">
+                        <span className="font-mono text-sm">{d.label}</span>
+                        <span className="tabular text-xs opacity-90 font-mono">
+                          ₹{rowSum.toLocaleString('en-IN')}
+                        </span>
                       </div>
+
                       <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] text-[color:var(--text-muted)]">Count:</span>
                         <input
                           type="number"
                           min="0"
@@ -2910,297 +3245,735 @@ function SessionModal({ open, session, vendors = [], onClose, showToast, onChang
                             const val = e.target.value === '' ? 0 : Math.max(0, parseInt(e.target.value) || 0);
                             setDenominations({ ...denominations, [d.key]: val });
                           }}
-                          placeholder="0"
-                          className="tabular w-full px-2 py-1 text-xs font-bold rounded-lg border border-[color:var(--border)] bg-[color:var(--surface)] text-right"
+                          placeholder="0 notes"
+                          className="tabular w-full px-2.5 py-1.5 text-xs font-bold rounded-xl border border-[color:var(--border)] bg-[color:var(--surface)] text-right"
                         />
+                        <button
+                          type="button"
+                          onClick={() => setDenominations({ ...denominations, [d.key]: (Number(denominations[d.key]) || 0) + 1 })}
+                          className="px-2 py-1.5 rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-[11px] font-bold hover:bg-indigo-500 hover:text-white transition-colors"
+                          title="Add 1 note"
+                        >
+                          +1
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDenominations({ ...denominations, [d.key]: (Number(denominations[d.key]) || 0) + 5 })}
+                          className="px-2 py-1.5 rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-[11px] font-bold hover:bg-indigo-500 hover:text-white transition-colors"
+                          title="Add 5 notes"
+                        >
+                          +5
+                        </button>
                       </div>
                     </div>
                   );
                 })}
               </div>
 
-              <div className="flex items-center justify-between rounded-xl p-3.5 bg-indigo-50 dark:bg-indigo-950/50 border border-indigo-200 dark:border-indigo-800">
-                <div>
-                  <span className="text-xs font-bold text-indigo-900 dark:text-indigo-200">Total Opening Cash Calculated</span>
-                  <p className="text-[11px] text-indigo-700/70 dark:text-indigo-300/70">Sum of all currency note denominations</p>
+              {/* Total Calculation Card */}
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-4 rounded-2xl p-4 bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-white/20 backdrop-blur-md">
+                    <Coins className="h-6 w-6" />
+                  </div>
+                  <div>
+                    <span className="text-sm font-bold opacity-90">Total Opening Cash Float</span>
+                    <p className="text-xs opacity-75">Calculated from note denominations breakdown</p>
+                  </div>
                 </div>
                 <div className="text-right">
-                  <span className="text-xl font-bold font-mono text-indigo-600 dark:text-indigo-400">
+                  <span className="text-2xl sm:text-3xl font-black font-mono tracking-tight">
                     ₹{denominationTotal.toLocaleString('en-IN')}
                   </span>
                 </div>
               </div>
             </div>
           ) : (
-            <Field label="Opening cash float amount" required>
-              <Input
-                type="number"
-                value={openingCash}
-                onChange={(e) => setOpeningCash(e.target.value)}
-                placeholder="e.g. 2000"
-                className="tabular text-[19px] font-bold"
-                autoFocus
-              />
-            </Field>
+            <div className="rounded-2xl p-6 bg-[color:var(--bg-surface)] border border-[color:var(--border)] space-y-4 max-w-xl mx-auto">
+              <Field label="Opening cash float amount" required hint="Enter physical cash available in counter drawer">
+                <Input
+                  type="number"
+                  value={openingCash}
+                  onChange={(e) => setOpeningCash(e.target.value)}
+                  placeholder="e.g. 2000"
+                  className="tabular text-xl font-bold py-2.5"
+                  autoFocus
+                />
+              </Field>
+              <div className="flex flex-wrap gap-2">
+                {[500, 1000, 2000, 3000, 5000].map((amt) => (
+                  <button
+                    key={amt}
+                    type="button"
+                    onClick={() => setOpeningCash(String(amt))}
+                    className="px-3 py-1.5 rounded-xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-xs font-semibold hover:border-indigo-400 hover:text-indigo-600 transition-colors"
+                  >
+                    ₹{amt.toLocaleString('en-IN')}
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
 
-          <Button
-            variant="primary"
-            icon={Unlock}
-            size="lg"
-            loading={busy}
-            onClick={handleOpenSession}
-            className="w-full"
-          >
-            Confirm & Open Counter Session
-          </Button>
+          <div className="flex justify-end pt-2">
+            <Button
+              variant="primary"
+              icon={Unlock}
+              size="lg"
+              loading={busy}
+              onClick={handleOpenSession}
+              className="px-8 py-3 font-bold shadow-lg shadow-indigo-500/25"
+            >
+              Confirm & Open Counter Shift
+            </Button>
+          </div>
         </div>
       ) : (
-        <div className="space-y-4">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <StatTile label="Opening Float" value={money(session.openingCash, { decimals: false })} />
-            <StatTile label="Cash Received (In)" value={money(cashIn, { decimals: false })} tone="success" />
-            <StatTile label="Cash Issued (Out)" value={money(cashOut, { decimals: false })} tone="danger" />
-            <StatTile label="Live Drawer Balance" value={money(session.currentCash, { decimals: false })} tone="accent" />
+        <div className="space-y-4 flex-1 flex flex-col min-h-0">
+          {/* Top 4 Live Stat Cards */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 shrink-0">
+            <div className="p-3.5 rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-surface)] shadow-xs flex items-center justify-between">
+              <div>
+                <span className="text-[11px] font-semibold text-[color:var(--text-muted)] uppercase tracking-wider">Opening Float</span>
+                <div className="text-lg font-bold font-mono text-[color:var(--text-primary)] mt-0.5">
+                  {money(session.openingCash, { decimals: false })}
+                </div>
+              </div>
+              <div className="h-9 w-9 rounded-xl bg-blue-500/10 text-blue-600 dark:text-blue-400 flex items-center justify-center font-bold">
+                <Wallet className="h-4 w-4" />
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-2xl border border-emerald-200/60 dark:border-emerald-900/60 bg-emerald-500/5 shadow-xs flex items-center justify-between">
+              <div>
+                <span className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 uppercase tracking-wider">Cash Received (+In)</span>
+                <div className="text-lg font-bold font-mono text-emerald-600 dark:text-emerald-400 mt-0.5">
+                  +{money(cashIn, { decimals: false })}
+                </div>
+              </div>
+              <div className="h-9 w-9 rounded-xl bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 flex items-center justify-center font-bold">
+                <ArrowDownToLine className="h-4 w-4" />
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-2xl border border-rose-200/60 dark:border-rose-900/60 bg-rose-500/5 shadow-xs flex items-center justify-between">
+              <div>
+                <span className="text-[11px] font-semibold text-rose-700 dark:text-rose-300 uppercase tracking-wider">Cash Outflows (−Out)</span>
+                <div className="text-lg font-bold font-mono text-rose-600 dark:text-rose-400 mt-0.5">
+                  −{money(cashOut, { decimals: false })}
+                </div>
+              </div>
+              <div className="h-9 w-9 rounded-xl bg-rose-500/20 text-rose-600 dark:text-rose-300 flex items-center justify-center font-bold">
+                <ArrowUpFromLine className="h-4 w-4" />
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-2xl border border-indigo-300 dark:border-indigo-700 bg-gradient-to-br from-indigo-500/10 via-purple-500/10 to-pink-500/10 shadow-sm flex items-center justify-between">
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] font-bold text-indigo-700 dark:text-indigo-300 uppercase tracking-wider">Live Drawer Total</span>
+                  <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                </div>
+                <div className="text-xl font-black font-mono text-indigo-600 dark:text-indigo-300 mt-0.5">
+                  {money(session.currentCash, { decimals: false })}
+                </div>
+              </div>
+              <div className="h-10 w-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-md">
+                <Sparkles className="h-5 w-5" />
+              </div>
+            </div>
           </div>
 
-          <div className="flex border-b border-[color:var(--border-subtle)] gap-1 overflow-x-auto pb-1">
+          {/* Tab Navigation Pill Bar */}
+          <div className="flex items-center border-b border-[color:var(--border)] gap-1.5 overflow-x-auto pb-2 shrink-0">
             <button
               onClick={() => setActiveTab('CASH_IN')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
                 activeTab === 'CASH_IN'
-                  ? 'bg-emerald-600 text-white shadow-xs'
-                  : 'bg-[color:var(--bg-subtle)] text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
+                  ? 'bg-emerald-600 text-white shadow-md'
+                  : 'bg-[color:var(--bg-subtle)] text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)] hover:bg-[color:var(--surface)]'
               }`}
             >
-              + Cash In (REQ-04)
+              <ArrowDownToLine className="h-3.5 w-3.5" />
+              + Cash In
             </button>
             <button
               onClick={() => setActiveTab('CASH_OUT')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
                 activeTab === 'CASH_OUT'
-                  ? 'bg-rose-600 text-white shadow-xs'
-                  : 'bg-[color:var(--bg-subtle)] text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
+                  ? 'bg-rose-600 text-white shadow-md'
+                  : 'bg-[color:var(--bg-subtle)] text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)] hover:bg-[color:var(--surface)]'
               }`}
             >
-              − Cash Out (REQ-04)
+              <ArrowUpFromLine className="h-3.5 w-3.5" />
+              − Cash Out
             </button>
             <button
               onClick={() => setActiveTab('EXPENSE')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
                 activeTab === 'EXPENSE'
-                  ? 'bg-amber-600 text-white shadow-xs'
-                  : 'bg-[color:var(--bg-subtle)] text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
+                  ? 'bg-amber-600 text-white shadow-md'
+                  : 'bg-[color:var(--bg-subtle)] text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)] hover:bg-[color:var(--surface)]'
               }`}
             >
-              💼 Internal Expense (REQ-06)
+              <Receipt className="h-3.5 w-3.5" />
+              Internal Expense
             </button>
             <button
               onClick={() => setActiveTab('HISTORY')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
                 activeTab === 'HISTORY'
-                  ? 'bg-indigo-600 text-white shadow-xs'
-                  : 'bg-[color:var(--bg-subtle)] text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
+                  ? 'bg-indigo-600 text-white shadow-md'
+                  : 'bg-[color:var(--bg-subtle)] text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)] hover:bg-[color:var(--surface)]'
               }`}
             >
-              📜 Movements Log ({session.cashEntries?.length || 0})
+              <History className="h-3.5 w-3.5" />
+              Audit Log ({session.cashEntries?.length || 0})
             </button>
             <button
-              onClick={() => setActiveTab('CLOSE')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all ml-auto ${
+              onClick={() => {
+                resetClosingDenominations();
+                setActiveTab('CLOSE');
+              }}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ml-auto ${
                 activeTab === 'CLOSE'
-                  ? 'bg-red-700 text-white shadow-xs'
-                  : 'bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300 hover:bg-red-100'
+                  ? 'bg-red-700 text-white shadow-md'
+                  : 'bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/40'
               }`}
             >
-              🔒 Close Shift
+              <Lock className="h-3.5 w-3.5" />
+              Close Shift & Reconcile
             </button>
           </div>
 
+          {/* Tab 1: CASH IN */}
           {activeTab === 'CASH_IN' && (
-            <div className="space-y-3 rounded-2xl p-3.5 bg-[color:var(--bg-subtle)] border border-[color:var(--border-subtle)]">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="flex-1 overflow-y-auto space-y-4 rounded-2xl p-4 sm:p-6 bg-[color:var(--bg-surface)] border border-[color:var(--border)]">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[color:var(--border)]">
                 <div>
-                  <span className="font-bold text-xs text-[color:var(--text-primary)]">Record Cash In</span>
-                  <p className="text-[10.5px] text-[color:var(--text-muted)]">
-                    Record float addition, customer advance, or vendor debt repayment / refund
+                  <h4 className="text-sm font-bold text-[color:var(--text-primary)] flex items-center gap-2">
+                    <ArrowDownToLine className="h-4 w-4 text-emerald-600" />
+                    Record Cash Inflow to Drawer
+                  </h4>
+                  <p className="text-xs text-[color:var(--text-muted)]">
+                    Receive cash into drawer from a customer, vendor debt repayment/refund, float top-up, or other source.
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
                   <SegmentedControl
-                    value={cashInKind}
-                    onChange={(val) => {
-                      setCashInKind(val);
-                      if (val === 'VENDOR_REPAY') {
-                        setEntry((prev) => ({
-                          ...prev,
-                          purpose: prev.person ? `Debt clearance repayment from ${prev.person}` : 'Vendor Cash Debt Repayment',
-                          classification: 'OFFICIAL'
-                        }));
-                      } else {
-                        setEntry((prev) => ({ ...prev, vendorId: '', purpose: '' }));
-                      }
-                    }}
+                    value={entry.classification}
+                    onChange={(cls) => setEntry({ ...entry, classification: cls })}
                     options={[
-                      { value: 'GENERAL', label: '💵 General Cash In' },
-                      { value: 'VENDOR_REPAY', label: '🤝 Vendor Cash Repay' }
+                      { value: 'OFFICIAL', label: 'Official Inflow' },
+                      { value: 'UNOFFICIAL', label: 'Unofficial Inflow' }
                     ]}
                   />
-
-                  {cashInKind === 'GENERAL' && (
-                    <SegmentedControl
-                      value={entry.classification}
-                      onChange={(cls) => setEntry({ ...entry, classification: cls })}
-                      options={[
-                        { value: 'OFFICIAL', label: 'Official Inflow' },
-                        { value: 'UNOFFICIAL', label: 'Unofficial (REQ-05)' }
-                      ]}
-                    />
-                  )}
                 </div>
               </div>
 
-              {cashInKind === 'VENDOR_REPAY' && (
-                <div className="rounded-xl p-3 bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-900/50 space-y-2">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-bold text-purple-900 dark:text-purple-200">
-                      Vendor Debt Repayment / Refund Entry
-                    </span>
-                    <span className="text-[11px] text-purple-700/80 dark:text-purple-300/80 font-medium">
-                      Credits vendor ledger & debits cash drawer
-                    </span>
+              {/* Party Selection (Customer / Vendor / Other) */}
+              <div className="rounded-2xl p-3.5 sm:p-4 bg-[color:var(--bg-subtle)] border border-[color:var(--border)] space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-[color:var(--text-secondary)] flex items-center gap-1.5">
+                    <Users className="h-3.5 w-3.5 text-emerald-600" />
+                    Received From (Party Type):
+                  </span>
+                  <div className="flex items-center gap-1 bg-[color:var(--bg-surface)] p-0.5 rounded-xl border border-[color:var(--border)]">
+                    <button
+                      type="button"
+                      onClick={() => setEntry((prev) => ({ ...prev, partyType: 'CUSTOMER', vendorId: '', person: '' }))}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                        entry.partyType === 'CUSTOMER'
+                          ? 'bg-blue-600 text-white shadow-xs'
+                          : 'text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
+                      }`}
+                    >
+                      Customer
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEntry((prev) => ({ ...prev, partyType: 'VENDOR', customerId: '', person: '' }))}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                        entry.partyType === 'VENDOR'
+                          ? 'bg-purple-600 text-white shadow-xs'
+                          : 'text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
+                      }`}
+                    >
+                      Vendor
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEntry((prev) => ({ ...prev, partyType: 'OTHER', customerId: '', vendorId: '' }))}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                        entry.partyType === 'OTHER'
+                          ? 'bg-zinc-700 text-white shadow-xs'
+                          : 'text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
+                      }`}
+                    >
+                      Other / Custom
+                    </button>
                   </div>
+                </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    <Field label="Select Vendor from Database" hint="Picks existing registered vendor">
-                      <Select
-                        value={entry.vendorId || ''}
-                        onChange={(e) => {
-                          const vId = e.target.value;
-                          const found = vendors.find((v) => v.id === vId);
-                          setEntry({
-                            ...entry,
-                            vendorId: vId,
-                            person: found ? found.name : entry.person,
-                            purpose: found ? `Debt repayment from ${found.name}` : 'Vendor Cash Repay'
-                          });
-                        }}
-                      >
-                        <option value="">-- Select Vendor from Database --</option>
-                        {vendors.map((v) => (
-                          <option key={v.id} value={v.id}>
-                            {v.name} {v.phone ? `(${v.phone})` : ''} {v.outstanding > 0 ? `· Due: ₹${v.outstanding}` : ''}
-                          </option>
-                        ))}
-                      </Select>
-                    </Field>
+                {/* Customer Dropdown */}
+                {entry.partyType === 'CUSTOMER' && (
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <Field label="Select Customer from Directory" hint="Auto-fills customer details">
+                        <Select
+                          value={entry.customerId || ''}
+                          onChange={(e) => {
+                            const cId = e.target.value;
+                            const found = customers.find((c) => c.id === cId);
+                            setEntry((prev) => ({
+                              ...prev,
+                              customerId: cId,
+                              person: found ? found.name : prev.person,
+                              purpose: prev.purpose || (found ? `Customer cash payment / advance from ${found.name}` : '')
+                            }));
+                          }}
+                        >
+                          <option value="">-- Choose Customer --</option>
+                          {customers.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.name} {c.phone ? `(${c.phone})` : ''} {c.outstanding > 0 ? `· Due: ₹${c.outstanding}` : ''}
+                            </option>
+                          ))}
+                        </Select>
+                      </Field>
 
-                    <Field label="Vendor Name (or Custom / Unlisted)" required>
+                      <Field label="Customer Name" required>
+                        <Input
+                          value={entry.person}
+                          onChange={(e) => setEntry({ ...entry, person: e.target.value })}
+                          placeholder="Customer name"
+                        />
+                      </Field>
+                    </div>
+
+                    {entry.customerId && (
+                      <div className="flex items-center justify-between text-xs px-3.5 py-2 rounded-xl bg-blue-500/15 border border-blue-500/25 text-blue-900 dark:text-blue-100 font-semibold">
+                        <span>Customer: {customers.find((c) => c.id === entry.customerId)?.name} ({customers.find((c) => c.id === entry.customerId)?.phone || 'No phone'})</span>
+                        <span>Current Outstanding / Due: {money(customers.find((c) => c.id === entry.customerId)?.outstanding || 0)}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Vendor Dropdown */}
+                {entry.partyType === 'VENDOR' && (
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <Field label="Select Vendor / Supplier" hint="Vendor debt repayment / credit refund">
+                        <Select
+                          value={entry.vendorId || ''}
+                          onChange={(e) => {
+                            const vId = e.target.value;
+                            const found = vendors.find((v) => v.id === vId);
+                            setEntry((prev) => ({
+                              ...prev,
+                              vendorId: vId,
+                              person: found ? found.name : prev.person,
+                              purpose: prev.purpose || (found ? `Debt repayment from ${found.name}` : '')
+                            }));
+                          }}
+                        >
+                          <option value="">-- Choose Vendor / Supplier --</option>
+                          {vendors.map((v) => (
+                            <option key={v.id} value={v.id}>
+                              {v.name} {v.phone ? `(${v.phone})` : ''} {v.outstanding > 0 ? `· Due: ₹${v.outstanding}` : ''}
+                            </option>
+                          ))}
+                        </Select>
+                      </Field>
+
+                      <Field label="Vendor / Supplier Name" required>
+                        <Input
+                          value={entry.person}
+                          onChange={(e) => setEntry({ ...entry, person: e.target.value })}
+                          placeholder="Vendor / Supplier name"
+                        />
+                      </Field>
+                    </div>
+
+                    {entry.vendorId && (
+                      <div className="flex items-center justify-between text-xs px-3.5 py-2 rounded-xl bg-purple-500/15 border border-purple-500/25 text-purple-900 dark:text-purple-100 font-semibold">
+                        <span>Vendor: {vendors.find((v) => v.id === entry.vendorId)?.name}</span>
+                        <span>Current Payable / Outstanding: {money(vendors.find((v) => v.id === entry.vendorId)?.outstanding || 0)}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Other / Custom Text Input */}
+                {entry.partyType === 'OTHER' && (
+                  <div className="space-y-3 pt-1">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <Field label="Received From (Full Name)" required>
+                        <Input
+                          value={entry.person}
+                          onChange={(e) => setEntry({ ...entry, person: e.target.value })}
+                          placeholder="e.g. Cashier / Owner / Partner / Customer"
+                        />
+                      </Field>
+
+                      <Field label="Phone Number" required>
+                        <Input
+                          type="tel"
+                          value={entry.phone || ''}
+                          onChange={(e) => setEntry({ ...entry, phone: e.target.value })}
+                          placeholder="e.g. 9876543210"
+                        />
+                      </Field>
+                    </div>
+
+                    <Field label="Address">
                       <Input
-                        value={entry.person}
-                        onChange={(e) => setEntry({ ...entry, person: e.target.value })}
-                        placeholder="Vendor / Supplier Name"
+                        value={entry.address || ''}
+                        onChange={(e) => setEntry({ ...entry, address: e.target.value })}
+                        placeholder="e.g. Shop / Street / City address"
                       />
                     </Field>
                   </div>
+                )}
+              </div>
 
-                  {entry.vendorId && (
-                    <div className="flex items-center justify-between text-xs px-2.5 py-1.5 rounded-lg bg-purple-100/70 dark:bg-purple-900/40 text-purple-900 dark:text-purple-200 font-semibold">
-                      <span>
-                        Registered Vendor: {vendors.find((v) => v.id === entry.vendorId)?.name}
-                      </span>
-                      <span>
-                        Current Balance / Payable: {money(vendors.find((v) => v.id === entry.vendorId)?.outstanding || 0)}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <Field label="Amount (₹)" required>
                   <Input
                     type="number"
                     value={entry.amount}
                     onChange={(e) => setEntry({ ...entry, amount: e.target.value })}
                     placeholder="e.g. 1000"
-                    className="tabular font-bold"
+                    className="tabular text-base font-bold"
                     autoFocus
                   />
                 </Field>
 
-                {cashInKind === 'GENERAL' && (
-                  <Field label="Received From (Person / Source)" required>
-                    <Input
-                      value={entry.person}
-                      onChange={(e) => setEntry({ ...entry, person: e.target.value })}
-                      placeholder="e.g. Cashier / Owner / Bank"
-                    />
-                  </Field>
-                )}
-
-                <Field label="Purpose / Notes" className={cashInKind === 'VENDOR_REPAY' ? 'sm:col-span-2' : ''}>
+                <Field label="Purpose / Remarks">
                   <Input
                     value={entry.purpose}
                     onChange={(e) => setEntry({ ...entry, purpose: e.target.value })}
-                    placeholder={cashInKind === 'VENDOR_REPAY' ? 'e.g. Small debt clearance / Return refund' : 'e.g. Added change float / top-up'}
+                    placeholder="e.g. Advance deposit / change float / balance settlement"
                   />
                 </Field>
               </div>
 
-              <div className="flex justify-end pt-1">
+              {/* Quick Amount Buttons */}
+              <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                <span className="text-xs font-semibold text-[color:var(--text-muted)] mr-1">Quick Add:</span>
+                {PRESET_AMOUNTS.map((amt) => (
+                  <button
+                    key={amt}
+                    type="button"
+                    onClick={() => addAmountPreset(amt)}
+                    className="px-2.5 py-1 rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-xs font-bold hover:bg-emerald-500 hover:text-white transition-colors"
+                  >
+                    +₹{amt.toLocaleString('en-IN')}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setEntry((prev) => ({ ...prev, amount: '' }))}
+                  className="px-2.5 py-1 rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-xs font-semibold text-[color:var(--text-muted)] hover:bg-rose-500 hover:text-white transition-colors"
+                >
+                  Clear
+                </button>
+              </div>
+
+              <div className="flex justify-end pt-3">
                 <Button
                   variant="primary"
                   icon={ArrowDownToLine}
+                  size="lg"
                   loading={busy}
-                  disabled={!entry.amount || (cashInKind === 'VENDOR_REPAY' && !entry.person)}
+                  disabled={
+                    !entry.amount ||
+                    Number(entry.amount) <= 0 ||
+                    !entry.person?.trim() ||
+                    (entry.partyType === 'OTHER' && !entry.phone?.trim())
+                  }
                   onClick={handleRecordEntry}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-6 shadow-md"
                 >
-                  {cashInKind === 'VENDOR_REPAY'
-                    ? `Record Vendor Cash Repay (${entry.person || 'Vendor'})`
-                    : `Record Cash In (${entry.classification})`}
+                  Confirm Cash In ({entry.person || 'Party'})
                 </Button>
+              </div>
+
+              {/* Recent Cash In History */}
+              <div className="pt-3 space-y-2.5 border-t border-[color:var(--border)]">
+                <div className="flex items-center justify-between">
+                  <h5 className="text-xs font-bold text-[color:var(--text-primary)] flex items-center gap-1.5">
+                    <ArrowDownToLine className="h-3.5 w-3.5 text-emerald-600" />
+                    Recent Cash In History ({cashInEntries.length})
+                  </h5>
+                  <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400 font-mono">
+                    Total Inflow: +{money(cashIn, { decimals: false })}
+                  </span>
+                </div>
+                {cashInEntries.length === 0 ? (
+                  <div className="py-4 text-center text-xs text-[color:var(--text-muted)] bg-[color:var(--bg-subtle)] rounded-xl border border-[color:var(--border)]">
+                    No cash in recorded yet in this shift.
+                  </div>
+                ) : (
+                  <DataTable
+                    dense
+                    columns={[
+                      { key: 'time', label: 'Time', width: 120, render: (e) => fmtDateTime(e.time) },
+                      {
+                        key: 'party',
+                        label: 'Received From',
+                        render: (e) => (
+                          <div className="flex flex-col">
+                            <div className="flex items-center gap-1.5">
+                              {e.customerId || e.partyType === 'CUSTOMER' ? (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-700 dark:text-blue-300 text-[10px] font-bold">
+                                  Customer
+                                </span>
+                              ) : e.vendorId || e.partyType === 'VENDOR' || e.classification === 'VENDOR_REPAY' ? (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-700 dark:text-purple-300 text-[10px] font-bold">
+                                  Vendor
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-zinc-500/10 text-zinc-700 dark:text-zinc-300 text-[10px] font-bold">
+                                  Other
+                                </span>
+                              )}
+                              <span className="font-semibold text-xs text-[color:var(--text-primary)]">
+                                {e.person || '—'}
+                              </span>
+                            </div>
+                            {(e.phone || e.address) && (
+                              <div className="text-[10.5px] text-[color:var(--text-muted)] flex items-center gap-2 mt-0.5 ml-0.5">
+                                {e.phone && <span>Ph: {e.phone}</span>}
+                                {e.address && <span className="truncate max-w-[180px]">{e.address}</span>}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      },
+                      { key: 'reason', label: 'Purpose / Notes' },
+                      {
+                        key: 'amount',
+                        label: 'Amount',
+                        align: 'right',
+                        width: 120,
+                        render: (e) => (
+                          <span className="font-mono font-bold text-xs text-emerald-600 dark:text-emerald-400">
+                            +₹{Number(e.amount).toLocaleString('en-IN')}
+                          </span>
+                        )
+                      }
+                    ]}
+                    rows={cashInEntries}
+                    rowKey={(e, i) => i}
+                  />
+                )}
               </div>
             </div>
           )}
 
+          {/* Tab 2: CASH OUT */}
           {activeTab === 'CASH_OUT' && (
-            <div className="space-y-3 rounded-2xl p-3.5 bg-[color:var(--bg-subtle)] border border-[color:var(--border-subtle)]">
-              <div className="flex items-center justify-between">
+            <div className="flex-1 overflow-y-auto space-y-4 rounded-2xl p-4 sm:p-6 bg-[color:var(--bg-surface)] border border-[color:var(--border)]">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[color:var(--border)]">
                 <div>
-                  <span className="font-bold text-xs text-[color:var(--text-primary)]">Record Cash Out</span>
-                  <p className="text-[10.5px] text-[color:var(--text-muted)]">Record cash withdrawn for bank deposit, vendor payment, or owner drawing</p>
+                  <h4 className="text-sm font-bold text-[color:var(--text-primary)] flex items-center gap-2">
+                    <ArrowUpFromLine className="h-4 w-4 text-rose-600" />
+                    Record Cash Outflow from Drawer
+                  </h4>
+                  <p className="text-xs text-[color:var(--text-muted)]">
+                    Record cash withdrawn for vendor payout, customer refund, bank deposit, or owner drawing.
+                  </p>
                 </div>
-                <div className="flex items-center gap-1.5 text-xs">
-                  <span className="text-[11px] text-[color:var(--text-muted)] font-semibold">Classification:</span>
+                <div className="flex items-center gap-2">
                   <SegmentedControl
                     value={entry.classification}
                     onChange={(cls) => setEntry({ ...entry, classification: cls })}
                     options={[
                       { value: 'OFFICIAL', label: 'Official Outflow' },
-                      { value: 'UNOFFICIAL', label: 'Unofficial (REQ-05)' }
+                      { value: 'UNOFFICIAL', label: 'Unofficial Outflow' }
                     ]}
                   />
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              {/* Party Selection (Vendor / Customer / Other) */}
+              <div className="rounded-2xl p-3.5 sm:p-4 bg-[color:var(--bg-subtle)] border border-[color:var(--border)] space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-[color:var(--text-secondary)] flex items-center gap-1.5">
+                    <Users className="h-3.5 w-3.5 text-rose-600" />
+                    Paid / Issued To (Party Type):
+                  </span>
+                  <div className="flex items-center gap-1 bg-[color:var(--bg-surface)] p-0.5 rounded-xl border border-[color:var(--border)]">
+                    <button
+                      type="button"
+                      onClick={() => setEntry((prev) => ({ ...prev, partyType: 'VENDOR', customerId: '', person: '' }))}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                        entry.partyType === 'VENDOR'
+                          ? 'bg-purple-600 text-white shadow-xs'
+                          : 'text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
+                      }`}
+                    >
+                      Vendor
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEntry((prev) => ({ ...prev, partyType: 'CUSTOMER', vendorId: '', person: '' }))}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                        entry.partyType === 'CUSTOMER'
+                          ? 'bg-blue-600 text-white shadow-xs'
+                          : 'text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
+                      }`}
+                    >
+                      Customer
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEntry((prev) => ({ ...prev, partyType: 'OTHER', customerId: '', vendorId: '' }))}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                        entry.partyType === 'OTHER'
+                          ? 'bg-zinc-700 text-white shadow-xs'
+                          : 'text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
+                      }`}
+                    >
+                      Other / Custom
+                    </button>
+                  </div>
+                </div>
+
+                {/* Vendor Dropdown */}
+                {entry.partyType === 'VENDOR' && (
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <Field label="Select Registered Vendor" hint="Vendor / Supplier payout">
+                        <Select
+                          value={entry.vendorId || ''}
+                          onChange={(e) => {
+                            const vId = e.target.value;
+                            const found = vendors.find((v) => v.id === vId);
+                            setEntry((prev) => ({
+                              ...prev,
+                              vendorId: vId,
+                              person: found ? found.name : prev.person,
+                              purpose: prev.purpose || (found ? `Supplier payment to ${found.name}` : '')
+                            }));
+                          }}
+                        >
+                          <option value="">-- Choose Vendor / Supplier --</option>
+                          {vendors.map((v) => (
+                            <option key={v.id} value={v.id}>
+                              {v.name} {v.phone ? `(${v.phone})` : ''} {v.outstanding > 0 ? `· Due: ₹${v.outstanding}` : ''}
+                            </option>
+                          ))}
+                        </Select>
+                      </Field>
+
+                      <Field label="Vendor / Supplier Name" required>
+                        <Input
+                          value={entry.person}
+                          onChange={(e) => setEntry({ ...entry, person: e.target.value })}
+                          placeholder="Vendor name"
+                        />
+                      </Field>
+                    </div>
+
+                    {entry.vendorId && (
+                      <div className="flex items-center justify-between text-xs px-3.5 py-2 rounded-xl bg-purple-500/15 border border-purple-500/25 text-purple-900 dark:text-purple-100 font-semibold">
+                        <span>Vendor: {vendors.find((v) => v.id === entry.vendorId)?.name}</span>
+                        <span>Current Payable / Outstanding: {money(vendors.find((v) => v.id === entry.vendorId)?.outstanding || 0)}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Customer Dropdown */}
+                {entry.partyType === 'CUSTOMER' && (
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <Field label="Select Registered Customer" hint="Customer refund / payout">
+                        <Select
+                          value={entry.customerId || ''}
+                          onChange={(e) => {
+                            const cId = e.target.value;
+                            const found = customers.find((c) => c.id === cId);
+                            setEntry((prev) => ({
+                              ...prev,
+                              customerId: cId,
+                              person: found ? found.name : prev.person,
+                              purpose: prev.purpose || (found ? `Customer refund payout to ${found.name}` : '')
+                            }));
+                          }}
+                        >
+                          <option value="">-- Choose Customer --</option>
+                          {customers.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.name} {c.phone ? `(${c.phone})` : ''} {c.outstanding > 0 ? `· Due: ₹${c.outstanding}` : ''}
+                            </option>
+                          ))}
+                        </Select>
+                      </Field>
+
+                      <Field label="Customer Name" required>
+                        <Input
+                          value={entry.person}
+                          onChange={(e) => setEntry({ ...entry, person: e.target.value })}
+                          placeholder="Customer name"
+                        />
+                      </Field>
+                    </div>
+
+                    {entry.customerId && (
+                      <div className="flex items-center justify-between text-xs px-3.5 py-2 rounded-xl bg-blue-500/15 border border-blue-500/25 text-blue-900 dark:text-blue-100 font-semibold">
+                        <span>Customer: {customers.find((c) => c.id === entry.customerId)?.name}</span>
+                        <span>Current Outstanding / Due: {money(customers.find((c) => c.id === entry.customerId)?.outstanding || 0)}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Other / Custom Text Input */}
+                {entry.partyType === 'OTHER' && (
+                  <div className="space-y-3 pt-1">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <Field label="Paid To / Issued To (Full Name)" required>
+                        <Input
+                          value={entry.person}
+                          onChange={(e) => setEntry({ ...entry, person: e.target.value })}
+                          placeholder="e.g. Delivery partner / Owner / Bank / Vendor"
+                        />
+                      </Field>
+
+                      <Field label="Phone Number" required>
+                        <Input
+                          type="tel"
+                          value={entry.phone || ''}
+                          onChange={(e) => setEntry({ ...entry, phone: e.target.value })}
+                          placeholder="e.g. 9876543210"
+                        />
+                      </Field>
+                    </div>
+
+                    <Field label="Address">
+                      <Input
+                        value={entry.address || ''}
+                        onChange={(e) => setEntry({ ...entry, address: e.target.value })}
+                        placeholder="e.g. Shop / Street / City address"
+                      />
+                    </Field>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <Field label="Amount (₹)" required>
                   <Input
                     type="number"
                     value={entry.amount}
                     onChange={(e) => setEntry({ ...entry, amount: e.target.value })}
                     placeholder="e.g. 500"
-                    className="tabular font-bold"
+                    className="tabular text-base font-bold"
                     autoFocus
-                  />
-                </Field>
-
-                <Field label="Paid To / Issued To (Person)" required>
-                  <Input
-                    value={entry.person}
-                    onChange={(e) => setEntry({ ...entry, person: e.target.value })}
-                    placeholder="e.g. Delivery agent / Supplier / Owner"
                   />
                 </Field>
 
@@ -3208,242 +3981,572 @@ function SessionModal({ open, session, vendors = [], onClose, showToast, onChang
                   <Input
                     value={entry.purpose}
                     onChange={(e) => setEntry({ ...entry, purpose: e.target.value })}
-                    placeholder="e.g. Bank deposit / Vendor cash"
+                    placeholder="e.g. Bank deposit / Supplier cash payout / Customer return refund"
                   />
                 </Field>
               </div>
 
-              <div className="flex justify-end pt-1">
+              {/* Quick Amount Buttons */}
+              <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                <span className="text-xs font-semibold text-[color:var(--text-muted)] mr-1">Quick Add:</span>
+                {PRESET_AMOUNTS.map((amt) => (
+                  <button
+                    key={amt}
+                    type="button"
+                    onClick={() => addAmountPreset(amt)}
+                    className="px-2.5 py-1 rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-xs font-bold hover:bg-rose-500 hover:text-white transition-colors"
+                  >
+                    +₹{amt.toLocaleString('en-IN')}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setEntry((prev) => ({ ...prev, amount: '' }))}
+                  className="px-2.5 py-1 rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-xs font-semibold text-[color:var(--text-muted)] hover:bg-rose-500 hover:text-white transition-colors"
+                >
+                  Clear
+                </button>
+              </div>
+
+              <div className="flex justify-end pt-3">
                 <Button
                   variant="primary"
                   icon={ArrowUpFromLine}
+                  size="lg"
                   loading={busy}
-                  disabled={!entry.amount}
+                  disabled={
+                    !entry.amount ||
+                    Number(entry.amount) <= 0 ||
+                    !entry.person?.trim() ||
+                    (entry.partyType === 'OTHER' && !entry.phone?.trim())
+                  }
                   onClick={handleRecordEntry}
+                  className="bg-rose-600 hover:bg-rose-700 text-white font-bold px-6 shadow-md"
                 >
-                  Record Cash Out ({entry.classification})
+                  Confirm Cash Out ({entry.person || 'Party'})
                 </Button>
+              </div>
+
+              {/* Recent Cash Out History */}
+              <div className="pt-3 space-y-2.5 border-t border-[color:var(--border)]">
+                <div className="flex items-center justify-between">
+                  <h5 className="text-xs font-bold text-[color:var(--text-primary)] flex items-center gap-1.5">
+                    <ArrowUpFromLine className="h-3.5 w-3.5 text-rose-600" />
+                    Recent Cash Out History ({cashOutEntries.length})
+                  </h5>
+                  <span className="text-xs font-bold text-rose-600 dark:text-rose-400 font-mono">
+                    Total Outflow: −{money(cashOutOnly, { decimals: false })}
+                  </span>
+                </div>
+                {cashOutEntries.length === 0 ? (
+                  <div className="py-4 text-center text-xs text-[color:var(--text-muted)] bg-[color:var(--bg-subtle)] rounded-xl border border-[color:var(--border)]">
+                    No cash out recorded yet in this shift.
+                  </div>
+                ) : (
+                  <DataTable
+                    dense
+                    columns={[
+                      { key: 'time', label: 'Time', width: 120, render: (e) => fmtDateTime(e.time) },
+                      {
+                        key: 'party',
+                        label: 'Paid / Issued To',
+                        render: (e) => (
+                          <div className="flex flex-col">
+                            <div className="flex items-center gap-1.5">
+                              {e.customerId || e.partyType === 'CUSTOMER' ? (
+                                 <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-700 dark:text-blue-300 text-[10px] font-bold">
+                                   Customer
+                                 </span>
+                              ) : e.vendorId || e.partyType === 'VENDOR' ? (
+                                 <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-700 dark:text-purple-300 text-[10px] font-bold">
+                                   Vendor
+                                 </span>
+                              ) : (
+                                 <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-zinc-500/10 text-zinc-700 dark:text-zinc-300 text-[10px] font-bold">
+                                   Other
+                                 </span>
+                              )}
+                              <span className="font-semibold text-xs text-[color:var(--text-primary)]">
+                                {e.person || '—'}
+                              </span>
+                            </div>
+                            {(e.phone || e.address) && (
+                              <div className="text-[10.5px] text-[color:var(--text-muted)] flex items-center gap-2 mt-0.5 ml-0.5">
+                                {e.phone && <span>Ph: {e.phone}</span>}
+                                {e.address && <span className="truncate max-w-[180px]">{e.address}</span>}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      },
+                      { key: 'reason', label: 'Purpose / Reason' },
+                      {
+                        key: 'amount',
+                        label: 'Amount',
+                        align: 'right',
+                        width: 120,
+                        render: (e) => (
+                          <span className="font-mono font-bold text-xs text-rose-600 dark:text-rose-400">
+                            −₹{Number(e.amount).toLocaleString('en-IN')}
+                          </span>
+                        )
+                      }
+                    ]}
+                    rows={cashOutEntries}
+                    rowKey={(e, i) => i}
+                  />
+                )}
               </div>
             </div>
           )}
 
+          {/* Tab 3: INTERNAL EXPENSE */}
           {activeTab === 'EXPENSE' && (
-            <div className="space-y-3 rounded-2xl p-3.5 bg-amber-50/50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/50">
-              <div>
-                <span className="font-bold text-xs text-amber-900 dark:text-amber-200">Internal Business Expense Entry (REQ-06)</span>
-                <p className="text-[10.5px] text-amber-700/80 dark:text-amber-300/80">
-                  Records shop operational expense paid directly from counter drawer cash. Automatically posts an accounting expense voucher.
-                </p>
+            <div className="flex-1 overflow-y-auto space-y-4 rounded-2xl p-4 sm:p-6 bg-[color:var(--bg-surface)] border border-amber-200 dark:border-amber-900/50">
+              <div className="flex items-center justify-between pb-3 border-b border-amber-200/50 dark:border-amber-900/50">
+                <div>
+                  <h4 className="text-sm font-bold text-amber-900 dark:text-amber-200">
+                    Shop Internal Petty Expense Entry
+                  </h4>
+                  <p className="text-xs text-amber-700/80 dark:text-amber-300/80">
+                    Records shop operational expenses paid directly from counter drawer cash and automatically posts an accounting voucher.
+                  </p>
+                </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
-                <Field label="Amount (₹)" required>
+              {/* Expense Category Cards */}
+              <div>
+                <span className="text-xs font-bold text-[color:var(--text-secondary)] block mb-2">Select Expense Category:</span>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {EXPENSE_CATEGORIES.map((cat) => {
+                    const isSelected = entry.expenseCategory === cat;
+                    return (
+                      <button
+                        key={cat}
+                        type="button"
+                        onClick={() => setEntry({ ...entry, expenseCategory: cat })}
+                        className={`flex items-center justify-center p-2.5 rounded-xl border text-xs font-bold text-center transition-all ${
+                          isSelected
+                            ? 'border-amber-500 bg-amber-500/15 text-amber-900 dark:text-amber-100 shadow-xs'
+                            : 'border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-[color:var(--text-secondary)] hover:border-amber-300'
+                        }`}
+                      >
+                        <span className="truncate">{cat}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <Field label="Expense Amount (₹)" required>
                   <Input
                     type="number"
                     value={entry.amount}
                     onChange={(e) => setEntry({ ...entry, amount: e.target.value })}
                     placeholder="e.g. 150"
-                    className="tabular font-bold"
+                    className="tabular text-base font-bold"
                     autoFocus
                   />
                 </Field>
 
-                <Field label="Expense Category" required>
-                  <Select
-                    value={entry.expenseCategory}
-                    onChange={(e) => setEntry({ ...entry, expenseCategory: e.target.value })}
-                  >
-                    {EXPENSE_CATEGORIES.map((cat) => (
-                      <option key={cat} value={cat}>
-                        {cat}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
-
-                <Field label="Paid To / Vendor">
+                <Field label="Paid To (Shop / Person / Vendor)">
                   <Input
                     value={entry.person}
                     onChange={(e) => setEntry({ ...entry, person: e.target.value })}
-                    placeholder="e.g. Tea shop / Courier / Electrician"
+                    placeholder="e.g. Tea stall / Courier / Electrician"
                   />
                 </Field>
 
-                <Field label="Remarks / Details">
+                <Field label="Expense Remarks / Item Details">
                   <Input
                     value={entry.purpose}
                     onChange={(e) => setEntry({ ...entry, purpose: e.target.value })}
-                    placeholder="e.g. Evening staff tea & snacks"
+                    placeholder="e.g. Evening staff tea & biscuits"
                   />
                 </Field>
               </div>
 
-              <div className="flex justify-end pt-1">
+              {/* Quick Amount Buttons */}
+              <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                <span className="text-xs font-semibold text-[color:var(--text-muted)] mr-1">Quick Add:</span>
+                {[50, 100, 150, 200, 500, 1000].map((amt) => (
+                  <button
+                    key={amt}
+                    type="button"
+                    onClick={() => addAmountPreset(amt)}
+                    className="px-2.5 py-1 rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-xs font-bold hover:bg-amber-500 hover:text-white transition-colors"
+                  >
+                    +₹{amt}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setEntry((prev) => ({ ...prev, amount: '' }))}
+                  className="px-2.5 py-1 rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-xs font-semibold text-[color:var(--text-muted)] hover:bg-rose-500 hover:text-white transition-colors"
+                >
+                  Clear
+                </button>
+              </div>
+
+              <div className="flex justify-end pt-3">
                 <Button
                   variant="primary"
                   icon={ArrowUpFromLine}
+                  size="lg"
                   loading={busy}
                   disabled={!entry.amount}
                   onClick={handleRecordEntry}
+                  className="bg-amber-600 hover:bg-amber-700 text-white font-bold px-6 shadow-md"
                 >
-                  Record Internal Expense
+                  Confirm Internal Expense
                 </Button>
+              </div>
+
+              {/* Recent Internal Expenses History */}
+              <div className="pt-3 space-y-2.5 border-t border-amber-200/60 dark:border-amber-900/60">
+                <div className="flex items-center justify-between">
+                  <h5 className="text-xs font-bold text-amber-900 dark:text-amber-200">
+                    Recent Internal Expenses ({expenseEntries.length})
+                  </h5>
+                  <span className="text-xs font-bold text-amber-600 dark:text-amber-400 font-mono">
+                    Total Expenses: −{money(expenseTotal, { decimals: false })}
+                  </span>
+                </div>
+                {expenseEntries.length === 0 ? (
+                  <div className="py-4 text-center text-xs text-[color:var(--text-muted)] bg-[color:var(--bg-subtle)] rounded-xl border border-[color:var(--border)]">
+                    No internal expenses recorded yet in this shift.
+                  </div>
+                ) : (
+                  <DataTable
+                    dense
+                    columns={[
+                      { key: 'time', label: 'Time', width: 120, render: (e) => fmtDateTime(e.time) },
+                      {
+                        key: 'category',
+                        label: 'Category',
+                        width: 160,
+                        render: (e) => (
+                          <Badge tone="warning">
+                            {e.expenseCategory || 'Expense'}
+                          </Badge>
+                        )
+                      },
+                      { key: 'person', label: 'Paid To', render: (e) => e.person || '—' },
+                      { key: 'reason', label: 'Remarks / Purpose' },
+                      {
+                        key: 'amount',
+                        label: 'Amount',
+                        align: 'right',
+                        width: 120,
+                        render: (e) => (
+                          <span className="font-mono font-bold text-xs text-amber-600 dark:text-amber-400">
+                            −₹{Number(e.amount).toLocaleString('en-IN')}
+                          </span>
+                        )
+                      }
+                    ]}
+                    rows={expenseEntries}
+                    rowKey={(e, i) => i}
+                  />
+                )}
               </div>
             </div>
           )}
 
+          {/* Tab 4: AUDIT HISTORY */}
           {activeTab === 'HISTORY' && (
-            <div className="space-y-2">
-              <span className="text-xs font-bold text-[color:var(--text-primary)]">Shift Cash Movements & Audit History</span>
-              {(session.cashEntries || []).length === 0 ? (
-                <div className="py-6 text-center text-xs text-[color:var(--text-muted)]">No cash movements recorded yet in this shift</div>
-              ) : (
-                <DataTable
-                  maxHeight="30vh"
-                  dense
-                  columns={[
-                    { key: 'time', label: 'Time', width: 130, render: (e) => fmtDateTime(e.time) },
-                    {
-                      key: 'type',
-                      label: 'Type',
-                      width: 90,
-                      render: (e) => (
-                        <Badge tone={e.type === 'IN' ? 'success' : 'danger'}>
-                          {e.type === 'IN' ? 'CASH IN' : 'CASH OUT'}
-                        </Badge>
-                      )
-                    },
-                    {
-                      key: 'classification',
-                      label: 'Classification',
-                      width: 130,
-                      render: (e) => (
-                        <Badge
-                          tone={
-                            e.classification === 'VENDOR_REPAY'
-                              ? 'accent'
-                              : e.classification === 'EXPENSE'
-                              ? 'warning'
-                              : e.classification === 'UNOFFICIAL'
-                              ? 'neutral'
-                              : 'success'
-                          }
-                        >
-                          {e.classification === 'VENDOR_REPAY' ? '🤝 VENDOR REPAY' : e.classification || 'OFFICIAL'}
-                        </Badge>
-                      )
-                    },
-                    {
-                      key: 'person',
-                      label: 'Person / Recipient',
-                      render: (e) => e.person || '—'
-                    },
-                    { key: 'reason', label: 'Reason / Purpose' },
-                    {
-                      key: 'amount',
-                      label: 'Amount',
-                      align: 'right',
-                      width: 110,
-                      render: (e) => <Money value={e.amount} />
-                    }
-                  ]}
-                  rows={[...session.cashEntries].reverse()}
-                  rowKey={(e, i) => i}
-                />
-              )}
+            <div className="flex-1 flex flex-col min-h-0 space-y-3 rounded-2xl p-4 sm:p-6 bg-[color:var(--bg-surface)] border border-[color:var(--border)]">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
+                <div>
+                  <h4 className="text-sm font-bold text-[color:var(--text-primary)] flex items-center gap-2">
+                    <History className="h-4 w-4 text-indigo-600" />
+                    Shift Cash Movements & Audit History
+                  </h4>
+                  <p className="text-xs text-[color:var(--text-muted)]">
+                    Combined chronological audit ledger showing all cash in, cash out, and expense movements.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-1 bg-[color:var(--bg-subtle)] p-1 rounded-xl border border-[color:var(--border)]">
+                    {[
+                      { id: 'ALL', label: `All (${session.cashEntries?.length || 0})` },
+                      { id: 'IN', label: `Cash In (${cashInEntries.length})` },
+                      { id: 'OUT', label: `Cash Out (${cashOutEntries.length})` },
+                      { id: 'EXPENSE', label: `Expenses (${expenseEntries.length})` },
+                      { id: 'CUSTOMER', label: 'Customers' },
+                      { id: 'VENDOR', label: 'Vendors' }
+                    ].map((tab) => (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setHistoryFilter(tab.id)}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors ${
+                          historyFilter === tab.id
+                            ? 'bg-indigo-600 text-white shadow-xs'
+                            : 'text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
+                        }`}
+                      >
+                        {tab.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="relative min-w-[200px]">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[color:var(--text-muted)]" />
+                    <input
+                      type="text"
+                      placeholder="Search movements…"
+                      value={historySearch}
+                      onChange={(e) => setHistorySearch(e.target.value)}
+                      className="w-full pl-8 pr-3 py-1 rounded-xl border border-[color:var(--border)] bg-[color:var(--surface)] text-xs font-medium"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex-1 min-h-0 overflow-y-auto">
+                {filteredHistory.length === 0 ? (
+                  <div className="py-12 text-center text-xs text-[color:var(--text-muted)]">
+                    {historySearch ? 'No movements matching your search query.' : 'No cash movements recorded yet in this shift.'}
+                  </div>
+                ) : (
+                  <DataTable
+                    dense
+                    columns={[
+                      { key: 'time', label: 'Time', width: 120, render: (e) => fmtDateTime(e.time) },
+                      {
+                        key: 'type',
+                        label: 'Direction',
+                        width: 100,
+                        render: (e) => (
+                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold ${
+                            e.type === 'IN'
+                              ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                              : 'bg-rose-500/10 text-rose-700 dark:text-rose-300'
+                          }`}>
+                            {e.type === 'IN' ? <ArrowDownToLine className="h-3 w-3" /> : <ArrowUpFromLine className="h-3 w-3" />}
+                            {e.type === 'IN' ? 'CASH IN' : 'CASH OUT'}
+                          </span>
+                        )
+                      },
+                      {
+                        key: 'party',
+                        label: 'Party / Recipient',
+                        render: (e) => (
+                          <div className="flex flex-col">
+                            <div className="flex items-center gap-1.5">
+                              {e.customerId || e.partyType === 'CUSTOMER' ? (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-700 dark:text-blue-300 text-[10px] font-bold">
+                                  Customer
+                                </span>
+                              ) : e.vendorId || e.partyType === 'VENDOR' || e.classification === 'VENDOR_REPAY' ? (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-700 dark:text-purple-300 text-[10px] font-bold">
+                                  Vendor
+                                </span>
+                              ) : e.classification === 'EXPENSE' ? (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-700 dark:text-amber-300 text-[10px] font-bold">
+                                  Expense
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-zinc-500/10 text-zinc-700 dark:text-zinc-300 text-[10px] font-bold">
+                                  Other
+                                </span>
+                              )}
+                              <span className="font-semibold text-xs text-[color:var(--text-primary)]">
+                                {e.person || '—'}
+                              </span>
+                            </div>
+                            {(e.phone || e.address) && (
+                              <div className="text-[10.5px] text-[color:var(--text-muted)] flex items-center gap-2 mt-0.5 ml-0.5">
+                                {e.phone && <span>Ph: {e.phone}</span>}
+                                {e.address && <span className="truncate max-w-[180px]">{e.address}</span>}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      },
+                      {
+                        key: 'classification',
+                        label: 'Classification',
+                        width: 140,
+                        render: (e) => (
+                          <Badge
+                            tone={
+                              e.classification === 'VENDOR_REPAY' || e.classification === 'VENDOR_PAYMENT'
+                                ? 'accent'
+                                : e.classification === 'CUSTOMER_ENTRY'
+                                ? 'primary'
+                                : e.classification === 'EXPENSE'
+                                ? 'warning'
+                                : e.classification === 'UNOFFICIAL'
+                                ? 'neutral'
+                                : 'success'
+                            }
+                          >
+                            {e.classification === 'VENDOR_REPAY' ? 'VENDOR REPAY' : e.classification === 'CUSTOMER_ENTRY' ? 'CUSTOMER' : e.classification || 'OFFICIAL'}
+                          </Badge>
+                        )
+                      },
+                      { key: 'reason', label: 'Reason / Notes' },
+                      {
+                        key: 'amount',
+                        label: 'Amount',
+                        align: 'right',
+                        width: 120,
+                        render: (e) => (
+                          <span className={`font-mono font-bold text-xs ${e.type === 'IN' ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                            {e.type === 'IN' ? '+' : '−'}₹{Number(e.amount).toLocaleString('en-IN')}
+                          </span>
+                        )
+                      }
+                    ]}
+                    rows={filteredHistory}
+                    rowKey={(e, i) => i}
+                  />
+                )}
+              </div>
             </div>
           )}
 
+          {/* Tab 5: CLOSE & RECONCILE */}
           {activeTab === 'CLOSE' && (
-            <div className="space-y-4 border-t pt-3" style={{ borderColor: 'var(--border)' }}>
-              <div className="flex items-center justify-between">
+            <div className="flex-1 overflow-y-auto space-y-4 rounded-2xl p-4 sm:p-6 bg-[color:var(--bg-surface)] border border-red-200 dark:border-red-900/50">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[color:var(--border)]">
                 <div>
-                  <span className="text-xs font-bold text-[color:var(--text-primary)]">Counter Closing & Cash Count (REQ-03)</span>
-                  <p className="text-[11px] text-[color:var(--text-muted)]">Count closing physical cash to reconcile drawer and compute variance</p>
+                  <h4 className="text-sm font-bold text-red-900 dark:text-red-200 flex items-center gap-2">
+                    <Lock className="h-4 w-4 text-red-600" />
+                    Counter Shift Closure & Physical Cash Reconciliation
+                  </h4>
+                  <p className="text-xs text-[color:var(--text-muted)]">
+                    Count physical currency notes in the counter drawer to reconcile against calculated shift sales and compute cash variance.
+                  </p>
                 </div>
-                <SegmentedControl
-                  value={closingMode}
-                  onChange={setClosingMode}
-                  options={[
-                    { value: 'DENOMINATIONS', label: 'Count by Notes' },
-                    { value: 'LUMPSUM', label: 'Quick Lumpsum' }
-                  ]}
-                />
+                <div className="flex items-center gap-2">
+                  {closingMode === 'DENOMINATIONS' && (
+                    <button
+                      type="button"
+                      onClick={resetClosingDenominations}
+                      className="px-3 py-1.5 rounded-xl border border-red-200 dark:border-red-800 bg-red-500/10 text-red-700 dark:text-red-300 text-xs font-bold hover:bg-red-500 hover:text-white transition-colors"
+                      title="Clear all note counts"
+                    >
+                      Clear Breakdown
+                    </button>
+                  )}
+                  <SegmentedControl
+                    value={closingMode}
+                    onChange={setClosingMode}
+                    options={[
+                      { value: 'DENOMINATIONS', label: 'Count by Notes' },
+                      { value: 'LUMPSUM', label: 'Quick Lumpsum' }
+                    ]}
+                  />
+                </div>
               </div>
 
               {closingMode === 'DENOMINATIONS' ? (
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {CURRENCY_DENOMINATIONS.map((d) => {
-                    const count = closingDenominations[d.key] || 0;
-                    const rowSum = count * d.value;
-                    return (
-                      <div
-                        key={d.key}
-                        className="p-2 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] flex flex-col justify-between gap-1"
-                      >
-                        <div className="flex items-center justify-between text-xs font-bold">
-                          <span className="text-indigo-600 dark:text-indigo-400 font-mono">{d.label}</span>
-                          <span className="tabular text-[10.5px] text-[color:var(--text-secondary)]">₹{rowSum.toLocaleString('en-IN')}</span>
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                    {CURRENCY_DENOMINATIONS.map((d) => {
+                      const count = closingDenominations[d.key] || 0;
+                      const rowSum = count * d.value;
+                      return (
+                        <div
+                          key={d.key}
+                          className={`p-3 rounded-xl border bg-[color:var(--bg-surface)] flex flex-col justify-between gap-2 transition-all shadow-xs hover:border-red-400 dark:hover:border-red-600 ${d.color}`}
+                        >
+                          <div className="flex items-center justify-between font-bold">
+                            <span className="font-mono text-xs">{d.label}</span>
+                            <span className="tabular text-[11px] opacity-90 font-mono">
+                              ₹{rowSum.toLocaleString('en-IN')}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              min="0"
+                              value={closingDenominations[d.key] === 0 ? '' : closingDenominations[d.key]}
+                              onChange={(e) => {
+                                const val = e.target.value === '' ? 0 : Math.max(0, parseInt(e.target.value) || 0);
+                                setClosingDenominations({ ...closingDenominations, [d.key]: val });
+                              }}
+                              placeholder="0"
+                              className="tabular w-full px-2 py-1 text-xs font-bold rounded-lg border border-[color:var(--border)] bg-[color:var(--surface)] text-right"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setClosingDenominations({ ...closingDenominations, [d.key]: (Number(closingDenominations[d.key]) || 0) + 1 })}
+                              className="px-1.5 py-1 rounded-md border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-[10.5px] font-bold hover:bg-red-500 hover:text-white transition-colors"
+                              title="Add 1"
+                            >
+                              +1
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setClosingDenominations({ ...closingDenominations, [d.key]: (Number(closingDenominations[d.key]) || 0) + 5 })}
+                              className="px-1.5 py-1 rounded-md border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-[10.5px] font-bold hover:bg-red-500 hover:text-white transition-colors"
+                              title="Add 5"
+                            >
+                              +5
+                            </button>
+                          </div>
                         </div>
-                        <input
-                          type="number"
-                          min="0"
-                          value={closingDenominations[d.key] === 0 ? '' : closingDenominations[d.key]}
-                          onChange={(e) => {
-                            const val = e.target.value === '' ? 0 : Math.max(0, parseInt(e.target.value) || 0);
-                            setClosingDenominations({ ...closingDenominations, [d.key]: val });
-                          }}
-                          placeholder="0"
-                          className="tabular w-full px-2 py-0.5 text-xs font-bold rounded-lg border border-[color:var(--border)] bg-[color:var(--surface)] text-right"
-                        />
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
+                  </div>
                 </div>
               ) : (
-                <Field label="Physically counted cash" hint="Any variance is recorded against this session">
-                  <Input
-                    type="number"
-                    value={countedCash}
-                    onChange={(e) => setCountedCash(e.target.value)}
-                    placeholder={String(session.currentCash)}
-                    className="tabular font-bold"
-                  />
-                </Field>
+                <div className="rounded-2xl p-4 bg-[color:var(--bg-subtle)] border border-[color:var(--border)] max-w-md">
+                  <Field label="Physically counted cash in drawer" hint="Any variance will be permanently recorded in shift audit reports">
+                    <Input
+                      type="number"
+                      value={countedCash}
+                      onChange={(e) => setCountedCash(e.target.value)}
+                      placeholder={String(session.currentCash)}
+                      className="tabular text-base font-bold"
+                    />
+                  </Field>
+                </div>
               )}
 
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 p-3 rounded-2xl bg-[color:var(--bg-subtle)] border border-[color:var(--border-subtle)]">
+              {/* Reconciliation Summary Cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-4 rounded-2xl bg-gradient-to-r from-slate-500/5 via-slate-500/10 to-slate-500/5 border border-[color:var(--border)]">
                 <div>
-                  <span className="text-[10px] uppercase font-bold text-[color:var(--text-muted)]">Expected Cash</span>
-                  <div className="text-sm font-bold font-mono text-[color:var(--text-primary)]">
+                  <span className="text-[10px] uppercase font-bold text-[color:var(--text-muted)] tracking-wider">System Expected Cash</span>
+                  <div className="text-xl font-bold font-mono text-[color:var(--text-primary)] mt-1">
                     {money(session.currentCash)}
                   </div>
                 </div>
                 <div>
-                  <span className="text-[10px] uppercase font-bold text-[color:var(--text-muted)]">Physically Counted</span>
-                  <div className="text-sm font-bold font-mono text-indigo-600 dark:text-indigo-400">
+                  <span className="text-[10px] uppercase font-bold text-[color:var(--text-muted)] tracking-wider">Physically Counted</span>
+                  <div className="text-xl font-bold font-mono text-indigo-600 dark:text-indigo-400 mt-1">
                     ₹{effectiveCounted.toLocaleString('en-IN')}
                   </div>
                 </div>
-                <div className="col-span-2 sm:col-span-1">
-                  <span className="text-[10px] uppercase font-bold text-[color:var(--text-muted)]">Variance</span>
-                  <div className={`text-sm font-bold font-mono ${variance === 0 ? 'text-emerald-600' : variance > 0 ? 'text-blue-600' : 'text-rose-600'}`}>
-                    {variance >= 0 ? `+₹${variance.toLocaleString('en-IN')}` : `-₹${Math.abs(variance).toLocaleString('en-IN')}`}
-                    {variance === 0 ? ' (Matched)' : variance > 0 ? ' (Excess)' : ' (Shortage)'}
+                <div>
+                  <span className="text-[10px] uppercase font-bold text-[color:var(--text-muted)] tracking-wider">Reconciliation Variance</span>
+                  <div className={`text-xl font-bold font-mono mt-1 ${variance === 0 ? 'text-emerald-600 dark:text-emerald-400' : variance > 0 ? 'text-blue-600 dark:text-blue-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                    {variance >= 0 ? `+₹${variance.toLocaleString('en-IN')}` : `−₹${Math.abs(variance).toLocaleString('en-IN')}`}
+                    <span className="text-xs font-normal ml-1.5 opacity-90">
+                      {variance === 0 ? '✓ Matched' : variance > 0 ? '↑ Excess' : '↓ Shortage'}
+                    </span>
                   </div>
                 </div>
               </div>
 
-              <Button
-                variant="danger"
-                icon={Lock}
-                size="lg"
-                loading={busy}
-                onClick={handleCloseSession}
-                className="w-full"
-              >
-                Confirm & Close Counter Session
-              </Button>
+              <div className="flex justify-end pt-2">
+                <Button
+                  variant="danger"
+                  icon={Lock}
+                  size="lg"
+                  loading={busy}
+                  onClick={handleCloseSession}
+                  className="bg-red-700 hover:bg-red-800 text-white font-bold px-8 py-3 shadow-lg shadow-red-500/25"
+                >
+                  Confirm & Permanently Close Counter Shift
+                </Button>
+              </div>
             </div>
           )}
         </div>

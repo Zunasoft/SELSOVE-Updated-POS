@@ -89,6 +89,7 @@ export default function Reconciliation({ showToast }) {
   };
 
   const save = async () => {
+    if (saving) return;
     setSaving(true);
     try {
       const res = await api.post('/accounts/reconciliation', {

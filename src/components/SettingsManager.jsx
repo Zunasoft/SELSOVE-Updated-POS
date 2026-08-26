@@ -718,6 +718,7 @@ function UsersTab({ showToast }) {
   }, []);
 
   const remove = async (u) => {
+    if (!window.confirm(`Delete user "${u.name || u.username}"? They will lose access immediately.`)) return;
     try {
       const res = await api.del(`/users/${u.id}`);
       showToast(res.message || 'User removed.');
@@ -1225,6 +1226,7 @@ function TablesTab({ enableTables, showToast }) {
   }, []);
 
   const remove = async (t) => {
+    if (!window.confirm(`Delete table "${t.name}"?`)) return;
     try {
       const res = await api.del(`/tables/${t.id}`);
       showToast(res.message || 'Table removed.');

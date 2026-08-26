@@ -685,6 +685,7 @@ function PartyFormModal({ open, isCustomer, editing, groups, onClose, showToast,
     openingBalance: '',
     openingAdvance: '',
     advanceBalance: '',
+    outstandingReceivable: '',
     outstandingPayable: '',
     changeReason: ''
   };
@@ -699,7 +700,8 @@ function PartyFormModal({ open, isCustomer, editing, groups, onClose, showToast,
               ...blank,
               ...editing,
               advanceBalance: editing.advance !== undefined ? editing.advance : (editing.advanceBalance || ''),
-              outstandingPayable: editing.outstandingPayable !== undefined ? editing.outstandingPayable : (editing.outstanding || ''),
+              outstandingReceivable: editing.outstanding !== undefined ? editing.outstanding : (editing.outstandingReceivable || ''),
+              outstandingPayable: editing.outstandingPayable !== undefined ? editing.outstandingPayable : '',
               changeReason: ''
             }
           : blank
@@ -914,20 +916,41 @@ function PartyFormModal({ open, isCustomer, editing, groups, onClose, showToast,
 
             {/* If Customer and editing */}
             {isCustomer && editing && (
-              <Field
-                label="Advance / Store Credit Balance (₹)"
-                hint="Pending amount owed to customer (deductible on future POS purchases)"
-                className="sm:col-span-2"
-              >
-                <Input
-                  type="number"
-                  step="0.01"
-                  value={form.advanceBalance ?? ''}
-                  onChange={set('advanceBalance')}
-                  placeholder="0.00"
-                  className="font-bold text-blue-600 dark:text-blue-400 font-mono"
-                />
-              </Field>
+              <>
+                <Field
+                  label="Outstanding Receivable (₹)"
+                  hint="Amount owed by this customer to the shop (posts audited ledger adjustment)."
+                >
+                  <Input
+                    type="number"
+                    step="0.01"
+                    value={form.outstandingReceivable ?? ''}
+                    onChange={set('outstandingReceivable')}
+                    placeholder="0.00"
+                    className="font-bold text-rose-600 dark:text-rose-400 font-mono"
+                  />
+                </Field>
+                <Field
+                  label="Advance / Store Credit Balance (₹)"
+                  hint="Pending amount owed to customer (deductible on future POS purchases)"
+                >
+                  <Input
+                    type="number"
+                    step="0.01"
+                    value={form.advanceBalance ?? ''}
+                    onChange={set('advanceBalance')}
+                    placeholder="0.00"
+                    className="font-bold text-blue-600 dark:text-blue-400 font-mono"
+                  />
+                </Field>
+                <div
+                  className="sm:col-span-2 text-[11px] rounded-lg px-3 py-2 border"
+                  style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-muted)' }}
+                >
+                  A customer owes the shop, or the shop owes the customer — not both. Set whichever one
+                  applies; the other should stay at 0.
+                </div>
+              </>
             )}
 
             {/* If Vendor: Outstanding Payable is editable both on Add and Edit */}

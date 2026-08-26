@@ -179,6 +179,7 @@ function EntryModal({ open, mode, cfg, showToast, onClose, onSaved }) {
 
   const submit = async (e) => {
     e.preventDefault();
+    if (saving) return;
     if (!form.partyId || !amount) {
       showToast('Select a party and enter a non-zero amount.', 'error');
       return;
