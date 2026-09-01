@@ -85,7 +85,12 @@ export default function Reconciliation({ showToast }) {
 
   const toggleAll = () => {
     const next = !allTicked;
-    setCleared(entries.reduce((acc, e) => ({ ...acc, [e.voucherId]: next }), {}));
+    setCleared(
+      entries.reduce((acc, e) => {
+        acc[e.voucherId] = next;
+        return acc;
+      }, {})
+    );
   };
 
   const save = async () => {

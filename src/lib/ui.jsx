@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Search, ChevronDown, Inbox, Loader2, Printer, Download, Check, Maximize2, Minimize2 } from 'lucide-react';
-import { money } from './api';
+import { money, todayISO, monthStartISO, financialYearStartISO } from './api';
 
 const cx = (...parts) => parts.filter(Boolean).join(' ');
 
@@ -419,18 +419,22 @@ export function SegmentedControl({ options, value, onChange, className = '' }) {
 /** Period selector shared by every report and ledger screen. */
 export function DateRange({ from, to, onChange, presets = true }) {
   const apply = (nextFrom, nextTo) => onChange({ from: nextFrom, to: nextTo });
-  const today = new Date().toISOString().slice(0, 10);
+  // Local calendar date, matching the convention documented on todayISO() in
+  // lib/api.js — a UTC-based "today" (this used to be `new Date().toISOString()`)
+  // silently requests yesterday's data for the first several hours of every
+  // local day east of UTC.
+  const today = todayISO();
 
   const quick = [
     { label: 'Today', from: today, to: today },
     {
       label: 'This month',
-      from: `${today.slice(0, 7)}-01`,
+      from: monthStartISO(),
       to: today
     },
     {
       label: 'This FY',
-      from: `${new Date().getMonth() >= 3 ? new Date().getFullYear() : new Date().getFullYear() - 1}-04-01`,
+      from: financialYearStartISO(),
       to: today
     },
     { label: 'All time', from: '', to: '' }

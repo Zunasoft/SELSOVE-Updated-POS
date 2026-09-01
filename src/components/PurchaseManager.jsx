@@ -34,6 +34,7 @@ const PURCHASE_TABS = [
  * the vendor — so the "new purchase" flow is the heart of this screen.
  */
 export default function PurchaseManager({ tenant, token, showToast }) {
+  const loadSeq = useRef(0);
   const [range, setRange] = useState({ from: financialYearStartISO(), to: todayISO() });
   const [purchases, setPurchases] = useState([]);
   const [vendors, setVendors] = useState([]);
@@ -72,6 +73,9 @@ export default function PurchaseManager({ tenant, token, showToast }) {
   const loadPayments = () => api.get('/vendors/payments').then((d) => setPayments(d || []));
 
   const load = async () => {
+    // Guard against a slower, older request (e.g. a previous date-range
+    // selection) resolving after a newer one and clobbering fresher state.
+    const seq = ++loadSeq.current;
     setLoading(true);
     try {
       const [p, v, pr, tr, rep, po, vc, pay, cat, un, wh, settings] = await Promise.all([
@@ -88,6 +92,7 @@ export default function PurchaseManager({ tenant, token, showToast }) {
         api.get('/warehouses').catch(() => []),
         api.get('/settings').catch(() => ({}))
       ]);
+      if (seq !== loadSeq.current) return;
       setPurchases(p || []);
       setVendors(v || []);
       setProducts(pr || []);
@@ -101,9 +106,10 @@ export default function PurchaseManager({ tenant, token, showToast }) {
       setWarehouses(wh || []);
       setPosSettings(settings?.pos || {});
     } catch (err) {
+      if (seq !== loadSeq.current) return;
       showToast(api.message(err, 'Could not load purchase data.'), 'error');
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   };
 
@@ -772,7 +778,10 @@ export default function PurchaseManager({ tenant, token, showToast }) {
  * first, exactly as the backend does it.
  */
 function VendorPayablesPanel({ vendors, onPay }) {
-  const payable = vendors.filter((v) => v.outstandingPayable > 0).sort((a, b) => b.outstandingPayable - a.outstandingPayable);
+  const payable = useMemo(
+    () => vendors.filter((v) => v.outstandingPayable > 0).sort((a, b) => b.outstandingPayable - a.outstandingPayable),
+    [vendors]
+  );
 
   return (
     <Panel>
@@ -915,7 +924,12 @@ function PurchaseDetailModal({ purchase, vendorCredits = [], onClose, onVoid, on
                 label: 'Amount',
                 align: 'right',
                 width: 120,
-                render: (i) => <Money value={i.qty * i.rate * (1 + (i.taxRate || 0) / 100)} className="font-bold" />
+                render: (i) => (
+                  <Money
+                    value={i.total ?? Math.max(0, i.qty * i.rate * (1 + (i.taxRate || 0) / 100) - (i.discount || 0))}
+                    className="font-bold"
+                  />
+                )
               }
             ]}
             rows={purchase.items || []}

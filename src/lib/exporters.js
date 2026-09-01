@@ -198,7 +198,10 @@ export function exportInvoiceToWord({ invoice = {}, settings = {}, customConfig 
     const taxRate = Number(it.taxRate || it.gstRate || 0);
     const discount = Number(it.discount || 0);
     const lineSubtotal = qty * rate;
-    const lineTotal = Number(it.total || (lineSubtotal + (lineSubtotal * taxRate) / 100 - discount));
+    // `??`, not `||` — a fully-discounted or promo-free line legitimately has
+    // it.total === 0, and `||` would treat that falsy 0 as "missing" and
+    // silently recompute (and print) a nonzero total for it instead.
+    const lineTotal = Number(it.total ?? (lineSubtotal + (lineSubtotal * taxRate) / 100 - discount));
 
     return `
       <tr>
@@ -418,7 +421,7 @@ export function exportBillToWord({ receipt = {}, settings = {}, customConfig = {
       <td style="border: 1px solid #cbd5e1; padding: 4pt;"><strong>${it.name}</strong></td>
       <td style="border: 1px solid #cbd5e1; padding: 4pt; text-align: center;">${it.qty || 1}</td>
       <td style="border: 1px solid #cbd5e1; padding: 4pt; text-align: right;">₹${Number(it.price || 0).toFixed(2)}</td>
-      <td style="border: 1px solid #cbd5e1; padding: 4pt; text-align: right; font-weight: bold;">₹${Number(it.total || (it.qty * it.price) || 0).toFixed(2)}</td>
+      <td style="border: 1px solid #cbd5e1; padding: 4pt; text-align: right; font-weight: bold;">₹${Number(it.total ?? (Number(it.qty || 0) * Number(it.price || 0))).toFixed(2)}</td>
     </tr>
   `).join('');
 
@@ -534,7 +537,7 @@ export function renderCustomDocumentHtml(templateHtml, { invoice = {}, receipt =
       <td style="text-align: center; padding: 6px; border: 1px solid #cbd5e1;">${it.qty || 1} ${it.unit || 'pcs'}</td>
       <td style="text-align: right; padding: 6px; border: 1px solid #cbd5e1;">₹${Number(it.price || 0).toFixed(2)}</td>
       <td style="text-align: center; padding: 6px; border: 1px solid #cbd5e1;">${Number(it.taxRate || 0)}%</td>
-      <td style="text-align: right; padding: 6px; border: 1px solid #cbd5e1; font-weight: bold;">₹${Number(it.total || (it.qty * it.price) || 0).toFixed(2)}</td>
+      <td style="text-align: right; padding: 6px; border: 1px solid #cbd5e1; font-weight: bold;">₹${Number(it.total ?? (Number(it.qty || 0) * Number(it.price || 0))).toFixed(2)}</td>
     </tr>
   `).join('');
 

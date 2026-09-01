@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Printer, Tag, Check, X, Sliders } from 'lucide-react';
 import { Modal, Button, Field, Input, Select, Money } from '../lib/ui';
 import { money } from '../lib/api';
@@ -28,7 +28,8 @@ function BarcodeSVG({ value = '123456789012', height = 40 }) {
   );
 }
 
-export default function BarcodePrinterModal({ product, onClose, showToast }) {
+export default function BarcodePrinterModal({ product, companyName, onClose, showToast }) {
+  const storeName = companyName || 'Your Store';
   const [quantity, setQuantity] = useState(12);
   const [labelSize, setLabelSize] = useState('50x25');
   const [showCompany, setShowCompany] = useState(true);
@@ -37,6 +38,14 @@ export default function BarcodePrinterModal({ product, onClose, showToast }) {
   const [showPrice, setShowPrice] = useState(true);
   const [selectedBatchId, setSelectedBatchId] = useState('');
   const [showBatchInfo, setShowBatchInfo] = useState(true);
+
+  // InventoryManager swaps `product` directly between rows without ever
+  // passing null in between, so this component never unmounts between two
+  // different products — without this, a batch picked for the previous
+  // product would stay selected (and be printed) against the new one.
+  useEffect(() => {
+    setSelectedBatchId('');
+  }, [product?.id]);
 
   if (!product) return null;
 
@@ -57,7 +66,7 @@ export default function BarcodePrinterModal({ product, onClose, showToast }) {
       .map(
         (_, i) => `
         <div class="label-box size-${labelSize}">
-          ${showCompany ? `<div class="company-name">Selsolve Retail</div>` : ''}
+          ${showCompany ? `<div class="company-name">${storeName}</div>` : ''}
           <div class="prod-name">${product.name}</div>
           ${showRegionalName && (product.regionalName || product.printName) ? `<div class="regional-name">${product.regionalName || product.printName}</div>` : ''}
           <div class="barcode-wrapper">
@@ -210,7 +219,7 @@ export default function BarcodePrinterModal({ product, onClose, showToast }) {
 
         {/* Live Preview Box */}
         <div className="border border-dashed border-[color:var(--border-strong)] rounded-xl p-4 bg-white flex flex-col items-center justify-center text-black space-y-1 max-w-xs mx-auto shadow-sm">
-          {showCompany && <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500">Selsolve Retail</div>}
+          {showCompany && <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500">{storeName}</div>}
           <div className="text-xs font-bold text-slate-900 truncate max-w-full">{product.name}</div>
           {showRegionalName && (product.regionalName || product.printName) && (
             <div className="text-[10px] text-indigo-700 font-medium">{product.regionalName || product.printName}</div>

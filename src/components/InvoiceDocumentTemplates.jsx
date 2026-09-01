@@ -363,7 +363,11 @@ export function numberToWords(amount) {
     return inWords(Math.floor(n / 10000000)) + ' Crore ' + inWords(n % 10000000);
   }
 
-  return (inWords(num).trim() + ' Rupees Only');
+  // inWords() branches each already end in their own trailing space, and the
+  // ' Thousand '/' Lakh '/' Crore ' separators add a leading space too, which
+  // doubled up the space before those words on every printed amount ≥ 1,000.
+  // Collapsing runs of whitespace keeps this safe regardless of branch taken.
+  return (inWords(num).trim() + ' Rupees Only').replace(/\s+/g, ' ');
 }
 
 /**

@@ -85,6 +85,22 @@ export default function CustomerVendorLedger({ showToast }) {
     });
   }, [isCustomers, customers, vendors, query, statusFilter]);
 
+  // KPI ribbon aggregates — recomputed only when the party lists actually
+  // change, instead of on every render (search keystrokes, tab switches, etc).
+  const stats = useMemo(
+    () => ({
+      totalReceivable: customers.reduce((s, c) => s + (c.outstanding || 0), 0),
+      totalPayable: vendors.reduce((s, v) => s + (v.outstandingPayable || 0), 0),
+      overLimit: customers.filter((c) => c.creditLimit > 0 && c.outstanding > c.creditLimit),
+      totalLifetimePurchases: vendors.reduce((s, v) => s + (v.totalPurchased || 0), 0),
+      customersWithDue: customers.filter((c) => (c.outstanding || 0) > 0).length,
+      totalLoyaltyPoints: customers.reduce((s, c) => s + (c.loyaltyPoints || 0), 0),
+      customersWithLoyalty: customers.filter((c) => (c.loyaltyPoints || 0) > 0).length,
+      totalPurchaseInvoices: vendors.reduce((s, v) => s + (v.purchaseCount || 0), 0)
+    }),
+    [customers, vendors]
+  );
+
   const sendReminder = async (customer) => {
     try {
       const res = await api.post(`/customers/${customer.id}/send-whatsapp`);
@@ -137,11 +153,6 @@ export default function CustomerVendorLedger({ showToast }) {
   };
 
   if (loading) return <Spinner label="Loading parties & ledgers…" />;
-
-  const totalReceivable = customers.reduce((s, c) => s + (c.outstanding || 0), 0);
-  const totalPayable = vendors.reduce((s, v) => s + (v.outstandingPayable || 0), 0);
-  const overLimit = customers.filter((c) => c.creditLimit > 0 && c.outstanding > c.creditLimit);
-  const totalLifetimePurchases = vendors.reduce((s, v) => s + (v.totalPurchased || 0), 0);
 
   return (
     <div className="space-y-4">
@@ -216,10 +227,10 @@ export default function CustomerVendorLedger({ showToast }) {
                 </div>
               </div>
               <div className="mt-2 text-xl font-extrabold text-amber-600 dark:text-amber-400">
-                {money(totalReceivable, { decimals: false })}
+                {money(stats.totalReceivable, { decimals: false })}
               </div>
               <div className="mt-1 text-[11px] text-[color:var(--text-muted)]">
-                Due from {customers.filter(c => (c.outstanding || 0) > 0).length} customers
+                Due from {stats.customersWithDue} customers
               </div>
             </div>
 
@@ -227,18 +238,18 @@ export default function CustomerVendorLedger({ showToast }) {
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Over Credit Limit</span>
                 <div className={`p-1.5 rounded-lg ${
-                  overLimit.length > 0
+                  stats.overLimit.length > 0
                     ? 'bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400'
                     : 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400'
                 }`}>
                   <AlertTriangle className="w-4 h-4" />
                 </div>
               </div>
-              <div className={`mt-2 text-xl font-extrabold ${overLimit.length > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
-                {overLimit.length}
+              <div className={`mt-2 text-xl font-extrabold ${stats.overLimit.length > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                {stats.overLimit.length}
               </div>
               <div className="mt-1 text-[11px] text-[color:var(--text-muted)]">
-                {overLimit.length ? `${overLimit[0].name} exceeds limit` : 'All customers within limit'}
+                {stats.overLimit.length ? `${stats.overLimit[0].name} exceeds limit` : 'All customers within limit'}
               </div>
             </div>
 
@@ -250,10 +261,10 @@ export default function CustomerVendorLedger({ showToast }) {
                 </div>
               </div>
               <div className="mt-2 text-xl font-extrabold text-amber-600 dark:text-amber-400">
-                {customers.reduce((s, c) => s + (c.loyaltyPoints || 0), 0)} <span className="text-xs font-normal">pts</span>
+                {stats.totalLoyaltyPoints} <span className="text-xs font-normal">pts</span>
               </div>
               <div className="mt-1 text-[11px] text-[color:var(--text-muted)]">
-                Held by {customers.filter(c => (c.loyaltyPoints || 0) > 0).length} customers
+                Held by {stats.customersWithLoyalty} customers
               </div>
             </div>
           </>
@@ -282,7 +293,7 @@ export default function CustomerVendorLedger({ showToast }) {
                 </div>
               </div>
               <div className="mt-2 text-xl font-extrabold text-rose-600 dark:text-rose-400">
-                {money(totalPayable, { decimals: false })}
+                {money(stats.totalPayable, { decimals: false })}
               </div>
               <div className="mt-1 text-[11px] text-[color:var(--text-muted)]">
                 Owed to suppliers
@@ -297,7 +308,7 @@ export default function CustomerVendorLedger({ showToast }) {
                 </div>
               </div>
               <div className="mt-2 text-xl font-extrabold text-emerald-600 dark:text-emerald-400">
-                {money(totalLifetimePurchases, { decimals: false })}
+                {money(stats.totalLifetimePurchases, { decimals: false })}
               </div>
               <div className="mt-1 text-[11px] text-[color:var(--text-muted)]">
                 Cumulative procurement
@@ -312,7 +323,7 @@ export default function CustomerVendorLedger({ showToast }) {
                 </div>
               </div>
               <div className="mt-2 text-xl font-extrabold text-[color:var(--text-primary)]">
-                {vendors.reduce((s, v) => s + (v.purchaseCount || 0), 0)}
+                {stats.totalPurchaseInvoices}
               </div>
               <div className="mt-1 text-[11px] text-[color:var(--text-muted)]">
                 Recorded goods inward bills

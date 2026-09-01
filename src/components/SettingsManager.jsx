@@ -302,8 +302,10 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
       const res = await saveSection('billing', payload);
       if (customPatch) setBForm(payload);
       showToast(res.message || 'Billing settings saved.');
+      return true;
     } catch (err) {
       showToast(api.message(err, 'Could not save billing settings.'), 'error');
+      return false;
     } finally {
       setSavingBilling(false);
     }
@@ -333,7 +335,7 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
     }
   };
 
-  const handleSetActiveTemplate = (themeId) => {
+  const handleSetActiveTemplate = async (themeId) => {
     const theme = THERMAL_THEMES.find((t) => t.id === themeId);
     const custom = (bForm.customTemplates || []).find((t) => t.id === themeId);
     if (!theme && !custom) return;
@@ -341,8 +343,11 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
     // (showGstin, dividerStyle, sections, ...) must never be flattened onto
     // the shared billing settings, or picking this theme active would leak
     // its look into every other theme's rendering too.
-    saveBilling({ activeThermalTemplate: themeId, customHtml: '' });
-    showToast(`Active bill template set to: ${theme ? theme.name : custom.name}`);
+    // Wait for the save to actually succeed before announcing it — showing
+    // this toast unconditionally meant a failed save still told the user
+    // their new default had been applied.
+    const ok = await saveBilling({ activeThermalTemplate: themeId, customHtml: '' });
+    if (ok) showToast(`Active bill template set to: ${theme ? theme.name : custom.name}`);
   };
 
   const openEditorWithTheme = (themeId) => {
@@ -350,12 +355,12 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
     setShowTemplateEditor(true);
   };
 
-  const handleSetActiveInvoiceTemplate = (themeId) => {
+  const handleSetActiveInvoiceTemplate = async (themeId) => {
     const theme = INVOICE_THEMES.find((t) => t.id === themeId);
     const custom = (bForm.customTemplates || []).find((t) => t.id === themeId);
     if (!theme && !custom) return;
-    saveBilling({ activeInvoiceTemplate: themeId, customHtml: '' });
-    showToast(`Active invoice bill theme set to: ${theme ? theme.name : custom.name}`);
+    const ok = await saveBilling({ activeInvoiceTemplate: themeId, customHtml: '' });
+    if (ok) showToast(`Active invoice bill theme set to: ${theme ? theme.name : custom.name}`);
   };
 
   const openInvoiceEditorWithTheme = (themeId) => {
@@ -412,7 +417,7 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
       }))
   ];
 
-  const handleDeleteCustomTemplateFromGallery = (id) => {
+  const handleDeleteCustomTemplateFromGallery = async (id) => {
     const updated = (bForm.customTemplates || []).filter((t) => t.id !== id);
     const patch = { customTemplates: updated };
     if (bForm.activeThermalTemplate === id) {
@@ -421,8 +426,8 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
     if (bForm.activeInvoiceTemplate === id) {
       patch.activeInvoiceTemplate = 'corporate_blue';
     }
-    saveBilling(patch);
-    showToast('Custom template deleted.');
+    const ok = await saveBilling(patch);
+    if (ok) showToast('Custom template deleted.');
   };
 
   return (

@@ -585,7 +585,10 @@ export function ThermalReceiptView({
 
   // Compute GST slabs
   const gstSlabs = {};
-  let totalSavings = 0;
+  // Starts from the bill-level discount (shown separately below as "Bill
+  // Discount") so the savings badge reflects everything the customer actually
+  // saved, not just per-item discounts.
+  let totalSavings = Number(receipt.discount) || 0;
 
   (receipt.items || []).forEach((item) => {
     const qty = Number(item.qty) || 1;
@@ -796,7 +799,7 @@ export function ThermalReceiptView({
         <div className="space-y-0.5 text-[11px]">
           <div className="flex justify-between">
             <span>{labels.subtotalLabel || 'Subtotal'}:</span>
-            <span className="font-bold">₹{Number(receipt.subtotal || receipt.total).toFixed(2)}</span>
+            <span className="font-bold">₹{Number(receipt.subtotal ?? receipt.total).toFixed(2)}</span>
           </div>
 
           {receipt.discount > 0 && (
@@ -882,7 +885,7 @@ export function ThermalReceiptView({
             <>
               <div className="flex justify-between font-bold">
                 <span>{labels.paidLabel || 'Paid Mode'}: {receipt.paymentMethod || 'CASH'}</span>
-                <span>₹{Number(receipt.paidAmount || receipt.total).toFixed(2)}</span>
+                <span>₹{Number(receipt.paidAmount ?? receipt.total).toFixed(2)}</span>
               </div>
               {receipt.changeAmount > 0 && (
                 <div className="flex justify-between">

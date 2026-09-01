@@ -3880,6 +3880,11 @@ function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onC
                   Delete Invoice
                 </Button>
               )}
+              {!isVoid && !isDraft && dueAmt > 0 && onMarkPaid && (
+                <Button variant="primary" size="sm" icon={CheckCircle2} onClick={() => onMarkPaid(invoice)}>
+                  {paidAmt > 0 ? 'Add Payment' : 'Mark Paid'}
+                </Button>
+              )}
               {!isVoid && !isDraft && onReturn && (
                 <Button variant="outline" size="sm" icon={RefreshCw} onClick={() => onReturn(invoice)}>
                   Return Items

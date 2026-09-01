@@ -63,7 +63,7 @@ const PRODUCT_TYPE_LABELS = {
   composite: { label: 'Composite (Recipe)', tone: 'success' }
 };
 
-export default function InventoryManager({ products, categories, onRefresh, showToast }) {
+export default function InventoryManager({ products, categories, onRefresh, showToast, tenant }) {
   const [tab, setTab] = useState('products');
   const [units, setUnits] = useState([]);
   const [warehouses, setWarehouses] = useState([]);
@@ -145,6 +145,7 @@ export default function InventoryManager({ products, categories, onRefresh, show
           onRefresh={refreshAll}
           batchTrackingEnabled={Boolean(posSettings.enableBatchTracking)}
           storeNearExpiryDays={posSettings.nearExpiryDays}
+          tenant={tenant}
         />
       )}
 
@@ -284,16 +285,22 @@ function findExpiringBatches(products, storeDefaultDays = NEAR_EXPIRY_DAYS) {
 }
 
 function DashboardTab({ summary, products, setTab, nearExpiryDays }) {
+  const evaluated = useMemo(
+    () => (products || []).map((p) => ({
+      product: p,
+      stockInfo: resolveProductStockInfo(p, products)
+    })),
+    [products]
+  );
+
+  const lowStock = useMemo(() => evaluated.filter((e) => !e.stockInfo.isService && e.stockInfo.isLow), [evaluated]);
+  const outOfStock = useMemo(() => evaluated.filter((e) => !e.stockInfo.isService && e.stockInfo.isOut), [evaluated]);
+  const expiringBatches = useMemo(
+    () => findExpiringBatches(products, Number(nearExpiryDays) || NEAR_EXPIRY_DAYS),
+    [products, nearExpiryDays]
+  );
+
   if (!summary) return <Spinner text="Loading inventory insights..." />;
-
-  const evaluated = (products || []).map((p) => ({
-    product: p,
-    stockInfo: resolveProductStockInfo(p, products)
-  }));
-
-  const lowStock = evaluated.filter((e) => !e.stockInfo.isService && e.stockInfo.isLow);
-  const outOfStock = evaluated.filter((e) => !e.stockInfo.isService && e.stockInfo.isOut);
-  const expiringBatches = findExpiringBatches(products, Number(nearExpiryDays) || NEAR_EXPIRY_DAYS);
 
   return (
     <div className="space-y-4">
@@ -506,6 +513,13 @@ function recomputeAutoUnitPricing(f) {
   return { ...f, customSubUnitPrice, customSubUnitMrp, altUnits };
 }
 
+// Stable per-row identity for recipe/combo item rows so React keeps each
+// IngredientRow's internal state (sub-unit toggle, in-progress qty text)
+// attached to the correct row when a row is removed from the middle of the
+// list — an index-based key would reuse the wrong row's state after a shift.
+let rowKeySeq = 0;
+const genRowKey = () => `row_${Date.now()}_${rowKeySeq++}`;
+
 const blankProduct = (categories) => ({
   name: '',
   regionalName: '',
@@ -664,11 +678,11 @@ export function ProductFormModal({
       trackBatches: Boolean(product.trackBatches),
       batches: Array.isArray(product.batches) ? product.batches.map((b) => ({ ...b })) : [],
       nearExpiryDays: product.nearExpiryDays ?? '',
-      comboItems: Array.isArray(product.comboItems) ? product.comboItems.map((i) => ({ ...i })) : [],
+      comboItems: Array.isArray(product.comboItems) ? product.comboItems.map((i) => ({ ...i, _key: genRowKey() })) : [],
       recipeItems: Array.isArray(product.recipeItems) && product.recipeItems.length > 0
-        ? product.recipeItems.map((i) => ({ ...i }))
+        ? product.recipeItems.map((i) => ({ ...i, _key: genRowKey() }))
         : Array.isArray(product.recipe?.ingredients)
-        ? product.recipe.ingredients.map((i) => ({ ...i }))
+        ? product.recipe.ingredients.map((i) => ({ ...i, _key: genRowKey() }))
         : [],
 
       recipeNotes: product.recipeNotes || product.recipe?.notes || '',
@@ -680,7 +694,7 @@ export function ProductFormModal({
   const addIngredient = () => {
     setForm((f) => ({
       ...f,
-      recipeItems: [...(f.recipeItems || []), { productId: '', qty: '' }]
+      recipeItems: [...(f.recipeItems || []), { productId: '', qty: '', _key: genRowKey() }]
     }));
   };
 
@@ -702,7 +716,7 @@ export function ProductFormModal({
   const addComboItem = () => {
     setForm((f) => ({
       ...f,
-      comboItems: [...(f.comboItems || []), { productId: '', qty: '' }]
+      comboItems: [...(f.comboItems || []), { productId: '', qty: '', _key: genRowKey() }]
     }));
   };
 
@@ -1705,7 +1719,7 @@ export function ProductFormModal({
 
                   {(form.recipeItems || []).map((row, idx) => (
                     <IngredientRow
-                      key={idx}
+                      key={row._key ?? idx}
                       row={row}
                       index={idx}
                       products={products}
@@ -1779,7 +1793,7 @@ export function ProductFormModal({
 
                   {(form.comboItems || []).map((row, idx) => (
                     <IngredientRow
-                      key={idx}
+                      key={row._key ?? idx}
                       row={row}
                       index={idx}
                       products={products}
@@ -1936,7 +1950,7 @@ export function ProductFormModal({
   );
 }
 
-function ProductsTab({ products, categories, units, warehouses, showToast, onRefresh, batchTrackingEnabled, storeNearExpiryDays }) {
+function ProductsTab({ products, categories, units, warehouses, showToast, onRefresh, batchTrackingEnabled, storeNearExpiryDays, tenant }) {
   const [query, setQuery] = useState('');
   const [categoryId, setCategoryId] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
@@ -1993,9 +2007,8 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
         if (p.warehouses) {
           displayStock = p.warehouses[warehouseFilter] || 0;
         } else {
-          if (warehouseFilter === 'wh_main') displayStock = Math.max(0, (p.stock || 0) - 10);
-          else if (warehouseFilter === 'wh_shop') displayStock = Math.min(p.stock || 0, 10);
-          else displayStock = 0;
+          const defaultWh = warehouses.find((w) => w.isDefault)?.id || warehouses[0]?.id;
+          displayStock = (warehouseFilter === 'wh_shop' || warehouseFilter === defaultWh) ? (p.stock || 0) : 0;
         }
       }
 
@@ -2033,7 +2046,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
         (p.barcodes || [p.barcode]).some((b) => String(b).includes(needle))
       );
     });
-  }, [products, deferredQuery, categoryId, typeFilter, stockFilter, statusFilter, warehouseFilter, batchFilter, batchNoFilter, storeNearExpiryDays]);
+  }, [products, deferredQuery, categoryId, typeFilter, stockFilter, statusFilter, warehouseFilter, batchFilter, batchNoFilter, storeNearExpiryDays, warehouses]);
 
   const productsById = useMemo(() => {
     const map = {};
@@ -2175,9 +2188,8 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                     if (p.warehouses) {
                       displayStock = p.warehouses[warehouseFilter] || 0;
                     } else {
-                      if (warehouseFilter === 'wh_main') displayStock = Math.max(0, (p.stock || 0) - 10);
-                      else if (warehouseFilter === 'wh_shop') displayStock = Math.min(p.stock || 0, 10);
-                      else displayStock = 0;
+                      const defaultWh = warehouses.find((w) => w.isDefault)?.id || warehouses[0]?.id;
+                      displayStock = (warehouseFilter === 'wh_shop' || warehouseFilter === defaultWh) ? (p.stock || 0) : 0;
                     }
                   }
                   
@@ -2435,7 +2447,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
 
       {/* Barcode Print Modal */}
       {labelProduct && (
-        <BarcodePrinterModal product={labelProduct} onClose={() => setLabelProduct(null)} showToast={showToast} />
+        <BarcodePrinterModal product={labelProduct} companyName={tenant?.name} onClose={() => setLabelProduct(null)} showToast={showToast} />
       )}
 
     </div>
@@ -3357,6 +3369,11 @@ function AdjustTab({ products, showToast, onRefresh }) {
   const [password, setPassword] = useState('');
   const [saving, setSaving] = useState(false);
 
+  const adjustableProducts = useMemo(
+    () => products.filter((p) => p.productType !== 'service'),
+    [products]
+  );
+
   const submit = async (e) => {
     e?.preventDefault();
     if (saving) return;
@@ -3381,7 +3398,7 @@ function AdjustTab({ products, showToast, onRefresh }) {
         <Field label="Select Product">
           <Select value={productId} onChange={(e) => setProductId(e.target.value)} required>
             <option value="">-- Select Product --</option>
-            {products.filter((p) => p.productType !== 'service').map((p) => (
+            {adjustableProducts.map((p) => (
               <option key={p.id} value={p.id}>{p.name} (Current Stock: {p.stock} {p.unit})</option>
             ))}
           </Select>
@@ -3432,12 +3449,21 @@ function HistoryTab({ products }) {
   const [query, setQuery] = useState('');
 
   useEffect(() => {
-    api.get('/inventory/movements', { type }).then((res) => setMovements(Array.isArray(res) ? res : res?.data || [])).catch(() => {});
+    let ignore = false;
+    api.get('/inventory/movements', { type })
+      .then((res) => {
+        if (ignore) return;
+        setMovements(Array.isArray(res) ? res : res?.data || []);
+      })
+      .catch(() => {});
+    return () => {
+      ignore = true;
+    };
   }, [type]);
 
   const filtered = useMemo(() => {
     if (!query) return movements;
-    return movements.filter((m) => m.productName.toLowerCase().includes(query.toLowerCase()));
+    return movements.filter((m) => String(m.productName || '').toLowerCase().includes(query.toLowerCase()));
   }, [movements, query]);
 
   return (
@@ -3543,7 +3569,7 @@ function BatchesTab({ products, showToast, onRefresh, storeNearExpiryDays }) {
       .filter((r) => {
         if (statusFilter !== 'all' && r.status !== statusFilter) return false;
         if (!needle) return true;
-        return r.batch.batchNo.toLowerCase().includes(needle) || r.product.name.toLowerCase().includes(needle);
+        return String(r.batch.batchNo || '').toLowerCase().includes(needle) || String(r.product.name || '').toLowerCase().includes(needle);
       })
       .sort((a, b) => {
         const rank = { expired: 0, near: 1, active: 2 };
