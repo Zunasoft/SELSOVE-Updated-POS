@@ -9,15 +9,18 @@ import {
 import api, { setSessionExpiredHandler, SESSION_KEYS } from './lib/api';
 import ErrorBoundary from './components/ErrorBoundary';
 import OTPLogin from './components/OTPLogin';
-import ShopDashboard from './components/ShopDashboard';
-import POSTerminal from './components/POSTerminal';
-import InvoicesManager from './components/InvoicesManager';
-import InventoryManager from './components/InventoryManager';
-import CustomerVendorLedger from './components/CustomerVendorLedger';
-import PurchaseManager from './components/PurchaseManager';
-import ReportsManager from './components/ReportsManager';
-import SettingsManager from './components/SettingsManager';
-import AccountsModule from './components/accounts/AccountsModule';
+import { Spinner } from './lib/ui';
+
+// Code-split screens to optimize bundle size, eliminate buffering, and ensure instant tab switching
+const ShopDashboard = React.lazy(() => import('./components/ShopDashboard'));
+const POSTerminal = React.lazy(() => import('./components/POSTerminal'));
+const InvoicesManager = React.lazy(() => import('./components/InvoicesManager'));
+const InventoryManager = React.lazy(() => import('./components/InventoryManager'));
+const CustomerVendorLedger = React.lazy(() => import('./components/CustomerVendorLedger'));
+const PurchaseManager = React.lazy(() => import('./components/PurchaseManager'));
+const ReportsManager = React.lazy(() => import('./components/ReportsManager'));
+const SettingsManager = React.lazy(() => import('./components/SettingsManager'));
+const AccountsModule = React.lazy(() => import('./components/accounts/AccountsModule'));
 
 const TABS = [
   { id: 'dashboard', label: 'Shop Dashboard', short: 'Home', icon: LayoutDashboard },
@@ -274,7 +277,7 @@ export default function App() {
   const screens = {
     dashboard: <ShopDashboard {...shared} onNavigate={handleTabClick} />,
     pos: <POSTerminal {...shared} settings={settings} onSaleCompleted={fetchStoreData} />,
-    invoices: <InvoicesManager {...shared} onNavigate={handleTabClick} />,
+    invoices: <InvoicesManager {...shared} settings={settings} onNavigate={handleTabClick} />,
     inventory: (
       <InventoryManager
         {...shared}
@@ -470,7 +473,9 @@ export default function App() {
           )}
         </AnimatePresence>
         <ErrorBoundary key={activeTab} label="This section hit an unexpected error.">
-          {screens[activeTab]}
+          <React.Suspense fallback={<div className="flex h-64 items-center justify-center"><Spinner label="Opening section…" /></div>}>
+            {screens[activeTab]}
+          </React.Suspense>
         </ErrorBoundary>
       </main>
     </div>

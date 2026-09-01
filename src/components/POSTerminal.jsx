@@ -6,7 +6,8 @@ import {
   ArrowUpFromLine, LayoutGrid, Star, RotateCcw, Wallet, CheckCircle2,
   Flame, ArrowUpDown, Clock, History, Zap, FileCheck, CreditCard,
   Coins, Building2, Sparkles, PlusCircle, MinusCircle, AlertCircle, CheckCheck,
-  TrendingUp, TrendingDown, Filter, ArrowRight, Users
+  TrendingUp, TrendingDown, Filter, ArrowRight, Users, Maximize2, Minimize2,
+  FileText, Download, ChevronLeft, ChevronRight
 } from 'lucide-react';
 
 import api, { money, fmtDateTime, fmtDate, API_BASE } from '../lib/api';
@@ -15,6 +16,9 @@ import {
   Spinner, EmptyState, SegmentedControl, DataTable, StatTile
 } from '../lib/ui';
 import { getCategoryTheme } from '../lib/categoryTheme';
+import { ThermalReceiptView, THERMAL_THEMES, BILLING_THERMAL_THEME_IDS } from './ThermalReceiptTemplates';
+import { InvoiceDocumentView, INVOICE_THEMES, ACCENT_COLORS } from './InvoiceDocumentTemplates';
+import { exportBillToWord, exportInvoiceToWord } from '../lib/exporters';
 
 const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Credit (Udhar)', 'Partial Payment'];
 const DISCOUNT_PRESETS = [0, 5, 10, 15, 20];
@@ -334,11 +338,12 @@ export function getProductAutoVisual(name = '') {
 }
 
 export function getProductUnitOptions(product) {
-  if (!product) return [{ unit: 'pcs', factor: 1, price: 0, isBase: true }];
+  if (!product) return [{ unit: 'pcs', factor: 1, price: 0, mrp: 0, isBase: true }];
   const baseUnit = String(product.unit || 'pcs').toLowerCase().trim();
   const basePrice = Number(product.price) || 0;
+  const baseMrp = Number(product.mrp) || basePrice;
   const options = [
-    { unit: product.unit || 'pcs', factor: 1, price: basePrice, isBase: true }
+    { unit: product.unit || 'pcs', factor: 1, price: basePrice, mrp: baseMrp, isBase: true }
   ];
 
   // 1. Custom sub-unit (e.g. g for kg, ml for ltr, pcs for box/dozen)
@@ -346,10 +351,12 @@ export function getProductUnitOptions(product) {
     const subName = product.customSubUnitName.trim();
     const factorNum = Number(product.customSubUnitFactor);
     const subPrice = product.customSubUnitPrice ? Number(product.customSubUnitPrice) : basePrice / factorNum;
+    const subMrp = product.customSubUnitMrp ? Number(product.customSubUnitMrp) : baseMrp / factorNum;
     options.push({
       unit: subName,
       factor: 1 / factorNum,
       price: subPrice,
+      mrp: subMrp,
       subFactor: factorNum,
       isSub: true
     });
@@ -361,6 +368,7 @@ export function getProductUnitOptions(product) {
       unit: 'g',
       factor: 0.001,
       price: basePrice / 1000,
+      mrp: baseMrp / 1000,
       subFactor: 1000,
       isSub: true
     });
@@ -369,6 +377,7 @@ export function getProductUnitOptions(product) {
       unit: 'ml',
       factor: 0.001,
       price: basePrice / 1000,
+      mrp: baseMrp / 1000,
       subFactor: 1000,
       isSub: true
     });
@@ -380,10 +389,12 @@ export function getProductUnitOptions(product) {
       if (alt && alt.unit && !options.some(o => o.unit.toLowerCase() === String(alt.unit).toLowerCase())) {
         const factor = Number(alt.factor) || 1;
         const price = alt.price !== undefined && alt.price !== null && alt.price !== '' ? Number(alt.price) : basePrice * factor;
+        const mrp = alt.mrp !== undefined && alt.mrp !== null && alt.mrp !== '' ? Number(alt.mrp) : baseMrp * factor;
         options.push({
           unit: alt.unit,
           factor,
           price,
+          mrp,
           isAlt: true
         });
       }
@@ -391,6 +402,33 @@ export function getProductUnitOptions(product) {
   }
 
   return options;
+}
+
+/**
+ * Renders a base-unit quantity in every other unit configured on the product
+ * (sub-unit like g/ml, plus any bigger alt units like bag/box), e.g.
+ * "50 kg" -> "50000 g · 2 bag". Returns '' when there's nothing to add.
+ */
+export function formatUnitBreakdown(product, baseQty) {
+  const qty = Number(baseQty) || 0;
+  if (!(qty > 0)) return '';
+  const others = getProductUnitOptions(product).filter((o) => !o.isBase && Number(o.factor) > 0);
+  if (!others.length) return '';
+  return others
+    .map((o) => `${Math.round((qty / o.factor) * 100) / 100} ${o.unit}`)
+    .join(' · ');
+}
+
+/** Batches with stock left, soonest-expiry first (no-expiry batches last, oldest-received first among those). */
+export function getSellableBatches(product) {
+  const batches = (product?.batches || []).filter((b) => Number(b.qty) > 0);
+  return batches.sort((a, b) => {
+    const aHas = !!a.expiryDate;
+    const bHas = !!b.expiryDate;
+    if (aHas && bHas) return new Date(a.expiryDate) - new Date(b.expiryDate);
+    if (aHas !== bHas) return aHas ? -1 : 1;
+    return new Date(a.createdAt || 0) - new Date(b.createdAt || 0);
+  });
 }
 
 export function getProductRemainingStock(product, cart = [], allProducts = [], depth = 0) {
@@ -478,21 +516,24 @@ export function getProductRemainingStock(product, cart = [], allProducts = [], d
     return sum;
   }, 0);
 
-  const rawRemaining = Number(product.stock || 0) - inCartBase;
-  const remaining = Math.max(0, Math.round(rawRemaining * 10000) / 10000);
+  const rawRemaining = Math.round((Number(product.stock || 0) - inCartBase) * 10000) / 10000;
+  const remaining = Math.max(0, rawRemaining);
   const isOut = remaining <= 0;
   const isLow = remaining <= Number(product.minStock ?? 5);
-
-  const options = getProductUnitOptions(product);
-  const subOption = options.find((o) => o.isSub);
+  // Billed quantity exceeds what's on hand — the cart is allowed to go negative
+  // so the cashier can still see and confirm the oversell, but it's flagged red.
+  const isOversold = rawRemaining < 0;
 
   let text = `${remaining} ${product.unit}`;
-  if (subOption && subOption.subFactor && remaining > 0) {
-    const remainingSub = Math.round(remaining * subOption.subFactor * 100) / 100;
-    text = `${remaining} ${product.unit} (${remainingSub} ${subOption.unit})`;
+  const breakdown = formatUnitBreakdown(product, remaining);
+  if (breakdown) {
+    text = `${remaining} ${product.unit} (${breakdown})`;
+  }
+  if (isOversold) {
+    text = `${rawRemaining} ${product.unit}`;
   }
 
-  return { remaining, text, isLow, isOut };
+  return { remaining, rawRemaining, text, isLow, isOut, isOversold };
 }
 
 export function playScanSound(type = 'add') {
@@ -600,6 +641,12 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   const [initialLoading, setInitialLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
 
+  useEffect(() => {
+    if (appSettings) {
+      setSettings(appSettings);
+    }
+  }, [appSettings]);
+
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState('default');
@@ -613,11 +660,19 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   const [tableId, setTableId] = useState('');
   const [note, setNote] = useState('');
 
+  const categoryScrollRef = useRef(null);
+  const scrollCategoryTrack = (offset) => {
+    if (categoryScrollRef.current) {
+      categoryScrollRef.current.scrollBy({ left: offset, behavior: 'smooth' });
+    }
+  };
+
   const [weightModal, setWeightModal] = useState(null);
   const [weightUnit, setWeightUnit] = useState('kg');
   const [weightInput, setWeightInput] = useState('1');
   const [scaleReading, setScaleReading] = useState(false);
   const [liveWeight, setLiveWeight] = useState(0);
+  const [batchPickerTarget, setBatchPickerTarget] = useState(null); // { product, qty, pricing }
 
   const [showCheckout, setShowCheckout] = useState(false);
   const [paymentMode, setPaymentMode] = useState('Cash');
@@ -755,12 +810,14 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
   /* ------------------------- loyalty redemption ------------------------- */
   const loyalty = useMemo(() => {
-    const pos = settings?.pos || {};
+    const pos = settings?.loyalty || settings?.pos || {};
     const rate = Number(pos.loyaltyRedeemValue) || 0;
     const available = customer?.loyaltyPoints || 0;
     const minPoints = Number(pos.loyaltyMinRedeemPoints) || 0;
+    const maxPercent = Number(pos.loyaltyMaxRedeemPercent) || 100;
+    const maxDiscountAmount = (totals.grand * maxPercent) / 100;
 
-    const maxByBill = rate > 0 ? Math.floor(totals.grand / rate) : 0;
+    const maxByBill = rate > 0 ? Math.floor(maxDiscountAmount / rate) : 0;
     const maxPoints = Math.max(0, Math.min(available, maxByBill));
 
     const points = Math.min(Number(redeemPoints) || 0, maxPoints);
@@ -828,6 +885,60 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
   /* ------------------------- adding items ------------------------- */
 
+  const commitAddToCart = useCallback(
+    (product, qty, pricing, batchId) => {
+      const batch = batchId ? (product.batches || []).find((b) => b.id === batchId) : null;
+      // A batch can be priced differently from the product's normal rate (e.g.
+      // an older lot sold at a clearance price) — that override becomes the
+      // base price this line's unit conversions (kg/g, alt units) build from.
+      const basePrice = batch && batch.sellPrice != null ? Number(batch.sellPrice) : pricing.price;
+      const options = getProductUnitOptions({ ...product, price: basePrice });
+      const defaultOpt = options[0] || { unit: product.unit || 'pcs', factor: 1, price: basePrice };
+
+      // The toast fires after setCart returns, not from inside the updater —
+      // React invokes functional updaters during the render phase, and calling
+      // another component's setState (showToast -> App's setToast) from in
+      // there trips "Cannot update a component while rendering a different
+      // component" and risks losing the toast under concurrent scheduling.
+      let toastMsg = '';
+      setCart((prev) => {
+        const idx = prev.findIndex((i) => i.id === product.id && i.unit === defaultOpt.unit && (i.batchId || null) === (batchId || null));
+        if (idx >= 0) {
+          const next = [...prev];
+          const mergedQty = Math.round((next[idx].qty + qty) * 1000) / 1000;
+          const merged = { ...next[idx], qty: mergedQty, total: Math.round(mergedQty * next[idx].price * 100) / 100 };
+          next[idx] = merged;
+          toastMsg = `Updated ${product.name} (qty: ${mergedQty})`;
+          return next;
+        }
+        toastMsg = `Added ${product.name} to bill (qty: ${qty})`;
+        return [
+          ...prev,
+          {
+            ...product,
+            id: product.id,
+            name: product.name,
+            printName: product.printName || product.name,
+            barcode: product.barcode || '',
+            qty,
+            unit: defaultOpt.unit,
+            saleUnit: defaultOpt.unit,
+            unitFactor: defaultOpt.factor || 1,
+            price: defaultOpt.price,
+            total: Math.round(qty * defaultOpt.price * 100) / 100,
+            taxRate: product.taxRate || 0,
+            pricingRule: pricing.ruleSource,
+            itemDiscountPercent: pricing.discountPercent,
+            batchId: batchId || undefined,
+            batchNo: batch ? batch.batchNo : undefined
+          }
+        ];
+      });
+      showToast(toastMsg);
+    },
+    [showToast]
+  );
+
   const addToCart = useCallback(
     (product, qty = 1) => {
       if (session?.status !== 'open') {
@@ -850,56 +961,71 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         return;
       }
 
-      const defaultOpt = options[0] || { unit: product.unit || 'pcs', factor: 1, price: pricing.price };
-
-      setCart((prev) => {
-        const idx = prev.findIndex((i) => i.id === product.id && i.unit === defaultOpt.unit);
-        if (idx >= 0) {
-          const next = [...prev];
-          const mergedQty = Math.round((next[idx].qty + qty) * 1000) / 1000;
-          const merged = { ...next[idx], qty: mergedQty, total: Math.round(mergedQty * next[idx].price * 100) / 100 };
-          next[idx] = merged;
-          showToast(`Updated ${product.name} (qty: ${mergedQty})`);
-          return next;
+      // Batch-tracked with a real choice to make — let the cashier confirm
+      // which batch to sell from (soonest-expiry pre-selected) instead of
+      // silently auto-picking. A single available batch needs no picker.
+      if (product.trackBatches) {
+        const sellable = getSellableBatches(product);
+        if (sellable.length > 1) {
+          setBatchPickerTarget({ product, qty, pricing });
+          return;
         }
-        showToast(`Added ${product.name} to bill (qty: ${qty})`);
-        return [
-          ...prev,
-          {
-            ...product,
-            id: product.id,
-            name: product.name,
-            printName: product.printName || product.name,
-            barcode: product.barcode || '',
-            qty,
-            unit: defaultOpt.unit,
-            saleUnit: defaultOpt.unit,
-            unitFactor: defaultOpt.factor || 1,
-            price: defaultOpt.price,
-            total: Math.round(qty * defaultOpt.price * 100) / 100,
-            taxRate: product.taxRate || 0,
-            pricingRule: pricing.ruleSource,
-            itemDiscountPercent: pricing.discountPercent
+        // Exactly one batch — nothing to choose, but still honor its price
+        // override (if any) rather than silently falling back to the
+        // product's normal price. If it's already expired, confirm first
+        // rather than silently selling it.
+        const only = sellable[0];
+        if (only?.expiryDate && new Date(only.expiryDate) < new Date()) {
+          const expiredDays = Math.abs(Math.ceil((new Date(only.expiryDate) - new Date()) / 86400000));
+          if (!window.confirm(`The only available batch (${only.batchNo}) expired ${expiredDays} day(s) ago. Sell it anyway?`)) {
+            return;
           }
-        ];
-      });
+        }
+        commitAddToCart(product, qty, pricing, only?.id || null);
+        return;
+      }
+
+      commitAddToCart(product, qty, pricing, null);
     },
-    [customerId, customers, priceSheets, priceSheetId, showToast, session]
+    [customerId, customers, priceSheets, priceSheetId, showToast, session, commitAddToCart]
+  );
+
+  const confirmBatchPick = useCallback(
+    (batchId) => {
+      if (!batchPickerTarget) return;
+      const { product, qty, pricing } = batchPickerTarget;
+      const batch = (product.batches || []).find((b) => b.id === batchId);
+      if (batch?.expiryDate && new Date(batch.expiryDate) < new Date()) {
+        const expiredDays = Math.abs(Math.ceil((new Date(batch.expiryDate) - new Date()) / 86400000));
+        if (!window.confirm(`Batch ${batch.batchNo} expired ${expiredDays} day(s) ago. Sell it anyway?`)) {
+          return;
+        }
+      }
+      commitAddToCart(product, qty, pricing, batchId);
+      setBatchPickerTarget(null);
+    },
+    [batchPickerTarget, commitAddToCart]
   );
 
   const removeFromCart = useCallback((product, qty = 1) => {
+    // Side effects (toast, sound) run after setCart returns — see commitAddToCart
+    // above for why they can't live inside the updater itself.
+    let toastMsg = '';
+    let toastType = 'success';
+    let sound = null;
     setCart((prev) => {
       const idx = prev.findIndex((i) => i.id === product.id || i.name === product.name);
       if (idx < 0) {
-        showToast(`${product.name} is not in the bill.`, 'error');
-        playScanSound('error');
+        toastMsg = `${product.name} is not in the bill.`;
+        toastType = 'error';
+        sound = 'error';
         return prev;
       }
       const current = prev[idx];
       const newQty = Math.round((current.qty - qty) * 1000) / 1000;
       if (newQty <= 0) {
-        showToast(`Removed ${product.name} from bill.`);
-        playScanSound('remove');
+        toastMsg = `Removed ${product.name} from bill.`;
+        sound = 'remove';
         return prev.filter((_, i) => i !== idx);
       }
       const next = [...prev];
@@ -908,10 +1034,12 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         qty: newQty,
         total: Math.round(newQty * current.price * 100) / 100
       };
-      showToast(`Decremented ${product.name} (qty: ${newQty})`);
-      playScanSound('remove');
+      toastMsg = `Decremented ${product.name} (qty: ${newQty})`;
+      sound = 'remove';
       return next;
     });
+    showToast(toastMsg, toastType);
+    if (sound) playScanSound(sound);
   }, [showToast]);
 
   /**
@@ -1077,10 +1205,10 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
     showToast(`${value} ${selectedOpt.unit} of ${product.name} added (${money(lineTotal)}).`);
   };
 
-  const switchCartItemUnit = (cartItemId, targetUnit) => {
+  const switchCartItemUnit = (cartItemId, fromUnit, batchId, targetUnit) => {
     setCart((prev) =>
       prev.map((item) => {
-        if (item.id !== cartItemId) return item;
+        if (!(item.id === cartItemId && item.unit === fromUnit && (item.batchId || null) === (batchId || null))) return item;
         const product = products.find((p) => p.id === item.id) || item;
         const options = getProductUnitOptions(product);
         const currentOpt = options.find((o) => o.unit.toLowerCase() === String(item.unit).toLowerCase()) || { factor: item.unitFactor || 1, price: item.price };
@@ -1088,8 +1216,14 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
         // Base quantity currently in cart:
         const currentBaseQty = (Number(item.qty) || 0) * (currentOpt.factor || 1);
-        // New quantity in target unit:
-        const newQty = newOpt.factor > 0 ? Math.round((currentBaseQty / newOpt.factor) * 1000) / 1000 : item.qty;
+        // Switching into a bigger pack unit (e.g. bag, box, case) starts fresh at
+        // 1 — carrying over a converted fraction (like 0.04 bag) isn't useful for
+        // something sold as whole packs. Sub-units (g, ml) still convert normally.
+        const newQty = newOpt.isAlt
+          ? 1
+          : newOpt.factor > 0
+            ? Math.round((currentBaseQty / newOpt.factor) * 1000) / 1000
+            : item.qty;
         const newPrice = newOpt.price;
         const total = Math.round(newQty * newPrice * 100) / 100;
 
@@ -1106,11 +1240,18 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
     );
   };
 
-  const updateQty = (id, delta) =>
+  // A product can appear as more than one cart line — different units (kg vs
+  // g) or, now, different batches of the same product. `id` alone doesn't
+  // identify a single line, so every per-line edit below also matches on
+  // unit + batch (mirrors the check the remove button already used).
+  const isSameLine = (i, id, unit, batchId) =>
+    i.id === id && (unit === undefined || i.unit === unit) && (i.batchId || null) === (batchId || null);
+
+  const updateQty = (id, delta, unit, batchId) =>
     setCart((prev) =>
       prev
         .map((i) => {
-          if (i.id !== id) return i;
+          if (!isSameLine(i, id, unit, batchId)) return i;
           const step = i.unit === 'g' || i.unit === 'ml' ? 50 : 1;
           const qty = Math.round(Math.max(0, i.qty + delta * step) * 1000) / 1000;
           return { ...i, qty, total: Math.round(qty * i.price * 100) / 100 };
@@ -1122,15 +1263,15 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   // sign before checkout — verified live that a negative qty slips straight
   // through to the backend, credits stock instead of debiting it, and posts a
   // negative "COMPLETED" sale. Clamp both to non-negative here, at the source.
-  const setLinePrice = (id, price) =>
+  const setLinePrice = (id, price, unit, batchId) =>
     setCart((prev) =>
-      prev.map((i) => (i.id === id ? { ...i, price: Math.max(0, Number(price) || 0), total: Math.round(i.qty * Math.max(0, Number(price) || 0) * 100) / 100 } : i))
+      prev.map((i) => (isSameLine(i, id, unit, batchId) ? { ...i, price: Math.max(0, Number(price) || 0), total: Math.round(i.qty * Math.max(0, Number(price) || 0) * 100) / 100 } : i))
     );
 
-  const setLineQty = (id, val) =>
+  const setLineQty = (id, val, unit, batchId) =>
     setCart((prev) =>
       prev.map((i) => {
-        if (i.id !== id) return i;
+        if (!isSameLine(i, id, unit, batchId)) return i;
         const newQty = val === '' ? '' : Math.max(0, Number(val) || 0);
         const safeQty = Number(newQty) || 0;
         return { ...i, qty: newQty, total: Math.round(safeQty * i.price * 100) / 100 };
@@ -1302,6 +1443,14 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
       }
 
       (res.warnings || []).forEach((w) => showToast(w, 'error'));
+      // The sale itself always succeeds even if posting it to the ledger
+      // failed (accounting is best-effort so a bookkeeping hiccup never blocks
+      // a customer at the counter) — but that divergence was previously
+      // recorded on the order and never shown anywhere. Surface it so it
+      // doesn't go unnoticed until a books-don't-balance review much later.
+      if (res.data?.accountingError) {
+        showToast(`Bill saved, but the accounting entry failed: ${res.data.accountingError}. Check Accounts for order #${res.data.orderId}.`, 'error');
+      }
       showToast(res.message);
 
       // The tenant middleware now flushes every write to MongoDB before this
@@ -1631,40 +1780,69 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
           </div>
         )}
 
-        <div className="-mx-1 flex items-center gap-1.5 overflow-x-auto px-1 pb-1">
-          <button
-            onClick={() => setSelectedCategory('all')}
-            className={`shrink-0 rounded-xl px-3 py-2 text-[11.5px] font-bold transition-all ${
-              selectedCategory === 'all'
-                ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/30'
-                : 'surface text-[color:var(--text-secondary)] border border-[color:var(--border)] hover:text-[color:var(--text-primary)]'
-            }`}
-          >
-            All items ({products.length})
-          </button>
+        {/* Category Filters Marquee Scrollable Track */}
+        <div className="relative group/cat flex items-center">
+          {categories.length > 4 && (
+            <button
+              type="button"
+              onClick={() => scrollCategoryTrack(-240)}
+              className="absolute -left-2 z-10 p-1.5 rounded-full border border-[color:var(--border)] bg-[color:var(--bg-surface)] text-[color:var(--text-secondary)] shadow-md hover:scale-110 transition-all opacity-0 group-hover/cat:opacity-100 hidden sm:flex items-center justify-center cursor-pointer"
+              title="Scroll categories left"
+            >
+              <ChevronLeft className="w-3.5 h-3.5" />
+            </button>
+          )}
 
-          {categories.map((cat) => {
-            const count = categoryProductCounts.get(cat.id) || 0;
-            const catTheme = getCategoryTheme(cat);
-            const isSelected = selectedCategory === cat.id;
-            return (
-              <button
-                key={cat.id}
-                onClick={() => setSelectedCategory(cat.id)}
-                className={`flex shrink-0 items-center gap-1.5 rounded-xl px-3 py-2 text-[11.5px] font-bold transition-all ${
-                  isSelected
-                    ? `${catTheme.solid}`
-                    : `border ${catTheme.tabInactive}`
-                }`}
-              >
-                <span>{cat.icon || '📦'}</span>
-                <span>{cat.name}</span>
-                <span className={`inline-flex items-center justify-center px-1.5 py-0.2 rounded-full text-[10px] font-extrabold ${isSelected ? 'bg-white/20 text-white' : 'opacity-70'}`}>
-                  {count}
-                </span>
-              </button>
-            );
-          })}
+          <div
+            ref={categoryScrollRef}
+            className="-mx-1 flex items-center gap-1.5 overflow-x-auto px-1 pb-1 scroll-smooth snap-x snap-mandatory flex-1"
+            style={{ scrollbarWidth: 'none' }}
+          >
+            <button
+              onClick={() => setSelectedCategory('all')}
+              className={`shrink-0 snap-start rounded-xl px-3 py-2 text-[11.5px] font-bold transition-all ${
+                selectedCategory === 'all'
+                  ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/30'
+                  : 'surface text-[color:var(--text-secondary)] border border-[color:var(--border)] hover:text-[color:var(--text-primary)]'
+              }`}
+            >
+              All items ({products.length})
+            </button>
+
+            {categories.map((cat) => {
+              const count = categoryProductCounts.get(cat.id) || 0;
+              const catTheme = getCategoryTheme(cat);
+              const isSelected = selectedCategory === cat.id;
+              return (
+                <button
+                  key={cat.id}
+                  onClick={() => setSelectedCategory(cat.id)}
+                  className={`flex shrink-0 snap-start items-center gap-1.5 rounded-xl px-3 py-2 text-[11.5px] font-bold transition-all ${
+                    isSelected
+                      ? `${catTheme.solid}`
+                      : `border ${catTheme.tabInactive}`
+                  }`}
+                >
+                  <span>{cat.icon || '📦'}</span>
+                  <span>{cat.name}</span>
+                  <span className={`inline-flex items-center justify-center px-1.5 py-0.2 rounded-full text-[10px] font-extrabold ${isSelected ? 'bg-white/20 text-white' : 'opacity-70'}`}>
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          {categories.length > 4 && (
+            <button
+              type="button"
+              onClick={() => scrollCategoryTrack(240)}
+              className="absolute -right-2 z-10 p-1.5 rounded-full border border-[color:var(--border)] bg-[color:var(--bg-surface)] text-[color:var(--text-secondary)] shadow-md hover:scale-110 transition-all opacity-0 group-hover/cat:opacity-100 hidden sm:flex items-center justify-center cursor-pointer"
+              title="Scroll categories right"
+            >
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
 
         {filtered.length === 0 ? (
@@ -1904,9 +2082,12 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                 <Star className="h-2.5 w-2.5" />
                 {customer.loyaltyPoints || 0} pts
               </Badge>
-              {totals.grand > 0 && (
+              {payable > 0 && payable >= (Number(settings?.loyalty?.loyaltyMinSpendToEarn ?? settings?.pos?.loyaltyMinSpendToEarn) || 0) && (
                 <Badge tone="success">
-                  ✨ +{Math.floor((totals.grand / 100) * (Number(settings?.pos?.loyaltyPointsPerHundred) || 1))} pts on this bill
+                  {/* Matches the backend's earn formula exactly (routes/sales.js) — points
+                      accrue on what's actually paid (payable), not the gross bill total,
+                      and the spend unit is the tenant's configured value, not a hardcoded 100. */}
+                  ✨ +{Math.floor((payable / Math.max(1, Number(settings?.loyalty?.loyaltySpendAmount ?? settings?.pos?.loyaltySpendAmount) || 100)) * (Number(settings?.loyalty?.loyaltyPointsPerSpend ?? settings?.pos?.loyaltyPointsPerSpend ?? settings?.pos?.loyaltyPointsPerHundred) || 1))} pts on this bill
                 </Badge>
               )}
               {(Number(customer.advance) > 0 || Number(customer.advanceBalance) > 0) && (
@@ -1938,7 +2119,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
                 return (
                   <div
-                    key={`${item.id}_${item.unit}`}
+                    key={`${item.id}_${item.unit}_${item.batchId || ''}`}
                     className="flex flex-col gap-1.5 rounded-xl p-2 sm:p-2.5 transition-colors"
                     style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}
                   >
@@ -1976,14 +2157,25 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                           </span>
                         </div>
                         <div className="text-[10px] text-[color:var(--text-muted)] truncate">
-                          Stock: <span className="font-semibold text-[color:var(--text-secondary)]">{stockInfo.text}</span>
+                          Stock:{' '}
+                          <span className={stockInfo.isOversold ? 'font-bold text-rose-600' : 'font-semibold text-[color:var(--text-secondary)]'}>
+                            {stockInfo.text}
+                          </span>
+                          {stockInfo.isOversold && (
+                            <span className="ml-1 font-bold text-rose-600">— exceeds available stock</span>
+                          )}
+                          {item.batchNo && (
+                            <span className="ml-1.5 inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-extrabold bg-indigo-500/10 text-indigo-600">
+                              Batch: {item.batchNo}
+                            </span>
+                          )}
                         </div>
                       </div>
 
                       <div className="flex shrink-0 items-center gap-1">
                         <button
                           type="button"
-                          onClick={() => updateQty(item.id, -1)}
+                          onClick={() => updateQty(item.id, -1, item.unit, item.batchId)}
                           className="rounded-md p-1 text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-muted)] transition-colors"
                           style={{ background: 'var(--surface)' }}
                           title="Decrease quantity"
@@ -1992,7 +2184,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                         </button>
                         <button
                           type="button"
-                          onClick={() => updateQty(item.id, 1)}
+                          onClick={() => updateQty(item.id, 1, item.unit, item.batchId)}
                           className="rounded-md p-1 text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-muted)] transition-colors"
                           style={{ background: 'var(--surface)' }}
                           title="Increase quantity"
@@ -2002,7 +2194,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                         <Money value={item.total} decimals={false} className="w-14 text-right text-[12px] font-bold" />
                         <button
                           type="button"
-                          onClick={() => setCart(cart.filter((i) => !(i.id === item.id && i.unit === item.unit)))}
+                          onClick={() => setCart(cart.filter((i) => !(i.id === item.id && i.unit === item.unit && (i.batchId || null) === (item.batchId || null))))}
                           className="p-1 text-rose-500 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-md transition-colors"
                           title="Remove item"
                         >
@@ -2017,7 +2209,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                         type="number"
                         step="0.0001"
                         value={item.price}
-                        onChange={(e) => setLinePrice(item.id, e.target.value)}
+                        onChange={(e) => setLinePrice(item.id, e.target.value, item.unit, item.batchId)}
                         className="tabular w-16 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold"
                         style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
                       />
@@ -2026,15 +2218,20 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                         type="number"
                         step="any"
                         value={item.qty}
-                        onChange={(e) => setLineQty(item.id, e.target.value)}
-                        className="tabular w-12 rounded-md px-1 py-0.5 text-[10.5px] font-semibold text-center"
-                        style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
+                        onChange={(e) => setLineQty(item.id, e.target.value, item.unit, item.batchId)}
+                        className="tabular w-12 rounded-md px-1 py-0.5 text-[10.5px] font-bold text-center"
+                        style={
+                          stockInfo.isOversold
+                            ? { background: 'var(--surface)', border: '1px solid #e11d48', color: '#e11d48' }
+                            : { background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text-primary)' }
+                        }
+                        title={stockInfo.isOversold ? 'Quantity exceeds available stock' : undefined}
                       />
 
                       {unitOpts.length > 1 ? (
                         <select
                           value={item.unit}
-                          onChange={(e) => switchCartItemUnit(item.id, e.target.value)}
+                          onChange={(e) => switchCartItemUnit(item.id, item.unit, item.batchId, e.target.value)}
                           className="tabular rounded-md px-1 py-0.5 text-[10px] font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 cursor-pointer"
                         >
                           {unitOpts.map((opt) => (
@@ -2320,6 +2517,58 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         })()}
       </Modal>
 
+      {batchPickerTarget && (
+        <Modal
+          open={true}
+          onClose={() => setBatchPickerTarget(null)}
+          title={`Select Batch — ${batchPickerTarget.product.name}`}
+          subtitle="Soonest-to-expire batch is suggested first. Tap a batch to add it to the bill."
+          icon={Clock}
+          size="md"
+        >
+          <div className="space-y-2">
+            {getSellableBatches(batchPickerTarget.product).map((b, idx) => {
+              const isExpired = b.expiryDate && new Date(b.expiryDate) < new Date();
+              return (
+                <button
+                  key={b.id}
+                  type="button"
+                  onClick={() => confirmBatchPick(b.id)}
+                  className={`w-full flex items-center justify-between gap-3 p-3 rounded-xl border text-left transition-colors ${
+                    idx === 0
+                      ? 'border-indigo-400 bg-indigo-50/60 dark:bg-indigo-950/30 hover:bg-indigo-100/60 dark:hover:bg-indigo-900/40'
+                      : 'border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] hover:bg-[color:var(--bg-subtle)]'
+                  }`}
+                >
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-bold text-[color:var(--text-primary)]">{b.batchNo}</span>
+                      {idx === 0 && (
+                        <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded-full bg-indigo-600 text-white">Suggested</span>
+                      )}
+                      {b.sellPrice != null && (
+                        <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600">
+                          {money(b.sellPrice)}/{batchPickerTarget.product.unit}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-[color:var(--text-muted)] mt-0.5">
+                      {b.qty} {batchPickerTarget.product.unit} available
+                      {b.expiryDate && (
+                        <span className={isExpired ? 'text-rose-600 font-semibold ml-1' : 'ml-1'}>
+                          {isExpired ? `— expired ${String(b.expiryDate).slice(0, 10)}` : `— expires ${String(b.expiryDate).slice(0, 10)}`}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <ArrowRight className="h-4 w-4 text-[color:var(--text-muted)] shrink-0" />
+                </button>
+              );
+            })}
+          </div>
+        </Modal>
+      )}
+
       <Modal
         open={showCheckout}
         onClose={() => setShowCheckout(false)}
@@ -2443,14 +2692,16 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
             </div>
           )}
 
-          {customer && settings?.pos?.enableLoyalty !== false && (
+          {customer && (settings?.loyalty?.enableLoyalty !== false && settings?.pos?.enableLoyalty !== false) && (
             <div className="flex items-center justify-between rounded-xl px-3 py-2 text-xs" style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}>
               <span className="flex items-center gap-1.5 font-bold text-[color:var(--text-secondary)]">
                 <Star className="h-3.5 w-3.5 text-amber-500" />
                 Loyalty Earned on this Order
               </span>
               <span className="font-bold text-emerald-600 dark:text-emerald-400">
-                +{Math.floor((payable / 100) * (Number(settings?.pos?.loyaltyPointsPerHundred) || 1))} pts
+                +{payable >= (Number(settings?.loyalty?.loyaltyMinSpendToEarn ?? settings?.pos?.loyaltyMinSpendToEarn) || 0)
+                  ? Math.floor((payable / Math.max(1, Number(settings?.loyalty?.loyaltySpendAmount ?? settings?.pos?.loyaltySpendAmount) || 100)) * (Number(settings?.loyalty?.loyaltyPointsPerSpend ?? settings?.pos?.loyaltyPointsPerSpend ?? settings?.pos?.loyaltyPointsPerHundred) || 1))
+                  : 0} pts
               </span>
             </div>
           )}
@@ -2715,155 +2966,271 @@ function Row({ label, value, tone }) {
  * ------------------------------------------------------------------ */
 
 function ReceiptModal({ receipt, settings, tenant, onClose }) {
-  if (!receipt) return null;
-  const company = receipt.company || settings?.company || { name: tenant?.name };
-  const billing = receipt.billing || settings?.billing || {};
-  const showGst = billing.showGstBreakup !== false;
+  // `receipt` toggles between null and populated on every checkout, but this
+  // component stays mounted the whole time (the parent always renders it) —
+  // so the early return used to sit before the hooks below, which meant the
+  // number of hooks called changed from render to render. React detects that
+  // mismatch and bails out of re-rendering the tree correctly, which is why
+  // a newly-selected bill template could appear to "stick" on the old one:
+  // the component silently stopped picking up fresh props. Every hook must
+  // run unconditionally on every render, so the guard is now after them all.
+  const company = receipt?.company || settings?.company || { name: tenant?.name || 'Selsolve Store' };
+  const billing = receipt?.billing || settings?.billing || {};
 
-  // GST is grouped by rate so the printed bill shows a compliant slab summary.
-  const gstSlabs = {};
-  (receipt.items || []).forEach((item) => {
-    const rate = item.taxRate || 0;
-    if (!rate) return;
-    if (!gstSlabs[rate]) gstSlabs[rate] = { taxable: 0, tax: 0 };
-    gstSlabs[rate].taxable += item.total;
-    gstSlabs[rate].tax += (item.total * rate) / 100;
-  });
+  const [viewMode, setViewMode] = useState(
+    billing?.defaultDocumentFormat === 'INVOICE' ? 'TAX_INVOICE' : 'THERMAL'
+  );
+
+  const [selectedInvoiceTheme, setSelectedInvoiceTheme] = useState(
+    billing?.activeInvoiceTemplate || 'corporate_blue'
+  );
+  const [selectedAccentColor, setSelectedAccentColor] = useState(
+    billing?.invoiceAccentColor || 'blue'
+  );
+  const [selectedThermalTheme, setSelectedThermalTheme] = useState(
+    BILLING_THERMAL_THEME_IDS.includes(billing?.activeThermalTemplate) ? billing.activeThermalTemplate : 'detailed_gst'
+  );
+  const [showFullscreenView, setShowFullscreenView] = useState(false);
+
+  useEffect(() => {
+    if (billing?.activeInvoiceTemplate) setSelectedInvoiceTheme(billing.activeInvoiceTemplate);
+    if (billing?.invoiceAccentColor) setSelectedAccentColor(billing.invoiceAccentColor);
+    if (BILLING_THERMAL_THEME_IDS.includes(billing?.activeThermalTemplate)) setSelectedThermalTheme(billing.activeThermalTemplate);
+  }, [billing?.activeInvoiceTemplate, billing?.invoiceAccentColor, billing?.activeThermalTemplate]);
+
+  const customInvoiceTemplates = (billing.customTemplates || []).filter((t) => t.type === 'invoice');
+  const customThermalTemplates = (billing.customTemplates || []).filter((t) => t.type === 'thermal');
+
+  // This is passed as the highest-priority override into the renderer — it
+  // must never fall back to the raw `billing` object. `billing` accumulates
+  // fields from every past template edit, so using it as a fallback here
+  // means switching to a *different* built-in theme barely changes anything:
+  // whatever's sitting in `billing` wins over that theme's own defaults for
+  // almost every field. An empty object lets the newly-selected theme's
+  // defaults actually show through.
+  const selectedCustomInvoice = customInvoiceTemplates.find((t) => t.id === selectedInvoiceTheme);
+  const activeInvoiceConfig = selectedCustomInvoice ? selectedCustomInvoice.config : {};
+
+  const selectedCustomThermal = customThermalTemplates.find((t) => t.id === selectedThermalTheme);
+  const activeThermalConfig = selectedCustomThermal ? selectedCustomThermal.config : {};
+
+  if (!receipt) return null;
 
   return (
-    <Modal
-      open
-      onClose={onClose}
-      title={`Invoice ${receipt.orderId}`}
-      subtitle={receipt.voucherNo ? `Accounting voucher ${receipt.voucherNo}` : undefined}
-      icon={Receipt}
-      size="sm"
-      footer={
-        <>
-          <Button onClick={onClose}>Close</Button>
-          <Button variant="primary" icon={Printer} onClick={() => window.print()}>
-            Print Bill
-          </Button>
-        </>
-      }
-    >
-      <div id="printable-thermal-receipt" className="font-mono text-[11.5px] text-[color:var(--text-primary)]">
-        <div className="border-b border-dashed pb-2 text-center" style={{ borderColor: 'var(--border-strong)' }}>
-          <div className="text-[13px] font-bold uppercase">{company.name}</div>
-          {company.address && <div className="text-[10px]">{company.address}</div>}
-          {(company.city || company.phone) && (
-            <div className="text-[10px]">
-              {company.city}
-              {company.city && company.phone ? ' · ' : ''}
-              {company.phone}
+    <>
+      <Modal
+        open
+        onClose={onClose}
+        title={`Bill / Invoice — ${receipt.orderId}`}
+        subtitle={receipt.voucherNo ? `Voucher ${receipt.voucherNo}` : `Issued ${fmtDateTime(receipt.date)}`}
+        icon={Receipt}
+        size={viewMode === 'TAX_INVOICE' ? 'fullscreen' : 'lg'}
+        allowFullscreen={true}
+        footer={
+          <div className="flex flex-col sm:flex-row items-center justify-between w-full gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {/* View Mode Switcher (Standard A4 vs POS Bill) */}
+              <div className="flex items-center p-1 rounded-xl bg-[color:var(--bg-subtle)] border border-[color:var(--border)] text-xs font-bold">
+                <button
+                  type="button"
+                  onClick={() => setViewMode('TAX_INVOICE')}
+                  className={`px-3 py-1 rounded-lg transition-all ${
+                    viewMode === 'TAX_INVOICE' ? 'bg-blue-600 text-white shadow-xs' : 'text-[color:var(--text-secondary)]'
+                  }`}
+                >
+                  Standard A4 / A5
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode('THERMAL')}
+                  className={`px-3 py-1 rounded-lg transition-all ${
+                    viewMode === 'THERMAL' ? 'bg-indigo-600 text-white shadow-xs' : 'text-[color:var(--text-secondary)]'
+                  }`}
+                >
+                  POS Bill Slip
+                </button>
+              </div>
+
+              {/* Theme & Color Selectors */}
+              {viewMode === 'TAX_INVOICE' ? (
+                <div className="flex items-center gap-1.5 pl-2 border-l border-[color:var(--border)]">
+                  <span className="text-[11px] font-semibold text-[color:var(--text-muted)]">Theme:</span>
+                  <select
+                    value={selectedInvoiceTheme}
+                    onChange={(e) => setSelectedInvoiceTheme(e.target.value)}
+                    className="text-[11px] font-bold rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-surface)] px-2 py-1 text-[color:var(--text-primary)]"
+                  >
+                    <optgroup label="Preset Themes">
+                      {INVOICE_THEMES.map((th) => (
+                        <option key={th.id} value={th.id}>
+                          {th.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                    {customInvoiceTemplates.length > 0 && (
+                      <optgroup label="My Custom Templates">
+                        {customInvoiceTemplates.map((ct) => (
+                          <option key={ct.id} value={ct.id}>
+                            ★ {ct.name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                  </select>
+
+                  <select
+                    value={selectedAccentColor}
+                    onChange={(e) => setSelectedAccentColor(e.target.value)}
+                    className="text-[11px] font-bold rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-surface)] px-2 py-1 text-[color:var(--text-primary)]"
+                  >
+                    {ACCENT_COLORS.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1.5 pl-2 border-l border-[color:var(--border)]">
+                  <span className="text-[11px] font-semibold text-[color:var(--text-muted)]">Bill Theme:</span>
+                  <select
+                    value={selectedThermalTheme}
+                    onChange={(e) => setSelectedThermalTheme(e.target.value)}
+                    className="text-[11px] font-bold rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-surface)] px-2 py-1 text-[color:var(--text-primary)]"
+                  >
+                    {THERMAL_THEMES.filter((th) => BILLING_THERMAL_THEME_IDS.includes(th.id)).map((th) => (
+                      <option key={th.id} value={th.id}>
+                        {th.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
-          )}
-          {company.gstin && <div className="text-[10px]">GSTIN: {company.gstin}</div>}
-        </div>
 
-        <div className="flex justify-between border-b border-dashed py-1.5 text-[10px]" style={{ borderColor: 'var(--border-strong)' }}>
-          <div>
-            <div>Bill: {receipt.orderId}</div>
-            <div>{fmtDateTime(receipt.date)}</div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                icon={FileText}
+                onClick={() => {
+                  if (viewMode === 'TAX_INVOICE') {
+                    exportInvoiceToWord({
+                      invoice: receipt,
+                      settings: { company, billing },
+                      customConfig: activeInvoiceConfig,
+                      activeTheme: selectedInvoiceTheme
+                    });
+                  } else {
+                    exportBillToWord({
+                      receipt,
+                      settings: { company, billing },
+                      customConfig: activeThermalConfig,
+                      activeTheme: selectedThermalTheme
+                    });
+                  }
+                }}
+                title="Download editable Microsoft Word document (.doc)"
+              >
+                Word (.doc)
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={Download}
+                onClick={() => window.print()}
+                title="Download / Print as PDF document"
+              >
+                PDF / Print
+              </Button>
+              <Button size="sm" variant="secondary" icon={Maximize2} onClick={() => setShowFullscreenView(true)}>
+                Full Screen
+              </Button>
+              <Button onClick={onClose}>Close</Button>
+            </div>
           </div>
-          <div className="text-right">
-            <div>{receipt.customerName}</div>
-            {receipt.customerPhone && receipt.customerPhone !== 'N/A' && <div>{receipt.customerPhone}</div>}
-            <div>Cashier: {receipt.cashier}</div>
+        }
+      >
+        {viewMode === 'TAX_INVOICE' ? (
+          /* Full A4 / A5 Tax Invoice View */
+          <div className="flex justify-center p-2 bg-slate-100 dark:bg-slate-900 rounded-xl border border-slate-300 dark:border-slate-800 overflow-y-auto max-h-[calc(98vh-180px)]">
+            <InvoiceDocumentView
+              invoice={receipt}
+              settings={{ company, billing }}
+              tenant={tenant}
+              customConfig={{
+                ...activeInvoiceConfig,
+                activeInvoiceTemplate: selectedInvoiceTheme,
+                invoiceAccentColor: selectedAccentColor,
+                accentColor: selectedAccentColor
+              }}
+              activeTheme={selectedInvoiceTheme}
+            />
           </div>
-        </div>
-
-        <table className="w-full py-1">
-          <thead>
-            <tr className="border-b border-dashed text-[9.5px] uppercase" style={{ borderColor: 'var(--border-strong)' }}>
-              <th className="py-1 text-left">Item</th>
-              <th className="py-1 text-right">Qty</th>
-              <th className="py-1 text-right">Rate</th>
-              <th className="py-1 text-right">Amt</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(receipt.items || []).map((item, i) => (
-              <tr key={i}>
-                <td className="py-0.5 pr-1">{item.printName || item.name}</td>
-                <td className="tabular py-0.5 text-right">{item.qty}</td>
-                <td className="tabular py-0.5 text-right">{Number(item.price).toFixed(2)}</td>
-                <td className="tabular py-0.5 text-right">{Number(item.total).toFixed(2)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-
-        <div className="space-y-0.5 border-t border-dashed pt-1.5" style={{ borderColor: 'var(--border-strong)' }}>
-          <ReceiptRow label="Subtotal" value={receipt.subtotal} />
-          {receipt.discount > 0 && <ReceiptRow label="Discount" value={-receipt.discount} />}
-          {receipt.tax > 0 && <ReceiptRow label="GST" value={receipt.tax} />}
-          {receipt.roundOff !== undefined && receipt.roundOff !== 0 && (
-            <ReceiptRow label="Round off" value={receipt.roundOff} />
-          )}
-          {receipt.loyaltyRedeemed > 0 && (
-            <ReceiptRow label={`Points redeemed (${receipt.pointsRedeemed})`} value={-receipt.loyaltyRedeemed} />
-          )}
-          {receipt.advanceRedeemed > 0 && (
-            <ReceiptRow label="Advance / Credit Deducted" value={-receipt.advanceRedeemed} />
-          )}
-          <div className="flex justify-between border-t border-dashed pt-1 text-[14px] font-bold" style={{ borderColor: 'var(--border-strong)' }}>
-            <span>TOTAL</span>
-            <span className="tabular">₹{Number(receipt.total).toFixed(2)}</span>
-          </div>
-          <div className="flex justify-between text-[10px]">
-            <span>Paid by {receipt.paymentMethod}</span>
-            {receipt.loyaltyEarned > 0 && <span>+{receipt.loyaltyEarned} pts</span>}
-          </div>
-          {receipt.loyaltyBalance !== undefined && (
-            <div className="text-[9.5px]">Points balance: {receipt.loyaltyBalance}</div>
-          )}
-          {receipt.advanceBalance !== undefined && receipt.advanceRedeemed > 0 && (
-            <div className="text-[9.5px]">Remaining advance: ₹{Number(receipt.advanceBalance).toFixed(2)}</div>
-          )}
-        </div>
-
-        {showGst && Object.keys(gstSlabs).length > 0 && (
-          <div className="mt-2 border-t border-dashed pt-1.5 text-[9.5px]" style={{ borderColor: 'var(--border-strong)' }}>
-            <div className="mb-0.5 font-bold uppercase">GST Summary</div>
-            <table className="w-full">
-              <thead>
-                <tr>
-                  <th className="text-left">Slab</th>
-                  <th className="text-right">Taxable</th>
-                  <th className="text-right">CGST</th>
-                  <th className="text-right">SGST</th>
-                </tr>
-              </thead>
-              <tbody>
-                {Object.entries(gstSlabs).map(([rate, v]) => (
-                  <tr key={rate}>
-                    <td>{rate}%</td>
-                    <td className="tabular text-right">{v.taxable.toFixed(2)}</td>
-                    <td className="tabular text-right">{(v.tax / 2).toFixed(2)}</td>
-                    <td className="tabular text-right">{(v.tax / 2).toFixed(2)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        ) : (
+          /* POS Bill slip */
+          <div className="flex justify-center p-2 bg-slate-100 dark:bg-slate-900 rounded-xl border border-slate-300 dark:border-slate-800 overflow-y-auto max-h-[calc(98vh-180px)]">
+            <ThermalReceiptView
+              receipt={receipt}
+              settings={{ company, billing }}
+              tenant={tenant}
+              customConfig={activeThermalConfig}
+              activeTheme={selectedThermalTheme}
+            />
           </div>
         )}
+      </Modal>
 
-        <div className="mt-2 border-t border-dashed pt-1.5 text-center text-[9.5px]" style={{ borderColor: 'var(--border-strong)' }}>
-          {billing.termsText && <div>{billing.termsText}</div>}
-          <div className="mt-0.5 font-bold">{billing.footerText || 'Thank you, visit again!'}</div>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-function ReceiptRow({ label, value }) {
-  return (
-    <div className="flex justify-between text-[11px]">
-      <span>{label}</span>
-      <span className="tabular">₹{Number(value).toFixed(2)}</span>
-    </div>
+      {/* Full Screen Immersive Bill Modal */}
+      {showFullscreenView && (
+        <Modal
+          open={showFullscreenView}
+          onClose={() => setShowFullscreenView(false)}
+          title={viewMode === 'TAX_INVOICE' ? `Tax Invoice — ${receipt.orderId} (Full Screen View)` : `POS Bill — ${receipt.orderId} (Full Screen View)`}
+          subtitle={`Issued on ${fmtDateTime(receipt.date)}`}
+          size="fullscreen"
+          allowFullscreen={true}
+          footer={
+            <div className="flex items-center justify-between w-full">
+              <span className="text-xs text-[color:var(--text-muted)] font-mono">
+                Order: #{receipt.orderId} · {viewMode === 'TAX_INVOICE' ? 'A4 / A5 Tax Document' : `${activeThermalConfig.paperWidth || '80mm'} Roll`}
+              </span>
+              <div className="flex items-center gap-2">
+                <Button onClick={() => setShowFullscreenView(false)}>Close View</Button>
+                <Button variant="primary" icon={Printer} onClick={() => window.print()}>
+                  Print Document
+                </Button>
+              </div>
+            </div>
+          }
+        >
+          <div className="flex-1 flex justify-center items-start p-4 sm:p-8 bg-slate-900/90 rounded-2xl overflow-y-auto min-h-full">
+            {viewMode === 'TAX_INVOICE' ? (
+              <InvoiceDocumentView
+                invoice={receipt}
+                settings={{ company, billing }}
+                tenant={tenant}
+                customConfig={{
+                  ...activeInvoiceConfig,
+                  activeInvoiceTemplate: selectedInvoiceTheme,
+                  invoiceAccentColor: selectedAccentColor,
+                  accentColor: selectedAccentColor
+                }}
+                activeTheme={selectedInvoiceTheme}
+              />
+            ) : (
+              <ThermalReceiptView
+                receipt={receipt}
+                settings={{ company, billing }}
+                tenant={tenant}
+                customConfig={activeThermalConfig}
+                activeTheme={selectedThermalTheme}
+              />
+            )}
+          </div>
+        </Modal>
+      )}
+    </>
   );
 }
 

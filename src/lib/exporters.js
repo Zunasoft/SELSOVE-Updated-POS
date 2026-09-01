@@ -121,3 +121,967 @@ export function exportReport(format, payload) {
   if (format === 'pdf') return exportPdf(payload);
   return exportCsv(payload);
 }
+
+/**
+ * Number to Indian Words Converter (e.g. ₹1,250 -> One Thousand Two Hundred Fifty Rupees Only)
+ */
+export function numberToWordsINR(amount) {
+  const num = Math.round(Number(amount) || 0);
+  if (num === 0) return 'Zero Rupees Only';
+
+  const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
+  const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+
+  function convertBelowThousand(n) {
+    let str = '';
+    if (n >= 100) {
+      str += ones[Math.floor(n / 100)] + ' Hundred ';
+      n %= 100;
+    }
+    if (n >= 20) {
+      str += tens[Math.floor(n / 10)] + ' ';
+      n %= 10;
+    }
+    if (n > 0) {
+      str += ones[n] + ' ';
+    }
+    return str.trim();
+  }
+
+  const crore = Math.floor(num / 10000000);
+  const lakh = Math.floor((num % 10000000) / 100000);
+  const thousand = Math.floor((num % 100000) / 1000);
+  const remainder = num % 1000;
+
+  let result = '';
+  if (crore > 0) result += convertBelowThousand(crore) + ' Crore ';
+  if (lakh > 0) result += convertBelowThousand(lakh) + ' Lakh ';
+  if (thousand > 0) result += convertBelowThousand(thousand) + ' Thousand ';
+  if (remainder > 0) result += convertBelowThousand(remainder);
+
+  return (result.trim() + ' Rupees Only').replace(/\s+/g, ' ');
+}
+
+/**
+ * Export Tax Invoice as a Native Microsoft Word (.doc) Document
+ */
+export function exportInvoiceToWord({ invoice = {}, settings = {}, customConfig = {}, activeTheme = 'corporate_blue' }) {
+  const company = invoice?.company || settings?.company || { name: 'Selsolve Store' };
+  const billing = invoice?.billing || settings?.billing || {};
+  const config = { ...billing, ...(customConfig || {}) };
+  const labels = config.customLabels || {};
+
+  const orderId = invoice?.orderId || invoice?.id || 'DRAFT';
+  const invoiceDate = invoice?.date ? new Date(invoice.date).toLocaleDateString('en-IN') : new Date().toLocaleDateString('en-IN');
+  const dueDate = invoice?.dueDate ? new Date(invoice.dueDate).toLocaleDateString('en-IN') : '';
+
+  const items = invoice?.items || [];
+  const subtotal = Number(invoice?.subtotal || invoice?.taxableAmount || 0);
+  const totalDiscount = Number(invoice?.discount || 0);
+  const totalTax = Number(invoice?.tax || invoice?.gstAmount || 0);
+  const roundOff = Number(invoice?.roundOff || 0);
+  const grandTotal = Number(invoice?.total || invoice?.grandTotal || (subtotal + totalTax - totalDiscount + roundOff));
+
+  const wordsTotal = numberToWordsINR(grandTotal);
+
+  const bankName = invoice?.bank?.bankName || config.bankName || company.bankName || '';
+  const bankAccNo = invoice?.bank?.accountNumber || config.accountNumber || company.accountNumber || '';
+  const bankIfsc = invoice?.bank?.ifsc || config.ifsc || company.ifsc || '';
+  const bankBranch = invoice?.bank?.branch || config.branch || company.branch || '';
+  const bankUpi = invoice?.bank?.upiId || config.upiId || company.upiId || '';
+
+  const terms = invoice?.terms || config.termsText || '1. Goods once sold will not be taken back.\n2. Subject to local jurisdiction.';
+
+  const itemRowsHtml = items.map((it, idx) => {
+    const qty = Number(it.qty || it.quantity || 1);
+    const rate = Number(it.price || it.rate || 0);
+    const taxRate = Number(it.taxRate || it.gstRate || 0);
+    const discount = Number(it.discount || 0);
+    const lineSubtotal = qty * rate;
+    const lineTotal = Number(it.total || (lineSubtotal + (lineSubtotal * taxRate) / 100 - discount));
+
+    return `
+      <tr>
+        <td style="text-align: center; border: 1px solid #cbd5e1; padding: 6px;">${idx + 1}</td>
+        <td style="border: 1px solid #cbd5e1; padding: 6px;">
+          <strong>${it.name || 'Item'}</strong>
+          ${it.barcode ? `<div style="font-size: 8pt; color: #64748b;">Barcode: ${it.barcode}</div>` : ''}
+        </td>
+        <td style="text-align: center; border: 1px solid #cbd5e1; padding: 6px;">${it.hsn || it.hsnCode || '—'}</td>
+        <td style="text-align: center; border: 1px solid #cbd5e1; padding: 6px;">${qty} ${it.unit || 'pcs'}</td>
+        <td style="text-align: right; border: 1px solid #cbd5e1; padding: 6px;">₹${rate.toFixed(2)}</td>
+        <td style="text-align: right; border: 1px solid #cbd5e1; padding: 6px;">₹${lineSubtotal.toFixed(2)}</td>
+        <td style="text-align: center; border: 1px solid #cbd5e1; padding: 6px;">${taxRate}%</td>
+        <td style="text-align: right; border: 1px solid #cbd5e1; padding: 6px; font-weight: bold;">₹${lineTotal.toFixed(2)}</td>
+      </tr>
+    `;
+  }).join('');
+
+  const wordHtml = `
+    <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+    <head>
+      <meta charset='utf-8'>
+      <title>Tax Invoice ${orderId}</title>
+      <!--[if gte mso 9]>
+      <xml>
+        <w:WordDocument>
+          <w:View>Print</w:View>
+          <w:Zoom>100</w:Zoom>
+          <w:DoNotOptimizeForBrowser/>
+        </w:WordDocument>
+      </xml>
+      <![endif]-->
+      <style>
+        @page { size: 21cm 29.7cm; margin: 1.5cm; }
+        body { font-family: 'Segoe UI', Calibri, Arial, sans-serif; font-size: 9.5pt; color: #1e293b; line-height: 1.4; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 10pt; font-size: 9.5pt; }
+        .header-table td { border: none; padding: 4pt; }
+        .bordered-table th { background-color: #f1f5f9; font-weight: bold; border: 1px solid #94a3b8; padding: 6pt; font-size: 9pt; }
+        .bordered-table td { border: 1px solid #cbd5e1; padding: 5pt 6pt; }
+        .title { font-size: 16pt; font-weight: bold; color: #1e40af; text-transform: uppercase; }
+        .company-name { font-size: 15pt; font-weight: bold; color: #0f172a; }
+        .meta-label { color: #64748b; font-size: 8.5pt; text-transform: uppercase; font-weight: bold; }
+        .grand-total-box { background-color: #eff6ff; border: 2px solid #2563eb; padding: 8pt; font-weight: bold; text-align: right; }
+      </style>
+    </head>
+    <body>
+      <!-- Top Header & Title -->
+      <table class="header-table" style="border-bottom: 2px solid #2563eb; padding-bottom: 8pt;">
+        <tr>
+          <td style="width: 60%; vertical-align: top;">
+            <div class="company-name">${company.name || 'Selsolve Retail'}</div>
+            ${company.address ? `<div>${company.address}</div>` : ''}
+            ${company.city ? `<div>${company.city}${company.state ? `, ${company.state}` : ''} ${company.pincode ? `- ${company.pincode}` : ''}</div>` : ''}
+            ${company.gstin ? `<div><strong>GSTIN:</strong> ${company.gstin}</div>` : ''}
+            ${company.phone ? `<div><strong>Phone:</strong> ${company.phone} · <strong>Email:</strong> ${company.email || 'N/A'}</div>` : ''}
+          </td>
+          <td style="width: 40%; text-align: right; vertical-align: top;">
+            <div class="title">${labels.invoiceTitle || 'TAX INVOICE'}</div>
+            <div style="font-size: 11pt; font-weight: bold; color: #334155; margin-top: 4pt;">Invoice #: ${orderId}</div>
+            <div><strong>Invoice Date:</strong> ${invoiceDate}</div>
+            ${dueDate ? `<div><strong>Due Date:</strong> ${dueDate}</div>` : ''}
+            <div><strong>Payment Mode:</strong> ${invoice.paymentMethod || 'Cash / Credit'}</div>
+            ${invoice.status ? `<div><strong>Status:</strong> ${invoice.status}</div>` : ''}
+          </td>
+        </tr>
+      </table>
+
+      <br/>
+
+      <!-- Bill To & Ship To Details -->
+      <table style="border: 1px solid #cbd5e1; margin-bottom: 12pt;">
+        <tr style="background-color: #f8fafc;">
+          <th style="width: 50%; border: 1px solid #cbd5e1; padding: 6pt; text-align: left;" class="meta-label">
+            ${labels.billToTitle || 'Billed To (Buyer / Customer)'}
+          </th>
+          <th style="width: 50%; border: 1px solid #cbd5e1; padding: 6pt; text-align: left;" class="meta-label">
+            ${labels.shipToTitle || 'Shipped To (Consignee)'}
+          </th>
+        </tr>
+        <tr>
+          <td style="border: 1px solid #cbd5e1; padding: 8pt; vertical-align: top;">
+            <strong>${invoice.customerName || 'Walk-in Customer'}</strong>
+            ${invoice.customerPhone && invoice.customerPhone !== 'N/A' ? `<div>Phone: ${invoice.customerPhone}</div>` : ''}
+            ${invoice.customerGstin ? `<div>GSTIN: ${invoice.customerGstin}</div>` : ''}
+            ${invoice.customerAddress ? `<div>Address: ${invoice.customerAddress}</div>` : ''}
+          </td>
+          <td style="border: 1px solid #cbd5e1; padding: 8pt; vertical-align: top;">
+            <strong>${invoice.shippingAddress?.name || invoice.customerName || 'Walk-in Customer'}</strong>
+            ${invoice.shippingAddress?.phone ? `<div>Phone: ${invoice.shippingAddress.phone}</div>` : ''}
+            ${invoice.shippingAddress?.address ? `<div>Address: ${invoice.shippingAddress.address}</div>` : (invoice.customerAddress ? `<div>Address: ${invoice.customerAddress}</div>` : '<div>Same as billing address</div>')}
+          </td>
+        </tr>
+      </table>
+
+      <!-- Itemized Table -->
+      <table class="bordered-table">
+        <thead>
+          <tr>
+            <th style="width: 5%; text-align: center;">#</th>
+            <th style="width: 40%;">${labels.itemColHeader || 'Item Description'}</th>
+            <th style="width: 10%; text-align: center;">${labels.hsnColHeader || 'HSN'}</th>
+            <th style="width: 10%; text-align: center;">${labels.qtyColHeader || 'Qty'}</th>
+            <th style="width: 10%; text-align: right;">${labels.rateColHeader || 'Rate (₹)'}</th>
+            <th style="width: 10%; text-align: right;">${labels.taxableColHeader || 'Taxable (₹)'}</th>
+            <th style="width: 5%; text-align: center;">${labels.taxRateColHeader || 'GST'}</th>
+            <th style="width: 10%; text-align: right;">${labels.amountColHeader || 'Total (₹)'}</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${itemRowsHtml}
+        </tbody>
+      </table>
+
+      <!-- Bottom Financials & Bank Details -->
+      <table style="border: none; margin-top: 8pt;">
+        <tr>
+          <!-- Bank & Terms -->
+          <td style="width: 55%; vertical-align: top; padding-right: 12pt;">
+            ${bankName || bankAccNo ? `
+              <div style="border: 1px solid #cbd5e1; padding: 8pt; border-radius: 4pt; background-color: #f8fafc; margin-bottom: 8pt;">
+                <div style="font-weight: bold; color: #1e40af; margin-bottom: 4pt; text-transform: uppercase; font-size: 8.5pt;">Bank & Settlement Details</div>
+                ${bankName ? `<div><strong>Bank:</strong> ${bankName} ${bankBranch ? `(${bankBranch})` : ''}</div>` : ''}
+                ${bankAccNo ? `<div><strong>Account No:</strong> ${bankAccNo}</div>` : ''}
+                ${bankIfsc ? `<div><strong>IFSC Code:</strong> ${bankIfsc}</div>` : ''}
+                ${bankUpi ? `<div><strong>UPI ID:</strong> ${bankUpi}</div>` : ''}
+              </div>
+            ` : ''}
+
+            <div style="font-size: 8.5pt; color: #475569;">
+              <strong>${labels.termsTitle || 'Terms & Conditions'}:</strong>
+              <div style="white-space: pre-line; margin-top: 2pt;">${terms}</div>
+            </div>
+          </td>
+
+          <!-- Totals Reconciliation Box -->
+          <td style="width: 45%; vertical-align: top;">
+            <table style="border: 1px solid #cbd5e1;">
+              <tr>
+                <td style="padding: 4pt 8pt; color: #64748b;">${labels.subtotalLabel || 'Subtotal (Taxable):'}</td>
+                <td style="padding: 4pt 8pt; text-align: right; font-weight: bold;">₹${subtotal.toFixed(2)}</td>
+              </tr>
+              ${totalDiscount > 0 ? `
+                <tr style="color: #16a34a;">
+                  <td style="padding: 4pt 8pt;">${labels.discountLabel || 'Total Discount:'}</td>
+                  <td style="padding: 4pt 8pt; text-align: right; font-weight: bold;">-₹${totalDiscount.toFixed(2)}</td>
+                </tr>
+              ` : ''}
+              ${totalTax > 0 ? `
+                <tr>
+                  <td style="padding: 4pt 8pt; color: #64748b;">${labels.taxLabel || 'GST (Taxes):'}</td>
+                  <td style="padding: 4pt 8pt; text-align: right; font-weight: bold;">₹${totalTax.toFixed(2)}</td>
+                </tr>
+              ` : ''}
+              ${roundOff !== 0 ? `
+                <tr>
+                  <td style="padding: 4pt 8pt; color: #94a3b8;">Round Off:</td>
+                  <td style="padding: 4pt 8pt; text-align: right;">₹${roundOff.toFixed(2)}</td>
+                </tr>
+              ` : ''}
+              <tr style="background-color: #eff6ff; border-top: 2px solid #2563eb;">
+                <td style="padding: 8pt; font-size: 11pt; font-weight: bold; color: #1e40af;">${labels.totalLabel || 'Grand Total:'}</td>
+                <td style="padding: 8pt; text-align: right; font-size: 12pt; font-weight: bold; color: #1e40af;">₹${grandTotal.toFixed(2)}</td>
+              </tr>
+            </table>
+
+            <div style="font-size: 8.5pt; margin-top: 6pt; background-color: #f1f5f9; padding: 6pt; border-radius: 4pt;">
+              <strong>${labels.wordsLabel || 'Amount in Words'}:</strong>
+              <div>${wordsTotal}</div>
+            </div>
+          </td>
+        </tr>
+      </table>
+
+      <br/><br/>
+
+      <!-- Signatures -->
+      <table style="border: none; margin-top: 18pt;">
+        <tr>
+          <td style="width: 50%; vertical-align: bottom; font-size: 8pt; color: #94a3b8;">
+            ${labels.computerGeneratedNote || 'This is a Computer Generated Document'}
+          </td>
+          <td style="width: 50%; text-align: right; vertical-align: bottom;">
+            <div style="font-weight: bold; color: #334155; margin-bottom: 30pt;">For ${company.name || 'Selsolve Store'}</div>
+            <div style="border-top: 1px solid #94a3b8; display: inline-block; padding-top: 4pt; width: 180px; text-align: center; font-size: 8.5pt;">
+              ${labels.signatoryTitle || 'Authorised Signatory'}
+            </div>
+          </td>
+        </tr>
+      </table>
+    </body>
+    </html>
+  `;
+
+  download(new Blob(['\ufeff' + wordHtml], { type: 'application/msword;charset=utf-8;' }), `Tax-Invoice-${orderId}.doc`);
+}
+
+/**
+ * Export POS Bill as a Native Microsoft Word (.doc) Document
+ */
+export function exportBillToWord({ receipt = {}, settings = {}, customConfig = {}, activeTheme = 'detailed_gst' }) {
+  const company = receipt?.company || settings?.company || { name: 'Selsolve Retail' };
+  const billing = receipt?.billing || settings?.billing || {};
+  const config = { ...billing, ...(customConfig || {}) };
+
+  const orderId = receipt?.orderId || receipt?.id || 'POS-BILL';
+  const billDate = receipt?.date ? new Date(receipt.date).toLocaleString('en-IN') : new Date().toLocaleString('en-IN');
+  const items = receipt?.items || [];
+  const subtotal = Number(receipt?.subtotal || 0);
+  const tax = Number(receipt?.tax || 0);
+  const discount = Number(receipt?.discount || 0);
+  const total = Number(receipt?.total || receipt?.grandTotal || 0);
+  const wordsTotal = numberToWordsINR(total);
+
+  const itemRowsHtml = items.map((it, idx) => `
+    <tr>
+      <td style="border: 1px solid #cbd5e1; padding: 4pt; text-align: center;">${idx + 1}</td>
+      <td style="border: 1px solid #cbd5e1; padding: 4pt;"><strong>${it.name}</strong></td>
+      <td style="border: 1px solid #cbd5e1; padding: 4pt; text-align: center;">${it.qty || 1}</td>
+      <td style="border: 1px solid #cbd5e1; padding: 4pt; text-align: right;">₹${Number(it.price || 0).toFixed(2)}</td>
+      <td style="border: 1px solid #cbd5e1; padding: 4pt; text-align: right; font-weight: bold;">₹${Number(it.total || (it.qty * it.price) || 0).toFixed(2)}</td>
+    </tr>
+  `).join('');
+
+  const wordHtml = `
+    <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+    <head>
+      <meta charset='utf-8'>
+      <title>POS Bill ${orderId}</title>
+      <style>
+        body { font-family: 'Segoe UI', Calibri, Arial, sans-serif; font-size: 9.5pt; color: #1e293b; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 8pt; }
+        th { background-color: #f1f5f9; border: 1px solid #94a3b8; padding: 5pt; text-align: left; }
+        td { border: 1px solid #cbd5e1; padding: 4pt 6pt; }
+        .text-center { text-align: center; }
+        .text-right { text-align: right; }
+      </style>
+    </head>
+    <body>
+      <div style="text-align: center; border-bottom: 2px dashed #94a3b8; padding-bottom: 8pt; margin-bottom: 8pt;">
+        <h2 style="margin: 0; color: #4338ca;">${company.name || 'Selsolve Retail'}</h2>
+        ${company.address ? `<div>${company.address}</div>` : ''}
+        ${company.phone ? `<div>Phone: ${company.phone}</div>` : ''}
+        ${company.gstin ? `<div>GSTIN: ${company.gstin}</div>` : ''}
+        <h3 style="margin: 6pt 0 0 0; text-transform: uppercase; color: #4f46e5;">RETAIL POS BILL</h3>
+        <div>Bill #: <strong>${orderId}</strong> · Date: ${billDate}</div>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 8%; text-align: center;">#</th>
+            <th style="width: 48%;">Item</th>
+            <th style="width: 14%; text-align: center;">Qty</th>
+            <th style="width: 15%; text-align: right;">Rate</th>
+            <th style="width: 15%; text-align: right;">Amount</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${itemRowsHtml}
+        </tbody>
+      </table>
+
+      <table style="margin-top: 6pt;">
+        <tr><td style="border: none;">Subtotal:</td><td style="border: none; text-align: right; font-weight: bold;">₹${subtotal.toFixed(2)}</td></tr>
+        ${discount > 0 ? `<tr><td style="border: none; color: #16a34a;">Discount:</td><td style="border: none; text-align: right; font-weight: bold; color: #16a34a;">-₹${discount.toFixed(2)}</td></tr>` : ''}
+        ${tax > 0 ? `<tr><td style="border: none;">GST Tax:</td><td style="border: none; text-align: right; font-weight: bold;">₹${tax.toFixed(2)}</td></tr>` : ''}
+        <tr style="border-top: 2px solid #4338ca;"><td style="border: none; font-size: 11pt; font-weight: bold; color: #4338ca;">GRAND TOTAL:</td><td style="border: none; text-align: right; font-size: 12pt; font-weight: bold; color: #4338ca;">₹${total.toFixed(2)}</td></tr>
+      </table>
+
+      <div style="font-size: 8.5pt; margin-top: 6pt; background-color: #f1f5f9; padding: 6pt;">
+        <strong>Total in Words:</strong> ${wordsTotal}
+      </div>
+
+      <div style="text-align: center; margin-top: 14pt; font-size: 8.5pt; color: #64748b;">
+        ${config.footerText || 'Thank you for your business! Visit again.'}
+      </div>
+    </body>
+    </html>
+  `;
+
+  download(new Blob(['\ufeff' + wordHtml], { type: 'application/msword;charset=utf-8;' }), `POS-Bill-${orderId}.doc`);
+}
+
+
+/**
+ * Renders custom HTML template by interpolating live invoice/receipt data, company info, and line items.
+ */
+export function renderCustomDocumentHtml(templateHtml, { invoice = {}, receipt = {}, company = {}, billing = {}, cfg = {} }) {
+  if (!templateHtml) return '';
+
+  const data = invoice.orderId ? invoice : (receipt.orderId ? receipt : {
+    orderId: 'INV-2026-1082',
+    date: new Date().toISOString(),
+    customerName: 'TechNova Solutions Pvt Ltd',
+    customerPhone: '+91 98450 88776',
+    customerAddress: 'Tower B, Global Tech Park, Bengaluru',
+    customerGstin: '29AABCT1234F1Z8',
+    subtotal: 18500.00,
+    discount: 500.00,
+    tax: 2790.00,
+    total: 20790.00,
+    items: [
+      { name: 'Commercial High-Speed POS Terminal 15.6"', hsn: '8471', qty: 1, unit: 'pcs', price: 12000.00, taxRate: 18, total: 13806.00 },
+      { name: 'Thermal 80mm Receipt Rolls (Box of 50)', hsn: '4811', qty: 2, unit: 'box', price: 1500.00, taxRate: 12, total: 3248.00 },
+      { name: '2D Barcode Scanner USB', hsn: '8471', qty: 1, unit: 'pcs', price: 3500.00, taxRate: 18, total: 4012.00 }
+    ]
+  });
+
+  const comp = company?.name ? company : {
+    name: 'Selsolve Store',
+    address: 'Plot 102, EPIP Zone, Whitefield',
+    city: 'Bengaluru',
+    state: 'Karnataka',
+    phone: '+91 80 4123 9988',
+    email: 'contact@selsolve.com',
+    gstin: '29AABCS9876E1Z4'
+  };
+
+  const items = data.items || [];
+  const subtotal = Number(data.subtotal || 0);
+  const tax = Number(data.tax || 0);
+  const discount = Number(data.discount || 0);
+  const roundOff = Number(data.roundOff || 0);
+  const total = Number(data.total || data.grandTotal || (subtotal + tax - discount + roundOff));
+  const wordsTotal = numberToWordsINR(total);
+
+  // Generate live items table rows HTML if needed
+  const itemsRowsHtml = items.map((it, idx) => `
+    <tr>
+      <td style="text-align: center; padding: 6px; border: 1px solid #cbd5e1;">${idx + 1}</td>
+      <td style="padding: 6px; border: 1px solid #cbd5e1;"><strong>${it.name}</strong>${it.barcode ? `<div style="font-size: 8pt; color: #64748b;">${it.barcode}</div>` : ''}</td>
+      <td style="text-align: center; padding: 6px; border: 1px solid #cbd5e1;">${it.hsn || it.hsnCode || '—'}</td>
+      <td style="text-align: center; padding: 6px; border: 1px solid #cbd5e1;">${it.qty || 1} ${it.unit || 'pcs'}</td>
+      <td style="text-align: right; padding: 6px; border: 1px solid #cbd5e1;">₹${Number(it.price || 0).toFixed(2)}</td>
+      <td style="text-align: center; padding: 6px; border: 1px solid #cbd5e1;">${Number(it.taxRate || 0)}%</td>
+      <td style="text-align: right; padding: 6px; border: 1px solid #cbd5e1; font-weight: bold;">₹${Number(it.total || (it.qty * it.price) || 0).toFixed(2)}</td>
+    </tr>
+  `).join('');
+
+  let html = templateHtml;
+
+  // Replace common keys
+  const map = {
+    '{{companyName}}': comp.name || 'Selsolve Store',
+    '{{companyAddress}}': comp.address || '',
+    '{{companyCity}}': comp.city || '',
+    '{{companyState}}': comp.state || '',
+    '{{companyPincode}}': comp.pincode || '',
+    '{{companyPhone}}': comp.phone || '',
+    '{{companyEmail}}': comp.email || '',
+    '{{companyGstin}}': comp.gstin || '',
+    '{{companyPan}}': comp.pan || '',
+    '{{companyCin}}': comp.cin || '',
+    '{{companyWebsite}}': comp.website || '',
+    '{{orderId}}': data.orderId || data.id || 'INV-1001',
+    '{{invoiceNo}}': data.orderId || data.id || 'INV-1001',
+    '{{billNo}}': data.orderId || data.id || 'BILL-1001',
+    '{{date}}': data.date ? new Date(data.date).toLocaleDateString('en-IN') : new Date().toLocaleDateString('en-IN'),
+    '{{invoiceDate}}': data.date ? new Date(data.date).toLocaleDateString('en-IN') : new Date().toLocaleDateString('en-IN'),
+    '{{dueDate}}': data.dueDate ? new Date(data.dueDate).toLocaleDateString('en-IN') : '',
+    '{{paymentMethod}}': data.paymentMethod || 'Cash / UPI',
+    '{{status}}': data.status || 'PAID',
+    '{{customerName}}': data.customerName || 'Walk-in Customer',
+    '{{customerPhone}}': data.customerPhone || '',
+    '{{customerEmail}}': data.customerEmail || '',
+    '{{customerAddress}}': data.customerAddress || '',
+    '{{customerGstin}}': data.customerGstin || '',
+    '{{shippingName}}': data.shippingAddress?.name || data.customerName || '',
+    '{{shippingAddress}}': data.shippingAddress?.address || data.customerAddress || '',
+    '{{shippingPhone}}': data.shippingAddress?.phone || data.customerPhone || '',
+    '{{subtotal}}': `₹${subtotal.toFixed(2)}`,
+    '{{discount}}': `₹${discount.toFixed(2)}`,
+    '{{tax}}': `₹${tax.toFixed(2)}`,
+    '{{total}}': `₹${total.toFixed(2)}`,
+    '{{grandTotal}}': `₹${total.toFixed(2)}`,
+    '{{wordsTotal}}': wordsTotal,
+    '{{itemsTable}}': itemsRowsHtml,
+    '{{terms}}': data.terms || cfg?.termsText || billing?.termsText || '1. Goods once sold will not be taken back.',
+    '{{footerText}}': cfg?.footerText || billing?.footerText || 'Thank you for your business!'
+  };
+
+  Object.keys(map).forEach((k) => {
+    html = html.split(k).join(map[k]);
+  });
+
+  return html;
+}
+
+/**
+ * Universal Document Template Reader & Parser
+ * Robustly parses .docx, .doc, .pdf, .json, .html, and .txt files,
+ * extracting template schemas, tables, custom labels, and styling into live editor templates.
+ */
+export async function readDocumentTemplateFile(file) {
+  if (!file) throw new Error('No file provided');
+
+  const fileName = file.name || 'template';
+  const fileExt = fileName.split('.').pop()?.toLowerCase() || '';
+
+  // 1. ArrayBuffer Reader for binary formats (.docx, .pdf)
+  const readBuffer = () => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => resolve(e.target.result);
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(file);
+  });
+
+  // 2. Text Reader for text / JSON / HTML formats (.json, .doc, .htm, .txt)
+  const readText = () => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => resolve(e.target.result);
+    reader.onerror = reject;
+    reader.readAsText(file);
+  });
+
+  try {
+    let rawText = '';
+    let extractedHtml = '';
+    let extractedCss = '';
+    let extractedLabels = {};
+    let detectedColor = 'blue';
+    let detectedPaperSize = 'A4';
+
+    if (fileExt === 'docx') {
+      // Decode DOCX binary buffer
+      const buffer = await readBuffer();
+      const bytes = new Uint8Array(buffer);
+      const textDecoder = new TextDecoder('utf-8', { fatal: false });
+      const decoded = textDecoder.decode(bytes);
+
+      // Extract all Word text runs: <w:t>text</w:t>
+      const textMatches = [...decoded.matchAll(/<w:t[^>]*>([^<]+)<\/w:t>/g)].map(m => m[1]);
+      rawText = textMatches.join(' ');
+      if (!rawText.trim()) {
+        const asciiMatches = decoded.match(/[\x20-\x7E]{4,}/g) || [];
+        rawText = asciiMatches.join(' ');
+      }
+
+      // Build structured HTML representation of Word paragraphs and tables
+      const paragraphs = [...decoded.matchAll(/<w:p[^>]*>([\s\S]*?)<\/w:p>/g)].map(m => {
+        const pText = [...m[1].matchAll(/<w:t[^>]*>([^<]+)<\/w:t>/g)].map(tm => tm[1]).join(' ');
+        return pText.trim() ? `<p style="margin: 4pt 0;">${pText}</p>` : '';
+      }).filter(Boolean);
+
+      if (paragraphs.length > 0) {
+        extractedHtml = `
+          <div class="word-docx-template" style="font-family: 'Segoe UI', Calibri, Arial, sans-serif; font-size: 10pt; color: #1e293b; line-height: 1.4;">
+            ${paragraphs.join('\n')}
+          </div>
+        `;
+      }
+    } else if (fileExt === 'pdf') {
+      // Decode PDF binary buffer
+      const buffer = await readBuffer();
+      const bytes = new Uint8Array(buffer);
+      const textDecoder = new TextDecoder('latin1');
+      const decoded = textDecoder.decode(bytes);
+
+      const pdfTextMatches = [...decoded.matchAll(/\(([^()]+)\)\s*Tj/g)].map(m => m[1]);
+      const pdfArrayMatches = [...decoded.matchAll(/\[(.*?)\]\s*TJ/g)].map(m => {
+        return (m[1].match(/\(([^()]+)\)/g) || []).map(s => s.slice(1, -1)).join('');
+      });
+      rawText = [...pdfTextMatches, ...pdfArrayMatches].join(' ');
+      if (!rawText.trim()) {
+        const asciiMatches = decoded.match(/[\x20-\x7E]{4,}/g) || [];
+        rawText = asciiMatches.join(' ');
+      }
+    } else {
+      // Text / JSON / HTML / .doc
+      rawText = await readText();
+    }
+
+    // Attempt 1: Direct JSON parsing
+    try {
+      const parsed = JSON.parse(rawText);
+      if (parsed && (parsed.type || parsed.config || parsed.baseTheme || parsed.templates)) {
+        return parsed;
+      }
+    } catch (_) {}
+
+    // Attempt 2: Search for embedded JSON inside file stream
+    const jsonMatch = rawText.match(/\{[\s\S]*?"(?:type|config|baseTheme|sections|customLabels)"[\s\S]*?\}/);
+    if (jsonMatch) {
+      try {
+        const parsed = JSON.parse(jsonMatch[0]);
+        if (parsed && (parsed.type || parsed.config || parsed.baseTheme)) {
+          return parsed;
+        }
+      } catch (_) {}
+    }
+
+    // Attempt 3: Intelligent Document Structure & Label Extractor
+    const isThermal = /thermal|pos bill|receipt|slip|cash memo|80mm|58mm/i.test(rawText) || /thermal|receipt|pos/i.test(fileName);
+    const targetType = isThermal ? 'thermal' : 'invoice';
+
+    // Parse HTML DOM if file contains HTML/XML tags
+    if (rawText.includes('<html') || rawText.includes('<table') || rawText.includes('<div') || rawText.includes('<body')) {
+      try {
+        const doc = new DOMParser().parseFromString(rawText, 'text/html');
+
+        // Extract style tag
+        const styleEl = doc.querySelector('style');
+        if (styleEl && styleEl.textContent.trim()) {
+          extractedCss = styleEl.textContent.trim();
+        }
+
+        // Extract body content as custom HTML template
+        if (doc.body && doc.body.innerHTML.trim()) {
+          extractedHtml = doc.body.innerHTML.trim();
+        }
+
+        // Extract title
+        const titleEl = doc.querySelector('.title, h1, h2, h3, [class*="title"], [id*="title"]');
+        if (titleEl && titleEl.textContent.trim()) {
+          extractedLabels.invoiceTitle = titleEl.textContent.trim().toUpperCase();
+        }
+
+        // Extract table column headers
+        const ths = [...doc.querySelectorAll('th')].map(th => th.textContent.trim());
+        if (ths.length > 0) {
+          ths.forEach(h => {
+            const low = h.toLowerCase();
+            if (low.includes('item') || low.includes('particular') || low.includes('desc') || low.includes('product')) {
+              extractedLabels.itemColHeader = h;
+            } else if (low.includes('hsn') || low.includes('sac') || low.includes('tariff')) {
+              extractedLabels.hsnColHeader = h;
+            } else if (low.includes('qty') || low.includes('quantity') || low.includes('nos')) {
+              extractedLabels.qtyColHeader = h;
+            } else if (low.includes('rate') || low.includes('price') || low.includes('unit price')) {
+              extractedLabels.rateColHeader = h;
+            } else if (low.includes('taxable') || low.includes('assessable')) {
+              extractedLabels.taxableColHeader = h;
+            } else if (low.includes('tax') || low.includes('gst') || low.includes('rate%')) {
+              extractedLabels.taxRateColHeader = h;
+            } else if (low.includes('total') || low.includes('amount') || low.includes('value')) {
+              extractedLabels.amountColHeader = h;
+            }
+          });
+        }
+
+        // Extract Bill-To / Ship-To headers
+        const textContent = doc.body?.textContent || '';
+        if (textContent.includes('Bill To') || textContent.includes('Billed To') || textContent.includes('Buyer')) {
+          extractedLabels.billToTitle = 'Bill To (Buyer / Customer)';
+        }
+        if (textContent.includes('Ship To') || textContent.includes('Shipped To') || textContent.includes('Consignee')) {
+          extractedLabels.shipToTitle = 'Ship To (Consignee)';
+        }
+
+        // Detect colors
+        const htmlStr = doc.documentElement.innerHTML;
+        if (/blue|#1e40af|#2563eb|#3b82f6/i.test(htmlStr)) detectedColor = 'blue';
+        else if (/emerald|green|#059669|#10b981/i.test(htmlStr)) detectedColor = 'emerald';
+        else if (/indigo|purple|#4338ca|#6366f1/i.test(htmlStr)) detectedColor = 'indigo';
+        else if (/slate|gray|#334155|#475569/i.test(htmlStr)) detectedColor = 'slate';
+        else if (/amber|orange|#d97706|#f59e0b/i.test(htmlStr)) detectedColor = 'amber';
+        else if (/rose|red|#e11d48|#f43f5e/i.test(htmlStr)) detectedColor = 'rose';
+      } catch (_) {}
+    } else {
+      // Plain text regex extraction
+      const titleMatch = rawText.match(/(?:TAX INVOICE|GST INVOICE|RETAIL INVOICE|INVOICE|POS BILL|RECEIPT|BILL OF SUPPLY|ESTIMATE|CASH MEMO)/i);
+      if (titleMatch) {
+        extractedLabels.invoiceTitle = titleMatch[0].toUpperCase();
+      }
+
+      if (/Bill To|Billed To|Buyer/i.test(rawText)) extractedLabels.billToTitle = 'Bill To (Buyer)';
+      if (/Ship To|Shipped To|Consignee/i.test(rawText)) extractedLabels.shipToTitle = 'Ship To (Consignee)';
+      if (/Item Description|Particulars|Product/i.test(rawText)) extractedLabels.itemColHeader = 'Item Description';
+      if (/HSN|SAC/i.test(rawText)) extractedLabels.hsnColHeader = 'HSN/SAC';
+      if (/Rate|Price|Unit Price/i.test(rawText)) extractedLabels.rateColHeader = 'Rate (₹)';
+      if (/Taxable|Assessable/i.test(rawText)) extractedLabels.taxableColHeader = 'Taxable (₹)';
+      if (/Total Amount|Grand Total|Net Payable/i.test(rawText)) extractedLabels.totalLabel = 'TOTAL INVOICE VALUE:';
+    }
+
+    // Detect A5 vs A4
+    if (/A5|half page|compact/i.test(rawText) || /a5/i.test(fileName)) {
+      detectedPaperSize = 'A5';
+    }
+
+    const cleanName = fileName.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ')
+      .replace(/\b\w/g, c => c.toUpperCase());
+
+    const resultTemplate = {
+      name: `${cleanName} (${fileExt.toUpperCase()} Template)`,
+      type: targetType,
+      baseTheme: targetType === 'thermal' ? 'detailed_gst' : (detectedColor === 'emerald' ? 'classic_emerald' : (detectedColor === 'indigo' ? 'modern_clean' : 'corporate_blue')),
+      config: {
+        accentColor: detectedColor,
+        paperSize: detectedPaperSize,
+        showInvoiceLogo: true,
+        showCompanyTaxMeta: true,
+        showConsigneeShipTo: true,
+        showTransportMeta: /transport|vehicle|eway|e-way|lr no/i.test(rawText),
+        showItemHsn: true,
+        showItemUnit: true,
+        showItemTaxBreakup: true,
+        showHsnSummaryTable: /hsn summary|tax slab|tax breakup/i.test(rawText),
+        showBankDetails: true,
+        showPaymentQr: true,
+        showInvoiceWordsTotal: true,
+        showInvoiceSignature: true,
+        showInvoiceTerms: true,
+        customHtml: extractedHtml || '',
+        customCss: extractedCss || `/* Custom styles for ${fileName} */`,
+        customLabels: {
+          invoiceTitle: extractedLabels.invoiceTitle || (targetType === 'thermal' ? 'RETAIL POS BILL' : 'TAX INVOICE'),
+          recipientCopy: 'Original for Recipient',
+          billToTitle: extractedLabels.billToTitle || 'Bill To (Buyer / Customer)',
+          shipToTitle: extractedLabels.shipToTitle || 'Ship To (Consignee)',
+          itemColHeader: extractedLabels.itemColHeader || 'Item Description',
+          hsnColHeader: extractedLabels.hsnColHeader || 'HSN/SAC',
+          qtyColHeader: extractedLabels.qtyColHeader || 'Qty',
+          unitColHeader: 'Unit',
+          rateColHeader: extractedLabels.rateColHeader || 'Rate (₹)',
+          taxableColHeader: extractedLabels.taxableColHeader || 'Taxable (₹)',
+          taxRateColHeader: extractedLabels.taxRateColHeader || 'Tax %',
+          amountColHeader: extractedLabels.amountColHeader || 'Amount (₹)',
+          subtotalLabel: 'Total Taxable Amount:',
+          discountLabel: 'Special Discount:',
+          taxLabel: 'Total GST:',
+          totalLabel: extractedLabels.totalLabel || 'TOTAL INVOICE VALUE:',
+          wordsLabel: 'Amount in Words (Rupees):',
+          termsTitle: 'Terms & Conditions',
+          signatoryTitle: 'Authorised Signatory',
+          computerGeneratedNote: 'This is a Computer Generated Document'
+        }
+      }
+    };
+
+    return resultTemplate;
+  } catch (err) {
+    throw new Error(`Failed to parse ${fileExt.toUpperCase()} file: ${err.message}`);
+  }
+}
+
+/**
+ * Export Purchase Invoice to Word (.doc)
+ */
+export function exportPurchaseToWord({ purchase, company = {} }) {
+  if (!purchase) return;
+
+  const invoiceNo = purchase.invoiceNo || 'PURCHASE-INV';
+  const vendorName = purchase.vendorName || purchase.vendor?.name || 'Vendor';
+  const vendorGstin = purchase.vendorGstin || purchase.vendor?.gstin || '';
+  const vendorPhone = purchase.vendorPhone || purchase.vendor?.phone || '';
+  const vendorAddress = purchase.vendorAddress || purchase.vendor?.address || '';
+  const purchaseDate = purchase.date ? new Date(purchase.date).toLocaleDateString('en-IN') : new Date().toLocaleDateString('en-IN');
+  const items = purchase.items || [];
+  const subtotal = Number(purchase.subtotal || 0);
+  const tax = Number(purchase.tax || 0);
+  const total = Number(purchase.totalAmount || purchase.total || (subtotal + tax));
+
+  const itemRows = items.map((it, idx) => {
+    const qty = Number(it.qty || it.quantity || 1);
+    const rate = Number(it.rate || it.purchasePrice || 0);
+    const taxRate = Number(it.taxRate || 0);
+    const lineSubtotal = qty * rate;
+    const lineTax = (lineSubtotal * taxRate) / 100;
+    const lineTotal = lineSubtotal + lineTax;
+
+    return `
+      <tr>
+        <td style="text-align: center; border: 1px solid #cbd5e1; padding: 6px;">${idx + 1}</td>
+        <td style="border: 1px solid #cbd5e1; padding: 6px;">
+          <strong>${it.name || it.productName || 'Item'}</strong>
+          ${it.batchNo ? `<div style="font-size: 8pt; color: #64748b;">Batch: ${it.batchNo} | Exp: ${it.expiryDate || 'N/A'}</div>` : ''}
+        </td>
+        <td style="text-align: center; border: 1px solid #cbd5e1; padding: 6px;">${it.hsn || '—'}</td>
+        <td style="text-align: center; border: 1px solid #cbd5e1; padding: 6px;">${qty} ${it.unit || 'pcs'}</td>
+        <td style="text-align: right; border: 1px solid #cbd5e1; padding: 6px;">₹${rate.toFixed(2)}</td>
+        <td style="text-align: right; border: 1px solid #cbd5e1; padding: 6px;">₹${lineSubtotal.toFixed(2)}</td>
+        <td style="text-align: center; border: 1px solid #cbd5e1; padding: 6px;">${taxRate}%</td>
+        <td style="text-align: right; border: 1px solid #cbd5e1; padding: 6px; font-weight: bold;">₹${lineTotal.toFixed(2)}</td>
+      </tr>
+    `;
+  }).join('');
+
+  const wordHtml = `
+    <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+    <head>
+      <meta charset='utf-8'>
+      <title>Purchase Invoice ${invoiceNo}</title>
+      <style>
+        @page { size: 21cm 29.7cm; margin: 1.5cm; }
+        body { font-family: 'Segoe UI', Calibri, Arial, sans-serif; font-size: 9.5pt; color: #1e293b; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 10pt; font-size: 9.5pt; }
+        .bordered-table th { background-color: #f1f5f9; font-weight: bold; border: 1px solid #94a3b8; padding: 6pt; }
+        .bordered-table td { border: 1px solid #cbd5e1; padding: 5pt 6pt; }
+        .title { font-size: 15pt; font-weight: bold; color: #4338ca; text-transform: uppercase; }
+      </style>
+    </head>
+    <body>
+      <table style="border-bottom: 2px solid #4338ca; padding-bottom: 8pt; margin-bottom: 12pt;">
+        <tr>
+          <td style="width: 60%;">
+            <div style="font-size: 14pt; font-weight: bold;">${company.name || 'Selsolve Retail'}</div>
+            ${company.address ? `<div>${company.address}</div>` : ''}
+            ${company.gstin ? `<div><strong>GSTIN:</strong> ${company.gstin}</div>` : ''}
+          </td>
+          <td style="width: 40%; text-align: right;">
+            <div class="title">PURCHASE INVOICE</div>
+            <div style="font-weight: bold; margin-top: 4pt;">Invoice #: ${invoiceNo}</div>
+            <div>Date: ${purchaseDate}</div>
+            <div>Status: ${purchase.paymentStatus || 'UNPAID'}</div>
+          </td>
+        </tr>
+      </table>
+
+      <table style="border: 1px solid #cbd5e1; margin-bottom: 12pt;">
+        <tr style="background-color: #f8fafc;">
+          <th style="padding: 6pt; text-align: left; border: 1px solid #cbd5e1;">Vendor / Supplier Details</th>
+        </tr>
+        <tr>
+          <td style="padding: 8pt; border: 1px solid #cbd5e1;">
+            <strong>${vendorName}</strong>
+            ${vendorPhone ? `<div>Phone: ${vendorPhone}</div>` : ''}
+            ${vendorGstin ? `<div>GSTIN: ${vendorGstin}</div>` : ''}
+            ${vendorAddress ? `<div>Address: ${vendorAddress}</div>` : ''}
+          </td>
+        </tr>
+      </table>
+
+      <table class="bordered-table">
+        <thead>
+          <tr>
+            <th style="width: 5%; text-align: center;">#</th>
+            <th style="width: 40%;">Item Description</th>
+            <th style="width: 10%; text-align: center;">HSN</th>
+            <th style="width: 10%; text-align: center;">Qty</th>
+            <th style="width: 10%; text-align: right;">Cost Rate (₹)</th>
+            <th style="width: 10%; text-align: right;">Taxable (₹)</th>
+            <th style="width: 5%; text-align: center;">GST</th>
+            <th style="width: 10%; text-align: right;">Total (₹)</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${itemRows}
+        </tbody>
+      </table>
+
+      <table style="border: none; margin-top: 8pt;">
+        <tr>
+          <td style="width: 60%; vertical-align: top;">
+            ${purchase.notes ? `<div><strong>Notes / Remarks:</strong><br/>${purchase.notes}</div>` : ''}
+          </td>
+          <td style="width: 40%;">
+            <table style="border: 1px solid #cbd5e1;">
+              <tr>
+                <td style="padding: 4pt 8pt; color: #64748b;">Subtotal (Taxable):</td>
+                <td style="padding: 4pt 8pt; text-align: right; font-weight: bold;">₹${subtotal.toFixed(2)}</td>
+              </tr>
+              <tr>
+                <td style="padding: 4pt 8pt; color: #64748b;">Input GST:</td>
+                <td style="padding: 4pt 8pt; text-align: right; font-weight: bold;">₹${tax.toFixed(2)}</td>
+              </tr>
+              <tr style="background-color: #eff6ff; font-size: 11pt; font-weight: bold;">
+                <td style="padding: 6pt 8pt; color: #1e40af;">Total Amount:</td>
+                <td style="padding: 6pt 8pt; text-align: right; color: #1e40af;">₹${total.toFixed(2)}</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </body>
+    </html>
+  `;
+
+  const blob = new Blob(['\ufeff', wordHtml], { type: 'application/msword' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `purchase-invoice-${invoiceNo}.doc`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Export Purchase Order to Word (.doc)
+ */
+export function exportPurchaseOrderToWord({ po, company = {} }) {
+  if (!po) return;
+
+  const poNumber = po.poNumber || 'PO-1001';
+  const vendorName = po.vendorName || 'Vendor';
+  const poDate = po.date ? new Date(po.date).toLocaleDateString('en-IN') : new Date().toLocaleDateString('en-IN');
+  const expectedDate = po.expectedDate ? new Date(po.expectedDate).toLocaleDateString('en-IN') : 'As agreed';
+  const items = po.items || [];
+  const total = Number(po.totalAmount || 0);
+
+  const itemRows = items.map((it, idx) => {
+    const qty = Number(it.qty || 1);
+    const rate = Number(it.rate || 0);
+    const taxRate = Number(it.taxRate || 0);
+    const lineTotal = qty * rate * (1 + taxRate / 100);
+
+    return `
+      <tr>
+        <td style="text-align: center; border: 1px solid #cbd5e1; padding: 6px;">${idx + 1}</td>
+        <td style="border: 1px solid #cbd5e1; padding: 6px;"><strong>${it.productName || 'Item'}</strong></td>
+        <td style="text-align: center; border: 1px solid #cbd5e1; padding: 6px;">${it.hsn || '—'}</td>
+        <td style="text-align: center; border: 1px solid #cbd5e1; padding: 6px;">${qty} ${it.unit || 'pcs'}</td>
+        <td style="text-align: right; border: 1px solid #cbd5e1; padding: 6px;">₹${rate.toFixed(2)}</td>
+        <td style="text-align: center; border: 1px solid #cbd5e1; padding: 6px;">${taxRate}%</td>
+        <td style="text-align: right; border: 1px solid #cbd5e1; padding: 6px; font-weight: bold;">₹${lineTotal.toFixed(2)}</td>
+      </tr>
+    `;
+  }).join('');
+
+  const wordHtml = `
+    <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+    <head>
+      <meta charset='utf-8'>
+      <title>Purchase Order ${poNumber}</title>
+      <style>
+        @page { size: 21cm 29.7cm; margin: 1.5cm; }
+        body { font-family: 'Segoe UI', Calibri, Arial, sans-serif; font-size: 9.5pt; color: #1e293b; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 10pt; font-size: 9.5pt; }
+        .bordered-table th { background-color: #f1f5f9; font-weight: bold; border: 1px solid #94a3b8; padding: 6pt; }
+        .bordered-table td { border: 1px solid #cbd5e1; padding: 5pt 6pt; }
+        .title { font-size: 15pt; font-weight: bold; color: #0284c7; text-transform: uppercase; }
+      </style>
+    </head>
+    <body>
+      <table style="border-bottom: 2px solid #0284c7; padding-bottom: 8pt; margin-bottom: 12pt;">
+        <tr>
+          <td style="width: 60%;">
+            <div style="font-size: 14pt; font-weight: bold;">${company.name || 'Selsolve Retail'}</div>
+            ${company.address ? `<div>${company.address}</div>` : ''}
+            ${company.gstin ? `<div><strong>GSTIN:</strong> ${company.gstin}</div>` : ''}
+          </td>
+          <td style="width: 40%; text-align: right;">
+            <div class="title">PURCHASE ORDER</div>
+            <div style="font-weight: bold; margin-top: 4pt;">PO #: ${poNumber}</div>
+            <div>Date: ${poDate}</div>
+            <div>Expected: ${expectedDate}</div>
+          </td>
+        </tr>
+      </table>
+
+      <table style="border: 1px solid #cbd5e1; margin-bottom: 12pt;">
+        <tr style="background-color: #f8fafc;">
+          <th style="padding: 6pt; text-align: left; border: 1px solid #cbd5e1;">Vendor Details</th>
+        </tr>
+        <tr>
+          <td style="padding: 8pt; border: 1px solid #cbd5e1;">
+            <strong>${vendorName}</strong>
+          </td>
+        </tr>
+      </table>
+
+      <table class="bordered-table">
+        <thead>
+          <tr>
+            <th style="width: 5%; text-align: center;">#</th>
+            <th style="width: 45%;">Item Description</th>
+            <th style="width: 10%; text-align: center;">HSN</th>
+            <th style="width: 10%; text-align: center;">Order Qty</th>
+            <th style="width: 15%; text-align: right;">Agreed Rate (₹)</th>
+            <th style="width: 5%; text-align: center;">GST</th>
+            <th style="width: 10%; text-align: right;">Total (₹)</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${itemRows}
+        </tbody>
+      </table>
+
+      <div style="text-align: right; font-size: 11pt; font-weight: bold; margin-top: 8pt;">
+        Estimated Total Value: ₹${total.toFixed(2)}
+      </div>
+    </body>
+    </html>
+  `;
+
+  const blob = new Blob(['\ufeff', wordHtml], { type: 'application/msword' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `purchase-order-${poNumber}.doc`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+
+
+

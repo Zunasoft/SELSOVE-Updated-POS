@@ -120,7 +120,7 @@ export default function ReportsManager({ showToast }) {
           <StatTile
             label="Today's Sales"
             value={moneyShort(analytics.todaysSales)}
-            sub={`${analytics.todaysBills} bills · avg ${money(analytics.averageBillValue, { decimals: false })}`}
+            sub={`${analytics.todaysBills} bills · avg ${money(analytics.todaysAverageBillValue, { decimals: false })}`}
             icon={TrendingUp}
             tone="accent"
           />

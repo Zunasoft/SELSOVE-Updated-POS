@@ -8,11 +8,9 @@ export default defineConfig({
     host: true
   },
   build: {
+    chunkSizeWarningLimit: 1200,
     rollupOptions: {
       output: {
-        // Split rarely-changing vendor code into its own chunk so a normal
-        // app-code deploy doesn't force every returning user to re-download
-        // React/animation/icon libraries they already have cached.
         manualChunks: {
           vendor: ['react', 'react-dom', 'framer-motion'],
           icons: ['lucide-react']

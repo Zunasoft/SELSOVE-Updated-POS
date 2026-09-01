@@ -35,8 +35,16 @@ export default function BarcodePrinterModal({ product, onClose, showToast }) {
   const [showRegionalName, setShowRegionalName] = useState(true);
   const [showMrp, setShowMrp] = useState(true);
   const [showPrice, setShowPrice] = useState(true);
+  const [selectedBatchId, setSelectedBatchId] = useState('');
+  const [showBatchInfo, setShowBatchInfo] = useState(true);
 
   if (!product) return null;
+
+  const sellableBatches = product.trackBatches
+    ? (product.batches || []).filter((b) => Number(b.qty) > 0)
+    : [];
+  const selectedBatch = sellableBatches.find((b) => b.id === selectedBatchId) || null;
+  const labelPrice = selectedBatch?.sellPrice != null ? selectedBatch.sellPrice : product.price;
 
   const handlePrint = () => {
     const printWin = window.open('', '_blank', 'width=800,height=600');
@@ -65,9 +73,10 @@ export default function BarcodePrinterModal({ product, onClose, showToast }) {
             </svg>
           </div>
           <div class="barcode-num">${product.barcode}</div>
+          ${showBatchInfo && selectedBatch ? `<div class="batch-row">Batch: ${selectedBatch.batchNo}${selectedBatch.expiryDate ? ` · Exp: ${String(selectedBatch.expiryDate).slice(0, 10)}` : ''}</div>` : ''}
           <div class="price-row">
             ${showMrp && product.mrp ? `<span class="mrp">MRP: ₹${product.mrp}</span>` : ''}
-            ${showPrice ? `<span class="sale-price">OUR PRICE: ₹${product.price}</span>` : ''}
+            ${showPrice ? `<span class="sale-price">OUR PRICE: ₹${labelPrice}</span>` : ''}
           </div>
         </div>
       `
@@ -103,6 +112,7 @@ export default function BarcodePrinterModal({ product, onClose, showToast }) {
     .barcode-wrapper { width: 85%; height: 22px; margin: 2px 0; }
     .barcode-svg { width: 100%; height: 100%; }
     .barcode-num { font-size: 9px; font-family: monospace; letter-spacing: 1px; }
+    .batch-row { font-size: 7.5px; color: #444; margin-top: 1px; }
     .price-row { display: flex; justify-content: space-around; width: 100%; font-size: 9px; font-weight: bold; margin-top: 2px; }
     .mrp { text-decoration: line-through; color: #555; }
     .sale-price { color: #000; font-size: 10px; }
@@ -137,10 +147,23 @@ export default function BarcodePrinterModal({ product, onClose, showToast }) {
             <p className="text-xs text-[color:var(--text-muted)] font-mono mt-0.5">Barcode: {product.barcode}</p>
           </div>
           <div className="text-right">
-            <div className="text-sm font-bold text-emerald-600">{money(product.price)}</div>
+            <div className="text-sm font-bold text-emerald-600">{money(labelPrice)}</div>
             {product.mrp && <div className="text-xs text-[color:var(--text-muted)] line-through">MRP: {money(product.mrp)}</div>}
           </div>
         </div>
+
+        {sellableBatches.length > 0 && (
+          <Field label="Batch" hint="Prints this batch's number/expiry and uses its price override, if any">
+            <Select value={selectedBatchId} onChange={(e) => setSelectedBatchId(e.target.value)}>
+              <option value="">No specific batch (product-level label)</option>
+              {sellableBatches.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.batchNo}{b.expiryDate ? ` — exp ${String(b.expiryDate).slice(0, 10)}` : ''}{b.sellPrice != null ? ` — ₹${b.sellPrice}` : ''}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        )}
 
         <div className="grid grid-cols-2 gap-3">
           <Field label="Label Quantity">
@@ -176,6 +199,12 @@ export default function BarcodePrinterModal({ product, onClose, showToast }) {
               <input type="checkbox" checked={showPrice} onChange={(e) => setShowPrice(e.target.checked)} className="rounded text-indigo-600" />
               <span>Show Selling Price</span>
             </label>
+            {selectedBatch && (
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={showBatchInfo} onChange={(e) => setShowBatchInfo(e.target.checked)} className="rounded text-indigo-600" />
+                <span>Show Batch No. / Expiry</span>
+              </label>
+            )}
           </div>
         </div>
 
@@ -190,9 +219,14 @@ export default function BarcodePrinterModal({ product, onClose, showToast }) {
             <BarcodeSVG value={product.barcode} />
           </div>
           <div className="text-[10px] font-mono tracking-widest text-slate-700">{product.barcode}</div>
+          {showBatchInfo && selectedBatch && (
+            <div className="text-[9px] text-slate-500">
+              Batch: {selectedBatch.batchNo}{selectedBatch.expiryDate ? ` · Exp: ${String(selectedBatch.expiryDate).slice(0, 10)}` : ''}
+            </div>
+          )}
           <div className="flex justify-between w-full text-[10px] font-bold pt-1 border-t border-slate-200">
             {showMrp && product.mrp && <span className="line-through text-slate-400">MRP: ₹{product.mrp}</span>}
-            {showPrice && <span className="text-emerald-700">PRICE: ₹{product.price}</span>}
+            {showPrice && <span className="text-emerald-700">PRICE: ₹{labelPrice}</span>}
           </div>
         </div>
 

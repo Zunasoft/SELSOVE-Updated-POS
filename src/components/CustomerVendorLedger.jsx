@@ -717,11 +717,32 @@ function PartyFormModal({ open, isCustomer, editing, groups, onClose, showToast,
     setSaving(true);
     try {
       const base = isCustomer ? '/customers' : '/vendors';
+
+      // The backend treats these three fields as "correct the balance to
+      // exactly this" and posts an audited adjustment for the difference
+      // against the live ledger — a real, intentional feature for fixing a
+      // wrong balance. But this form pre-fills them from whatever was cached
+      // when the list last loaded, and sends the whole form on every save.
+      // Left untouched, saving an edit to something unrelated (e.g. phone
+      // number) minutes after a new sale/purchase posted would silently
+      // overwrite the customer/vendor's balance back to that stale figure.
+      // Only forward a balance field the user actually changed.
+      const payload = { ...form };
       if (editing) {
-        await api.put(`${base}/${editing.id}`, form);
+        const originalReceivable = editing.outstanding !== undefined ? String(editing.outstanding) : String(editing.outstandingReceivable || '');
+        const originalAdvance = editing.advance !== undefined ? String(editing.advance) : String(editing.advanceBalance || '');
+        const originalPayable = String(editing.outstandingPayable ?? '');
+
+        if (String(form.outstandingReceivable ?? '') === originalReceivable) delete payload.outstandingReceivable;
+        if (String(form.advanceBalance ?? '') === originalAdvance) delete payload.advanceBalance;
+        if (String(form.outstandingPayable ?? '') === originalPayable) delete payload.outstandingPayable;
+      }
+
+      if (editing) {
+        await api.put(`${base}/${editing.id}`, payload);
         showToast(`${form.name} updated.`);
       } else {
-        await api.post(base, form);
+        await api.post(base, payload);
         showToast(`${form.name} added.`);
       }
       onSaved();

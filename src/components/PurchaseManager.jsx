@@ -1,13 +1,32 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { Truck, Plus, Trash2, ClipboardList, Wallet, X, Search, Boxes } from 'lucide-react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
+import {
+  Truck, Plus, Trash2, ClipboardList, Wallet, X, Search, Boxes, FileText,
+  Undo2, Ban, AlertTriangle, Download, Code, Printer, ChevronLeft, ChevronRight, Paperclip,
+  CreditCard, Clock, CheckCircle2, Edit3, ChevronDown, Receipt, Calendar, Building2, User
+} from 'lucide-react';
 
-import api, { money, fmtDate, todayISO, monthStartISO } from '../lib/api';
+import api, { money, fmtDate, todayISO, monthStartISO, financialYearStartISO, API_BASE } from '../lib/api';
+import { exportPurchaseToWord, exportPurchaseOrderToWord } from '../lib/exporters';
+import { getProductUnitOptions } from './POSTerminal';
+import { ProductFormModal } from './InventoryManager';
 import {
   Panel, SectionHeader, Button, Modal, Field, Input, Select, Textarea,
-  Badge, Money, Spinner, EmptyState, DateRange, StatTile, SegmentedControl, DataTable
+  Badge, Money, Spinner, EmptyState, DateRange, StatTile, DataTable, cx, SearchInput
 } from '../lib/ui';
 
 const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Cheque'];
+
+// Same wrapping icon+label pill-tab pattern the Inventory section uses — a
+// row of tabs is far easier to scan and reach than a compact segmented
+// control once there are 5 of them, and a live badge count draws the eye to
+// whichever tab actually needs attention right now.
+const PURCHASE_TABS = [
+  { id: 'INVOICES', label: 'Invoices', icon: Truck },
+  { id: 'BY VENDOR', label: 'By Vendor', icon: ClipboardList },
+  { id: 'PURCHASE ORDERS', label: 'Purchase Orders', icon: FileText },
+  { id: 'RETURNS', label: 'Returns', icon: Undo2 },
+  { id: 'PAYMENTS MADE', label: 'Payments Made', icon: Wallet }
+];
 
 /**
  * Purchase (goods inward) register. Recording an invoice here receives stock,
@@ -15,37 +34,72 @@ const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Cheque'];
  * the vendor — so the "new purchase" flow is the heart of this screen.
  */
 export default function PurchaseManager({ tenant, token, showToast }) {
-  const [range, setRange] = useState({ from: monthStartISO(), to: todayISO() });
+  const [range, setRange] = useState({ from: financialYearStartISO(), to: todayISO() });
   const [purchases, setPurchases] = useState([]);
   const [vendors, setVendors] = useState([]);
   const [products, setProducts] = useState([]);
   const [ledgerAccounts, setLedgerAccounts] = useState([]);
   const [report, setReport] = useState({ rows: [], byVendor: [], total: 0, totalTax: 0 });
+  const [purchaseOrders, setPurchaseOrders] = useState([]);
+  const [vendorCredits, setVendorCredits] = useState([]);
+  const [payments, setPayments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState('INVOICES');
   const [showNew, setShowNew] = useState(false);
   const [detail, setDetail] = useState(null);
   const [payVendorTarget, setPayVendorTarget] = useState(null);
+  const [showNewPO, setShowNewPO] = useState(false);
+  const [receivePO, setReceivePO] = useState(null);
+  const [poDetail, setPoDetail] = useState(null);
+  const [returnTarget, setReturnTarget] = useState(null);
+  const [vcDetail, setVcDetail] = useState(null);
+  const [invoiceSearch, setInvoiceSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState('ALL');
+  const [downloadTarget, setDownloadTarget] = useState(null);
+  const [poSearch, setPoSearch] = useState('');
+  const [returnSearch, setReturnSearch] = useState('');
+  const [paymentSearch, setPaymentSearch] = useState('');
+  const [categories, setCategories] = useState([]);
+  const [units, setUnits] = useState([]);
+  const [warehouses, setWarehouses] = useState([]);
+  const [posSettings, setPosSettings] = useState({});
 
   const loadPurchases = () => api.get('/purchases', { from: range.from, to: range.to }).then((d) => setPurchases(d || []));
   const loadVendors = () => api.get('/vendors').then((d) => setVendors(d || []));
   const loadProducts = () => api.get('/products').then((d) => setProducts(d || []));
+  const loadPurchaseOrders = () => api.get('/purchase-orders').then((d) => setPurchaseOrders(d || []));
+  const loadVendorCredits = () => api.get('/vendor-credits').then((d) => setVendorCredits(d || []));
+  const loadPayments = () => api.get('/vendors/payments').then((d) => setPayments(d || []));
 
   const load = async () => {
     setLoading(true);
     try {
-      const [p, v, pr, tr, rep] = await Promise.all([
+      const [p, v, pr, tr, rep, po, vc, pay, cat, un, wh, settings] = await Promise.all([
         api.get('/purchases', { from: range.from, to: range.to }),
         api.get('/vendors'),
         api.get('/products'),
         api.get('/accounts/transfers'),
-        api.get('/reports/purchases', { from: range.from, to: range.to })
+        api.get('/reports/purchases', { from: range.from, to: range.to }),
+        api.get('/purchase-orders'),
+        api.get('/vendor-credits'),
+        api.get('/vendors/payments'),
+        api.get('/categories').catch(() => []),
+        api.get('/units').catch(() => []),
+        api.get('/warehouses').catch(() => []),
+        api.get('/settings').catch(() => ({}))
       ]);
       setPurchases(p || []);
       setVendors(v || []);
       setProducts(pr || []);
       setLedgerAccounts(tr?.accounts || []);
       setReport(rep || { rows: [], byVendor: [], total: 0, totalTax: 0 });
+      setPurchaseOrders(po || []);
+      setVendorCredits(vc || []);
+      setPayments(pay || []);
+      setCategories(cat || []);
+      setUnits(un || []);
+      setWarehouses(wh || []);
+      setPosSettings(settings?.pos || {});
     } catch (err) {
       showToast(api.message(err, 'Could not load purchase data.'), 'error');
     } finally {
@@ -70,6 +124,30 @@ export default function PurchaseManager({ tenant, token, showToast }) {
     }
   };
 
+  const handleCancelPO = async (po) => {
+    if (!window.confirm(`Cancel purchase order ${po.poNumber}?`)) return;
+    try {
+      const res = await api.post(`/purchase-orders/${po.id}/cancel`);
+      showToast(res.message);
+      setPoDetail(null);
+      loadPurchaseOrders();
+    } catch (err) {
+      showToast(api.message(err, 'Could not cancel this purchase order.'), 'error');
+    }
+  };
+
+  const handleVoidVendorCredit = async (vc) => {
+    if (!window.confirm(`Void this return to ${vc.vendorName}? The returned stock will be restored.`)) return;
+    try {
+      const res = await api.post(`/vendor-credits/${vc.id}/void`);
+      showToast(res.message);
+      setVcDetail(null);
+      load();
+    } catch (err) {
+      showToast(api.message(err, 'Could not void this vendor credit.'), 'error');
+    }
+  };
+
   // api.get() unwraps to the raw array, so period totals are derived here
   // rather than read from a summary envelope.
   const summary = useMemo(() => {
@@ -79,7 +157,9 @@ export default function PurchaseManager({ tenant, token, showToast }) {
       (s, p) => s + (p.paymentStatus === 'PAID' ? 0 : (p.totalAmount || 0) - (p.paidAmount || 0)),
       0
     );
-    return { count, total, unpaid };
+    const overdue = purchases.filter((p) => p.isOverdue);
+    const overdueAmount = overdue.reduce((s, p) => s + (p.totalAmount || 0) - (p.paidAmount || 0), 0);
+    return { count, total, unpaid, overdueCount: overdue.length, overdueAmount };
   }, [purchases]);
 
   const byVendorTotals = useMemo(
@@ -91,7 +171,101 @@ export default function PurchaseManager({ tenant, token, showToast }) {
     [report.byVendor]
   );
 
+  const filteredPOs = useMemo(() => {
+    const q = poSearch.trim().toLowerCase();
+    if (!q) return purchaseOrders;
+    return purchaseOrders.filter((p) => p.poNumber?.toLowerCase().includes(q) || p.vendorName?.toLowerCase().includes(q));
+  }, [purchaseOrders, poSearch]);
+
+  const filteredVendorCredits = useMemo(() => {
+    const q = returnSearch.trim().toLowerCase();
+    if (!q) return vendorCredits;
+    return vendorCredits.filter(
+      (v) =>
+        v.purchaseInvoiceNo?.toLowerCase().includes(q) ||
+        v.vendorName?.toLowerCase().includes(q) ||
+        v.reason?.toLowerCase().includes(q)
+    );
+  }, [vendorCredits, returnSearch]);
+
+  const filteredPayments = useMemo(() => {
+    const q = paymentSearch.trim().toLowerCase();
+    if (!q) return payments;
+    return payments.filter(
+      (p) => p.vendorName?.toLowerCase().includes(q) || p.reference?.toLowerCase().includes(q) || p.paymentMode?.toLowerCase().includes(q)
+    );
+  }, [payments, paymentSearch]);
+
+  const filteredPurchases = useMemo(() => {
+    let list = purchases;
+    if (statusFilter === 'PAID') {
+      list = list.filter((p) => p.paymentStatus === 'PAID' && p.status !== 'VOID');
+    } else if (statusFilter === 'PARTIAL') {
+      list = list.filter((p) => p.paymentStatus === 'PARTIAL' && p.status !== 'VOID');
+    } else if (statusFilter === 'UNPAID') {
+      list = list.filter((p) => p.paymentStatus === 'UNPAID' && p.status !== 'VOID');
+    } else if (statusFilter === 'OVERDUE') {
+      list = list.filter((p) => p.isOverdue && p.status !== 'VOID');
+    } else if (statusFilter === 'VOID') {
+      list = list.filter((p) => p.status === 'VOID');
+    }
+    if (invoiceSearch) {
+      const q = invoiceSearch.trim().toLowerCase();
+      list = list.filter(
+        (p) =>
+          (p.invoiceNo && p.invoiceNo.toLowerCase().includes(q)) ||
+          (p.vendorName && p.vendorName.toLowerCase().includes(q)) ||
+          (p.voucherNo && p.voucherNo.toLowerCase().includes(q)) ||
+          (p.notes && p.notes.toLowerCase().includes(q))
+      );
+    }
+    return list;
+  }, [purchases, statusFilter, invoiceSearch]);
+
+  const handleExecuteDownload = (format, target) => {
+    if (!target) return;
+    const isPO = target.type === 'po' || Boolean(target.poNumber);
+    const safeName = (target.invoiceNo || target.poNumber || 'purchase-doc')
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '-')
+      .replace(/-+/g, '-');
+
+    if (format === 'json') {
+      const exportData = {
+        documentType: isPO ? 'Purchase Order' : 'Purchase Invoice',
+        data: target,
+        exportedAt: new Date().toISOString(),
+        generator: 'Selsolve Smart POS'
+      };
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${isPO ? 'po' : 'purchase'}-${safeName}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast(`Downloaded "${target.invoiceNo || target.poNumber}" as JSON file`);
+    } else if (format === 'word') {
+      if (isPO) {
+        exportPurchaseOrderToWord({ po: target, company: tenant || {} });
+      } else {
+        exportPurchaseToWord({ purchase: target, company: tenant || {} });
+      }
+      showToast(`Exported "${target.invoiceNo || target.poNumber}" as Word (.doc) document`);
+    } else if (format === 'pdf') {
+      window.print();
+      showToast(`Opening Print / Save as PDF for "${target.invoiceNo || target.poNumber}"...`);
+    }
+    setDownloadTarget(null);
+  };
+
   if (loading) return <Spinner label="Loading purchases…" />;
+
+  const openPOCount = purchaseOrders.filter((p) => p.status === 'ISSUED' || p.status === 'PARTIALLY_RECEIVED').length;
+  const tabBadges = {
+    INVOICES: summary.overdueCount || null,
+    'PURCHASE ORDERS': openPOCount || null
+  };
 
   return (
     <div className="space-y-4">
@@ -107,61 +281,215 @@ export default function PurchaseManager({ tenant, token, showToast }) {
         }
       />
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatTile label="Total Purchases" value={money(summary.total, { decimals: false })} sub="Selected period" icon={Truck} tone="accent" />
-        <StatTile label="Invoices" value={summary.count} sub="Selected period" icon={ClipboardList} />
-        <StatTile label="Unpaid" value={money(summary.unpaid, { decimals: false })} tone="warning" sub="Outstanding to vendors" />
-        <StatTile label="GST Input Credit" value={money(report.totalTax, { decimals: false })} tone="success" sub="Reclaimable this period" />
+      {/* Tab strip — one icon+label pill per feature area, matching the Inventory section */}
+      <div className="flex items-center gap-1.5 border-b border-[color:var(--border-subtle)] pb-3 overflow-x-auto scroll-smooth snap-x snap-mandatory" style={{ scrollbarWidth: 'none' }}>
+        {PURCHASE_TABS.map((t) => {
+          const Icon = t.icon;
+          const isActive = view === t.id;
+          const badge = tabBadges[t.id];
+          return (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setView(t.id)}
+              className={cx(
+                'flex shrink-0 snap-start items-center gap-1.5 rounded-xl px-3 py-2 text-[11.5px] font-bold transition-all whitespace-nowrap',
+                isActive
+                  ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/25'
+                  : 'text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-subtle)]'
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              {t.label}
+              {badge > 0 && (
+                <span
+                  className={cx(
+                    'rounded-full px-1.5 py-0.5 text-[10px] font-bold leading-none',
+                    isActive ? 'bg-white/20 text-white' : 'bg-rose-500 text-white'
+                  )}
+                >
+                  {badge}
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <DateRange from={range.from} to={range.to} onChange={setRange} />
-        <SegmentedControl
-          value={view}
-          onChange={setView}
-          options={[
-            { value: 'INVOICES', label: 'Invoices' },
-            { value: 'BY VENDOR', label: 'By Vendor' }
-          ]}
-        />
-      </div>
+      {(view === 'INVOICES' || view === 'BY VENDOR') && (
+        <>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+            <StatTile label="Total Purchases" value={money(summary.total, { decimals: false })} sub="Selected period" icon={Truck} tone="accent" />
+            <StatTile label="Invoices" value={summary.count} sub="Selected period" icon={ClipboardList} />
+            <StatTile label="Unpaid" value={money(summary.unpaid, { decimals: false })} tone="warning" sub="Outstanding to vendors" />
+            <StatTile
+              label="Overdue"
+              value={money(summary.overdueAmount, { decimals: false })}
+              tone={summary.overdueCount ? 'danger' : 'neutral'}
+              sub={`${summary.overdueCount} invoice(s) past due`}
+              icon={AlertTriangle}
+            />
+            <StatTile label="GST Input Credit" value={money(report.totalTax, { decimals: false })} tone="success" sub="Reclaimable this period" />
+          </div>
+          <DateRange from={range.from} to={range.to} onChange={setRange} />
+        </>
+      )}
 
-      {view === 'INVOICES' ? (
-        <DataTable
-          maxHeight="56vh"
-          columns={[
-            { key: 'date', label: 'Date', width: 100, render: (p) => fmtDate(p.date) },
-            { key: 'invoiceNo', label: 'Invoice No', render: (p) => <span className="font-bold">{p.invoiceNo}</span> },
-            { key: 'vendorName', label: 'Vendor', render: (p) => p.vendorName },
-            { key: 'items', label: 'Items', width: 70, align: 'right', render: (p) => p.items?.length || 0 },
-            { key: 'subtotal', label: 'Taxable', align: 'right', width: 110, render: (p) => <Money value={p.subtotal} /> },
-            { key: 'tax', label: 'GST', align: 'right', width: 100, render: (p) => <Money value={p.tax} showZero={false} /> },
-            { key: 'totalAmount', label: 'Total', align: 'right', width: 120, render: (p) => <Money value={p.totalAmount} className="font-bold" /> },
-            {
-              key: 'paymentStatus',
-              label: 'Status',
-              width: 110,
-              render: (p) => <PaymentStatusBadge purchase={p} />
-            },
-            {
-              key: 'voucherNo',
-              label: 'Voucher',
-              width: 90,
-              render: (p) => <span className="tabular text-[10.5px] font-bold text-[color:var(--accent)]">{p.voucherNo}</span>
-            }
-          ]}
-          rows={purchases}
-          onRowClick={setDetail}
-          empty={<EmptyState icon={Truck} title="No purchases in this period" hint="Record a purchase invoice to receive stock." />}
-          footer={[
-            '', '', '', '',
-            money(purchases.reduce((s, p) => s + (p.subtotal || 0), 0)),
-            money(purchases.reduce((s, p) => s + (p.tax || 0), 0)),
-            money(purchases.reduce((s, p) => s + (p.totalAmount || 0), 0)),
-            '', ''
-          ]}
-        />
-      ) : (
+      {view === 'PURCHASE ORDERS' && (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-3 bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
+            <div className="flex flex-wrap gap-3">
+              <MiniStat label="Open Purchase Orders" value={openPOCount} />
+              <MiniStat
+                label="Open PO Value"
+                value={money(
+                  purchaseOrders
+                    .filter((p) => p.status === 'ISSUED' || p.status === 'PARTIALLY_RECEIVED')
+                    .reduce((s, p) => s + (Number(p.totalAmount) || 0), 0),
+                  { decimals: false }
+                )}
+              />
+            </div>
+            <Button variant="primary" icon={Plus} onClick={() => setShowNewPO(true)}>
+              New Purchase Order
+            </Button>
+          </div>
+          <SearchInput value={poSearch} onChange={setPoSearch} placeholder="Search by PO number or vendor…" className="max-w-sm" />
+        </div>
+      )}
+
+      {view === 'RETURNS' && (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-3 bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
+            <MiniStat label="Returns Recorded" value={vendorCredits.filter((v) => v.status !== 'VOID').length} />
+            <MiniStat
+              label="Total Credited"
+              value={money(vendorCredits.filter((v) => v.status !== 'VOID').reduce((s, v) => s + (Number(v.totalAmount) || 0), 0), { decimals: false })}
+            />
+            <span className="text-[11px] text-[color:var(--text-muted)] ml-auto">
+              Open an invoice from the Invoices tab and use “Return Items” to credit a vendor.
+            </span>
+          </div>
+          <SearchInput value={returnSearch} onChange={setReturnSearch} placeholder="Search by invoice, vendor, or reason…" className="max-w-sm" />
+        </div>
+      )}
+
+      {view === 'PAYMENTS MADE' && (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-3 bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
+            <MiniStat label="Payments Recorded" value={payments.length} />
+            <MiniStat label="Total Paid" value={money(payments.reduce((s, p) => s + (Number(p.amount) || 0), 0), { decimals: false })} />
+          </div>
+          <SearchInput value={paymentSearch} onChange={setPaymentSearch} placeholder="Search by vendor, mode, or reference…" className="max-w-sm" />
+        </div>
+      )}
+
+      {view === 'INVOICES' && (
+        <div className="space-y-3">
+          {/* Marquee scrollable status filter buttons */}
+          <div className="flex items-center gap-1.5 overflow-x-auto scroll-smooth snap-x snap-mandatory pb-1" style={{ scrollbarWidth: 'none' }}>
+            {[
+              { id: 'ALL', label: 'All Invoices' },
+              { id: 'UNPAID', label: 'Unpaid / Due' },
+              { id: 'PARTIAL', label: 'Partially Paid' },
+              { id: 'PAID', label: 'Fully Paid' },
+              { id: 'OVERDUE', label: 'Overdue' },
+              { id: 'VOID', label: 'Voided' }
+            ].map((st) => (
+              <button
+                key={st.id}
+                type="button"
+                onClick={() => setStatusFilter(st.id)}
+                className={cx(
+                  'flex shrink-0 snap-start items-center gap-1.5 rounded-xl px-3 py-1.5 text-[11px] font-bold transition-all whitespace-nowrap',
+                  statusFilter === st.id
+                    ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/25'
+                    : 'text-[color:var(--text-secondary)] bg-[color:var(--bg-subtle)] hover:bg-[color:var(--bg-muted)]'
+                )}
+              >
+                {st.label}
+              </button>
+            ))}
+          </div>
+
+          <SearchInput
+            value={invoiceSearch}
+            onChange={setInvoiceSearch}
+            placeholder="Search by invoice #, vendor name, voucher, or notes…"
+            className="max-w-md"
+          />
+
+          <DataTable
+            maxHeight="56vh"
+            columns={[
+              { key: 'date', label: 'Date', width: 100, render: (p) => fmtDate(p.date) },
+              { key: 'invoiceNo', label: 'Invoice No', render: (p) => <span className="font-bold">{p.invoiceNo}</span> },
+              { key: 'vendorName', label: 'Vendor', render: (p) => p.vendorName },
+              { key: 'items', label: 'Items', width: 70, align: 'right', render: (p) => p.items?.length || 0 },
+              { key: 'subtotal', label: 'Taxable', align: 'right', width: 110, render: (p) => <Money value={p.subtotal} /> },
+              { key: 'tax', label: 'GST', align: 'right', width: 100, render: (p) => <Money value={p.tax} showZero={false} /> },
+              { key: 'totalAmount', label: 'Total', align: 'right', width: 120, render: (p) => <Money value={p.totalAmount} className="font-bold" /> },
+              {
+                key: 'dueDate',
+                label: 'Due',
+                width: 110,
+                render: (p) =>
+                  p.dueDate ? (
+                    <span className={`text-[11px] font-semibold ${p.isOverdue ? 'text-rose-600 dark:text-rose-400' : 'text-[color:var(--text-secondary)]'}`}>
+                      {p.isOverdue && <AlertTriangle className="inline h-3 w-3 mr-1 -mt-0.5" />}
+                      {fmtDate(p.dueDate)}
+                    </span>
+                  ) : (
+                    <span className="text-[color:var(--text-muted)]">—</span>
+                  )
+              },
+              {
+                key: 'paymentStatus',
+                label: 'Status',
+                width: 110,
+                render: (p) => <PaymentStatusBadge purchase={p} />
+              },
+              {
+                key: 'voucherNo',
+                label: 'Voucher',
+                width: 90,
+                render: (p) => <span className="tabular text-[10.5px] font-bold text-[color:var(--accent)]">{p.voucherNo}</span>
+              },
+              {
+                key: 'actions',
+                label: '',
+                width: 50,
+                render: (p) => (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDownloadTarget(p);
+                    }}
+                    className="p-1.5 rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 transition-colors"
+                    title="Download / Export"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                  </button>
+                )
+              }
+            ]}
+            rows={filteredPurchases}
+            onRowClick={setDetail}
+            empty={<EmptyState icon={Truck} title="No purchases match your filter" hint="Record a purchase invoice to receive stock." />}
+            footer={[
+              'Total', '', '',
+              filteredPurchases.reduce((s, p) => s + (p.items?.length || 0), 0),
+              money(filteredPurchases.reduce((s, p) => s + (p.subtotal || 0), 0)),
+              money(filteredPurchases.reduce((s, p) => s + (p.tax || 0), 0)),
+              money(filteredPurchases.reduce((s, p) => s + (p.totalAmount || 0), 0)),
+              '', '', '', ''
+            ]}
+          />
+        </div>
+      )}
+
+      {view === 'BY VENDOR' && (
         <DataTable
           maxHeight="56vh"
           columns={[
@@ -179,11 +507,95 @@ export default function PurchaseManager({ tenant, token, showToast }) {
           rows={report.byVendor}
           rowKey={(v, i) => v.vendor || i}
           empty={<EmptyState title="No vendor purchases yet" />}
-          footer={['Total', money(byVendorTotals.invoices, { decimals: false }), money(byVendorTotals.total), money(byVendorTotals.unpaid)]}
+          footer={['Total', byVendorTotals.invoices, money(byVendorTotals.total), money(byVendorTotals.unpaid)]}
         />
       )}
 
-      <VendorPayablesPanel vendors={vendors} onPay={setPayVendorTarget} />
+      {view === 'PURCHASE ORDERS' && (
+        <DataTable
+          maxHeight="56vh"
+          columns={[
+            { key: 'poNumber', label: 'PO No.', width: 100, render: (p) => <span className="font-bold">{p.poNumber}</span> },
+            { key: 'date', label: 'Date', width: 100, render: (p) => fmtDate(p.date) },
+            { key: 'vendorName', label: 'Vendor', render: (p) => p.vendorName },
+            { key: 'items', label: 'Lines', width: 70, align: 'right', render: (p) => p.items?.length || 0 },
+            { key: 'totalAmount', label: 'Total', align: 'right', width: 120, render: (p) => <Money value={p.totalAmount} className="font-bold" /> },
+            { key: 'status', label: 'Status', width: 150, render: (p) => <POStatusBadge po={p} /> }
+          ]}
+          rows={filteredPOs}
+          onRowClick={setPoDetail}
+          rowKey={(p) => p.id}
+          empty={
+            poSearch ? (
+              <EmptyState icon={FileText} title="No purchase orders match your search" />
+            ) : (
+              <EmptyState
+                icon={FileText}
+                title="No purchase orders yet"
+                hint="Create a PO to commit to a vendor before goods arrive."
+                action={
+                  <Button variant="primary" icon={Plus} onClick={() => setShowNewPO(true)}>
+                    Create First Purchase Order
+                  </Button>
+                }
+              />
+            )
+          }
+        />
+      )}
+
+      {view === 'RETURNS' && (
+        <DataTable
+          maxHeight="56vh"
+          columns={[
+            { key: 'date', label: 'Date', width: 100, render: (v) => fmtDate(v.date) },
+            { key: 'purchaseInvoiceNo', label: 'Against Invoice', render: (v) => v.purchaseInvoiceNo },
+            { key: 'vendorName', label: 'Vendor', render: (v) => v.vendorName },
+            { key: 'reason', label: 'Reason', render: (v) => v.reason },
+            { key: 'items', label: 'Items', width: 70, align: 'right', render: (v) => v.items?.length || 0 },
+            { key: 'totalAmount', label: 'Credited', align: 'right', width: 120, render: (v) => <Money value={v.totalAmount} className="font-bold" /> },
+            { key: 'status', label: 'Status', width: 90, render: (v) => (v.status === 'VOID' ? <Badge tone="danger">VOID</Badge> : <Badge tone="success">Active</Badge>) }
+          ]}
+          rows={filteredVendorCredits}
+          onRowClick={setVcDetail}
+          rowKey={(v) => v.id}
+          empty={
+            returnSearch ? (
+              <EmptyState icon={Undo2} title="No returns match your search" />
+            ) : (
+              <EmptyState icon={Undo2} title="No returns recorded yet" hint="Open a purchase invoice and use “Return Items” to credit a vendor." />
+            )
+          }
+        />
+      )}
+
+      {view === 'PAYMENTS MADE' && (
+        <DataTable
+          maxHeight="56vh"
+          columns={[
+            { key: 'date', label: 'Date', width: 100, render: (p) => fmtDate(p.date) },
+            { key: 'vendorName', label: 'Vendor', render: (p) => p.vendorName },
+            { key: 'amount', label: 'Amount', align: 'right', width: 120, render: (p) => <Money value={p.amount} className="font-bold" /> },
+            { key: 'paymentMode', label: 'Mode', width: 110, render: (p) => p.paymentMode },
+            { key: 'reference', label: 'Reference', render: (p) => p.reference || '—' },
+            { key: 'voucherNo', label: 'Voucher', width: 90, render: (p) => <span className="tabular text-[10.5px] font-bold text-[color:var(--accent)]">{p.voucherNo}</span> }
+          ]}
+          rows={filteredPayments}
+          rowKey={(p) => p.id}
+          empty={
+            paymentSearch ? (
+              <EmptyState icon={Wallet} title="No payments match your search" />
+            ) : (
+              <EmptyState icon={Wallet} title="No vendor payments recorded yet" hint="Pay a vendor from the panel below to see it listed here." />
+            )
+          }
+          footer={['', 'Total', money(filteredPayments.reduce((s, p) => s + (p.amount || 0), 0)), '', '', '']}
+        />
+      )}
+
+      {(view === 'INVOICES' || view === 'PAYMENTS MADE') && (
+        <VendorPayablesPanel vendors={vendors} onPay={setPayVendorTarget} />
+      )}
 
       <NewPurchaseModal
         open={showNew}
@@ -191,16 +603,62 @@ export default function PurchaseManager({ tenant, token, showToast }) {
         vendors={vendors}
         products={products}
         accounts={ledgerAccounts}
+        categories={categories}
+        units={units}
+        warehouses={warehouses}
+        batchTrackingEnabled={Boolean(posSettings.enableBatchTracking)}
+        storeNearExpiryDays={posSettings.nearExpiryDays}
         showToast={showToast}
+        onProductCreated={loadProducts}
         onSaved={() => {
           setShowNew(false);
           loadPurchases();
           loadVendors();
           loadProducts();
+          loadPurchaseOrders();
         }}
       />
 
-      <PurchaseDetailModal purchase={detail} onClose={() => setDetail(null)} onVoid={handleVoidPurchase} />
+      <NewPurchaseModal
+        open={Boolean(receivePO)}
+        onClose={() => setReceivePO(null)}
+        vendors={vendors}
+        products={products}
+        accounts={ledgerAccounts}
+        categories={categories}
+        units={units}
+        warehouses={warehouses}
+        batchTrackingEnabled={Boolean(posSettings.enableBatchTracking)}
+        storeNearExpiryDays={posSettings.nearExpiryDays}
+        showToast={showToast}
+        onProductCreated={loadProducts}
+        poContext={receivePO}
+        onSaved={() => {
+          setReceivePO(null);
+          setPoDetail(null);
+          loadPurchases();
+          loadVendors();
+          loadProducts();
+          loadPurchaseOrders();
+        }}
+      />
+
+      <PurchaseDetailModal
+        purchase={detail}
+        vendorCredits={vendorCredits.filter((v) => v.purchaseId === detail?.id)}
+        onClose={() => setDetail(null)}
+        onVoid={handleVoidPurchase}
+        onDownload={setDownloadTarget}
+        onReturn={(p) => {
+          setDetail(null);
+          setReturnTarget(p);
+        }}
+        onAttachmentsChanged={(atts) => {
+          setDetail((d) => (d ? { ...d, attachments: atts } : d));
+          loadPurchases();
+        }}
+        showToast={showToast}
+      />
 
       <PayVendorModal
         vendor={payVendorTarget}
@@ -212,6 +670,98 @@ export default function PurchaseManager({ tenant, token, showToast }) {
           load();
         }}
       />
+
+      <PurchaseOrderModal
+        open={showNewPO}
+        onClose={() => setShowNewPO(false)}
+        vendors={vendors}
+        products={products}
+        categories={categories}
+        units={units}
+        warehouses={warehouses}
+        batchTrackingEnabled={posSettings.enableBatchTracking}
+        storeNearExpiryDays={posSettings.nearExpiryDays}
+        showToast={showToast}
+        onProductCreated={loadProducts}
+        onSaved={() => {
+          setShowNewPO(false);
+          loadPurchaseOrders();
+          loadVendors();
+          loadProducts();
+        }}
+      />
+
+      <PODetailModal
+        po={poDetail}
+        onClose={() => setPoDetail(null)}
+        onCancel={handleCancelPO}
+        onDownload={setDownloadTarget}
+        onReceive={(po) => {
+          setPoDetail(null);
+          setReceivePO(po);
+        }}
+      />
+
+      <PurchaseReturnModal
+        purchase={returnTarget}
+        vendorCredits={vendorCredits.filter((v) => v.purchaseId === returnTarget?.id)}
+        showToast={showToast}
+        onClose={() => setReturnTarget(null)}
+        onSaved={() => {
+          setReturnTarget(null);
+          load();
+        }}
+      />
+
+      <VendorCreditDetailModal vendorCredit={vcDetail} onClose={() => setVcDetail(null)} onVoid={handleVoidVendorCredit} />
+
+      {/* 50% Screen Width Download / Export Format Selection Modal */}
+      <Modal
+        open={Boolean(downloadTarget)}
+        onClose={() => setDownloadTarget(null)}
+        title="Select Download Format"
+        subtitle={`Export ${downloadTarget?.invoiceNo || downloadTarget?.poNumber || 'document'}`}
+        icon={Download}
+        size="custom"
+        className="!max-w-[50vw] !w-[50vw]"
+      >
+        <div className="py-2">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <button
+              onClick={() => handleExecuteDownload('json', downloadTarget)}
+              className="flex flex-col items-center justify-center p-5 rounded-2xl border-2 border-slate-200 dark:border-slate-800 hover:border-indigo-500 dark:hover:border-indigo-400 bg-slate-50 dark:bg-slate-900/50 hover:bg-indigo-50/30 dark:hover:bg-indigo-950/20 transition-all text-center group"
+            >
+              <div className="w-12 h-12 rounded-xl bg-amber-500/10 text-amber-500 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                <Code className="w-6 h-6" />
+              </div>
+              <div className="font-bold text-sm text-slate-800 dark:text-slate-100">JSON File</div>
+              <div className="text-xs text-slate-400 mt-0.5">.json format</div>
+            </button>
+
+            <button
+              onClick={() => handleExecuteDownload('word', downloadTarget)}
+              className="flex flex-col items-center justify-center p-5 rounded-2xl border-2 border-slate-200 dark:border-slate-800 hover:border-indigo-500 dark:hover:border-indigo-400 bg-slate-50 dark:bg-slate-900/50 hover:bg-indigo-50/30 dark:hover:bg-indigo-950/20 transition-all text-center group"
+            >
+              <div className="w-12 h-12 rounded-xl bg-blue-500/10 text-blue-500 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                <FileText className="w-6 h-6" />
+              </div>
+              <div className="font-bold text-sm text-slate-800 dark:text-slate-100">Word Document</div>
+              <div className="text-xs text-slate-400 mt-0.5">.doc format</div>
+            </button>
+
+            <button
+              onClick={() => handleExecuteDownload('pdf', downloadTarget)}
+              className="flex flex-col items-center justify-center p-5 rounded-2xl border-2 border-slate-200 dark:border-slate-800 hover:border-indigo-500 dark:hover:border-indigo-400 bg-slate-50 dark:bg-slate-900/50 hover:bg-indigo-50/30 dark:hover:bg-indigo-950/20 transition-all text-center group"
+            >
+              <div className="w-12 h-12 rounded-xl bg-rose-500/10 text-rose-500 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                <Printer className="w-6 h-6" />
+              </div>
+              <div className="font-bold text-sm text-slate-800 dark:text-slate-100">PDF / Print</div>
+              <div className="text-xs text-slate-400 mt-0.5">.pdf document</div>
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }
@@ -290,7 +840,7 @@ function PaymentStatusBadge({ purchase }) {
   );
 }
 
-function PurchaseDetailModal({ purchase, onClose, onVoid }) {
+function PurchaseDetailModal({ purchase, vendorCredits = [], onClose, onVoid, onReturn, onDownload, onAttachmentsChanged, showToast }) {
   const isVoid = purchase?.status === 'VOID';
   return (
     <Modal
@@ -302,6 +852,16 @@ function PurchaseDetailModal({ purchase, onClose, onVoid }) {
       size="xl"
       footer={
         <>
+          {purchase && onDownload && (
+            <Button variant="outline" icon={Download} onClick={() => onDownload(purchase)}>
+              Download / Export
+            </Button>
+          )}
+          {purchase && !isVoid && purchase.vendorId && (
+            <Button variant="outline" icon={Undo2} onClick={() => onReturn(purchase)}>
+              Return Items
+            </Button>
+          )}
           {purchase && !isVoid && (
             <Button variant="danger" onClick={() => onVoid(purchase)}>
               Void Purchase
@@ -318,10 +878,28 @@ function PurchaseDetailModal({ purchase, onClose, onVoid }) {
               This purchase was voided{purchase.voidedBy ? ` by ${purchase.voidedBy}` : ''}{purchase.voidedAt ? ` on ${fmtDate(purchase.voidedAt)}` : ''}. Stock and accounting entries were reversed.
             </div>
           )}
-          <div className="grid grid-cols-3 gap-3">
+          {purchase.poNumber && (
+            <div className="rounded-xl px-3 py-2 text-[11.5px] font-semibold text-indigo-600 dark:text-indigo-400" style={{ background: 'var(--bg-subtle)' }}>
+              Received against purchase order {purchase.poNumber}.
+            </div>
+          )}
+          <div className="grid grid-cols-4 gap-3">
             <Summary label="Payment status" value={<PaymentStatusBadge purchase={purchase} />} />
             <Summary label="Payment mode" value={purchase.paymentMode || '—'} />
             <Summary label="Received by" value={purchase.receivedBy || '—'} />
+            <Summary
+              label="Due date"
+              value={
+                purchase.dueDate ? (
+                  <span className={purchase.isOverdue ? 'text-rose-600 dark:text-rose-400' : ''}>
+                    {fmtDate(purchase.dueDate)}
+                    {purchase.isOverdue ? ' (Overdue)' : ''}
+                  </span>
+                ) : (
+                  '—'
+                )
+              }
+            />
           </div>
 
           <DataTable
@@ -352,10 +930,52 @@ function PurchaseDetailModal({ purchase, onClose, onVoid }) {
             <Summary label="Grand Total" value={money(purchase.totalAmount)} bold />
           </div>
 
+          {purchase.totalAdditionalCharges > 0 && (
+            <div>
+              <div className="label-eyebrow mb-1.5">Landed cost (additional charges)</div>
+              <div className="space-y-1">
+                {(purchase.additionalCharges || []).map((c, idx) => (
+                  <div key={idx} className="flex items-center justify-between text-[11.5px] px-3 py-1.5 rounded-lg" style={{ background: 'var(--bg-subtle)' }}>
+                    <span>{c.label}</span>
+                    <Money value={c.amount} className="font-semibold" />
+                  </div>
+                ))}
+              </div>
+              <p className="text-[10.5px] text-[color:var(--text-muted)] mt-1">
+                Capitalised into item cost — not included in the vendor's payable above.
+              </p>
+            </div>
+          )}
+
           {purchase.notes && (
             <div className="text-[12px] text-[color:var(--text-secondary)]">
               <span className="label-eyebrow mr-1.5">Notes</span>
               {purchase.notes}
+            </div>
+          )}
+
+          <AttachmentsPanel refType="PURCHASE" refId={purchase.id} attachments={purchase.attachments || []} onChanged={onAttachmentsChanged} showToast={showToast} />
+
+          {vendorCredits.length > 0 && (
+            <div>
+              <div className="label-eyebrow mb-1.5">Returns against this invoice</div>
+              <div className="space-y-1.5">
+                {vendorCredits.map((vc) => (
+                  <div
+                    key={vc.id}
+                    className="flex items-center justify-between rounded-xl px-3 py-2 text-[11.5px]"
+                    style={{ background: 'var(--bg-subtle)' }}
+                  >
+                    <span className="font-semibold">
+                      {fmtDate(vc.date)} · {vc.items?.length || 0} item(s) · {vc.reason}
+                    </span>
+                    <span className="flex items-center gap-2">
+                      <Money value={vc.totalAmount} className="font-bold" />
+                      {vc.status === 'VOID' && <Badge tone="danger">VOID</Badge>}
+                    </span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -369,6 +989,103 @@ function Summary({ label, value, bold }) {
     <div>
       <div className="label-eyebrow">{label}</div>
       <div className={`mt-0.5 text-[13px] text-[color:var(--text-primary)] ${bold ? 'font-bold' : 'font-semibold'}`}>{value}</div>
+    </div>
+  );
+}
+
+/** Compact inline stat used in a tab's own toolbar row — lighter than a full StatTile card. */
+function MiniStat({ label, value }) {
+  return (
+    <div className="flex flex-col">
+      <span className="text-[10px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">{label}</span>
+      <span className="text-sm font-extrabold text-[color:var(--text-primary)] tabular">{value}</span>
+    </div>
+  );
+}
+
+const resolveFileUrl = (url) => (url && url.startsWith('/') ? `${API_BASE.replace('/api/pos', '')}${url}` : url);
+
+/**
+ * Attaches a vendor invoice photo/PDF, delivery challan, etc. against a
+ * purchase, PO, or vendor credit. Binary lives server-side (see
+ * attachment.controller.js) — this only manages the lightweight metadata
+ * list already sitting on the record.
+ */
+function AttachmentsPanel({ refType, refId, attachments = [], onChanged, showToast }) {
+  const [uploading, setUploading] = useState(false);
+
+  const upload = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('refType', refType);
+      formData.append('refId', refId);
+      const res = await api.post('/attachments', formData);
+      showToast(res.message || 'File attached.');
+      onChanged?.([...(attachments || []), res.data]);
+    } catch (err) {
+      showToast(api.message(err, 'Could not upload file.'), 'error');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const remove = async (att) => {
+    if (!window.confirm(`Remove "${att.originalName}"?`)) return;
+    try {
+      await api.del(`/attachments/${att.filename}`);
+      showToast('Attachment removed.');
+      onChanged?.((attachments || []).filter((a) => a.filename !== att.filename));
+    } catch (err) {
+      showToast(api.message(err, 'Could not remove attachment.'), 'error');
+    }
+  };
+
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="label-eyebrow">Attachments</span>
+        <label className="cursor-pointer">
+          <input type="file" accept="image/*,application/pdf" className="hidden" onChange={upload} disabled={uploading} />
+          <span className="inline-flex items-center gap-1.5 rounded-lg border border-[color:var(--border)] px-2.5 py-1.5 text-[10.5px] font-bold text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-subtle)]">
+            <Paperclip className="h-3 w-3" />
+            {uploading ? 'Uploading…' : 'Attach file'}
+          </span>
+        </label>
+      </div>
+      {attachments.length === 0 ? (
+        <p className="text-[11px] text-[color:var(--text-muted)]">No files attached — add the vendor's invoice photo or PDF for the record.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {attachments.map((a) => (
+            <div
+              key={a.filename}
+              className="flex items-center justify-between gap-2 rounded-xl px-3 py-2 text-[11.5px]"
+              style={{ background: 'var(--bg-subtle)' }}
+            >
+              <a
+                href={resolveFileUrl(a.url)}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-2 font-semibold text-indigo-600 dark:text-indigo-400 hover:underline truncate"
+              >
+                <FileText className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">{a.originalName}</span>
+              </a>
+              <div className="flex items-center gap-2 shrink-0 text-[color:var(--text-muted)]">
+                <span>{((a.size || 0) / 1024).toFixed(0)} KB</span>
+                <button type="button" onClick={() => remove(a)} className="rounded-lg p-1 hover:bg-black/10">
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -525,10 +1242,106 @@ function PayVendorModal({ vendor, accounts, showToast, onClose, onPaid }) {
   );
 }
 
-const blankLine = () => ({ productId: '', name: '', qty: '', rate: '', taxRate: 0, unit: 'pcs', hsn: '', isNew: false });
+const blankLine = () => ({
+  productId: '',
+  name: '',
+  barcode: '',
+  hsn: '',
+  qty: 1,
+  unit: 'pcs',
+  rate: '',
+  taxRate: 0,
+  discount: 0,
+  total: 0,
+  isCustom: false,
+  trackBatches: false,
+  showBatch: false,
+  batches: [
+    {
+      id: `b_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      batchNo: '',
+      qty: 1,
+      mfgDate: '',
+      expiryDate: '',
+      sellPrice: ''
+    }
+  ],
+  batchNo: '',
+  mfgDate: '',
+  expiryDate: '',
+  sellPrice: ''
+});
 
-/** Search-as-you-type product picker for purchase line items — mirrors the Invoice section's product picker,
- * but surfaces purchase price / stock instead of sale price, since this is a goods-inward flow. */
+const r2Local = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const addDaysISO = (dateStr, days) => {
+  const d = dateStr ? new Date(dateStr) : new Date();
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+};
+
+/** Product Cell Display & Trigger Component for Purchase Invoices */
+function ProductItemCell({ row, index, onOpenPicker, onUpdateName }) {
+  if (row.isCustom) {
+    return (
+      <div className="flex items-center gap-1.5 w-full">
+        <input
+          type="text"
+          className="field-input text-xs py-1.5 px-2.5 w-full rounded-xl font-medium"
+          placeholder="Custom item / description…"
+          value={row.name || ''}
+          onChange={(e) => onUpdateName(index, e.target.value)}
+          autoFocus
+        />
+        <button
+          type="button"
+          onClick={() => onOpenPicker(index)}
+          className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 px-2 py-1.5 rounded-xl shrink-0 hover:bg-indigo-100 transition-colors"
+          title="Pick from catalog instead"
+        >
+          Catalog
+        </button>
+      </div>
+    );
+  }
+
+  if (!row.name) {
+    return (
+      <button
+        type="button"
+        onClick={() => onOpenPicker(index)}
+        className="w-full py-2 px-3 rounded-xl border border-dashed border-indigo-400/60 bg-indigo-50/40 dark:bg-indigo-950/20 text-indigo-600 dark:text-indigo-400 text-xs font-bold hover:bg-indigo-50 dark:hover:bg-indigo-950/40 flex items-center justify-between transition-all"
+      >
+        <span className="flex items-center gap-1.5">
+          <Search className="w-3.5 h-3.5 opacity-80" /> Click to Select Product…
+        </span>
+        <ChevronDown className="w-3.5 h-3.5 opacity-60" />
+      </button>
+    );
+  }
+
+  return (
+    <div
+      onClick={() => onOpenPicker(index)}
+      className="p-1.5 px-2.5 rounded-xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/50 hover:bg-[color:var(--bg-subtle)] cursor-pointer flex items-center justify-between gap-2 group transition-colors"
+      title="Click to change product"
+    >
+      <div className="min-w-0 pr-1">
+        <div className="font-bold text-xs text-[color:var(--text-primary)] truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400">
+          {row.name}
+        </div>
+        {row.barcode && (
+          <div className="text-[10px] text-[color:var(--text-muted)] font-mono">{row.barcode}</div>
+        )}
+      </div>
+      <div className="flex items-center gap-1 shrink-0 text-[10.5px] font-bold text-indigo-600 dark:text-indigo-400 opacity-80 group-hover:opacity-100">
+        <span>Change</span>
+        <Edit3 className="w-3 h-3" />
+      </div>
+    </div>
+  );
+}
+
+/** Search-as-you-type product picker for purchase line items */
 function PurchaseProductPickerModal({ open, onClose, products = [], onSelectProduct, onAddNew }) {
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('ALL');
@@ -669,106 +1482,1615 @@ function PurchaseProductPickerModal({ open, onClose, products = [], onSelectProd
   );
 }
 
-function NewPurchaseModal({ open, onClose, vendors, products, accounts, showToast, onSaved }) {
-  const blankForm = {
-    vendorId: '', invoiceNo: '', date: todayISO(), paymentStatus: 'UNPAID',
-    paymentMode: 'Cash', settlementAccountId: '', notes: ''
-  };
-  const [form, setForm] = useState(blankForm);
-  const [lines, setLines] = useState([blankLine()]);
-  const [saving, setSaving] = useState(false);
+function NewPurchaseModal({
+  open,
+  onClose,
+  vendors = [],
+  products = [],
+  accounts = [],
+  categories = [],
+  units = [],
+  warehouses = [],
+  batchTrackingEnabled = false,
+  storeNearExpiryDays,
+  showToast,
+  onSaved,
+  onProductCreated,
+  poContext = null
+}) {
+  const [loading, setLoading] = useState(false);
   const [activePickerIndex, setActivePickerIndex] = useState(null);
+  const [newProductLineIndex, setNewProductLineIndex] = useState(null);
+
+  // Vendor Information & Auto-fill
+  const [selectedVendorId, setSelectedVendorId] = useState('');
+  const [vendorName, setVendorName] = useState('');
+  const [vendorPhone, setVendorPhone] = useState('');
+  const [vendorGstin, setVendorGstin] = useState('');
+  const [vendorPan, setVendorPan] = useState('');
+  const [vendorAddress, setVendorAddress] = useState('');
+  const [vendorState, setVendorState] = useState('');
+  const [vendorStateCode, setVendorStateCode] = useState('');
+
+  // Invoice specifics
+  const [invoiceNo, setInvoiceNo] = useState('');
+  const [invoiceDate, setInvoiceDate] = useState(() => todayISO());
+  const [dueDate, setDueDate] = useState('');
+  const [paymentType, setPaymentType] = useState('UNPAID'); // 'FULL' | 'PARTIAL' | 'UNPAID'
+  const [initialPaidAmount, setInitialPaidAmount] = useState('');
+  const [paymentMode, setPaymentMode] = useState('Cash');
+  const [paymentRef, setPaymentRef] = useState('');
+  const [settlementAccountId, setSettlementAccountId] = useState('');
+  const [isRoundOff, setIsRoundOff] = useState(true);
+  const [notes, setNotes] = useState('');
+
+  // Transport & Dispatch
+  const [placeOfSupply, setPlaceOfSupply] = useState('');
+  const [dispatchFrom, setDispatchFrom] = useState('');
+  const [dispatchDate, setDispatchDate] = useState('');
+  const [shipToName, setShipToName] = useState('');
+  const [shipToAddress, setShipToAddress] = useState('');
+  const [vehicleNo, setVehicleNo] = useState('');
+  const [shipBy, setShipBy] = useState('');
+  const [transporterName, setTransporterName] = useState('');
+  const [dispatchDocNo, setDispatchDocNo] = useState('');
+
+  // Order References & Terms
+  const [buyerOrderNo, setBuyerOrderNo] = useState('');
+  const [buyerOrderDate, setBuyerOrderDate] = useState('');
+  const [buyerRef, setBuyerRef] = useState('');
+  const [buyerRefDate, setBuyerRefDate] = useState('');
+  const [vendorCode, setVendorCode] = useState('');
+  const [termsOfDelivery, setTermsOfDelivery] = useState('');
+  const [paymentTerms, setPaymentTerms] = useState('');
+
+  // Line items & Landed costs
+  const [items, setItems] = useState([blankLine()]);
+  const [charges, setCharges] = useState([]);
 
   useEffect(() => {
     if (open) {
-      setForm(blankForm);
-      setLines([blankLine()]);
+      setLoading(false);
       setActivePickerIndex(null);
+      setNewProductLineIndex(null);
+      setCharges([]);
+      setIsRoundOff(true);
+      setNotes('');
+      setInvoiceNo('');
+      setInvoiceDate(todayISO());
+      setDueDate('');
+      setPaymentType('UNPAID');
+      setInitialPaidAmount('');
+      setPaymentMode('Cash');
+      setPaymentRef('');
+      setSettlementAccountId('');
+      setPlaceOfSupply('');
+      setDispatchFrom('');
+      setDispatchDate('');
+      setShipToName('');
+      setShipToAddress('');
+      setVehicleNo('');
+      setShipBy('');
+      setTransporterName('');
+      setDispatchDocNo('');
+      setTermsOfDelivery('');
+      setPaymentTerms('');
+
+      if (poContext) {
+        setSelectedVendorId(poContext.vendorId || '');
+        setVendorName(poContext.vendorName || '');
+        setBuyerOrderNo(poContext.poNumber || '');
+        setBuyerOrderDate(poContext.date ? String(poContext.date).slice(0, 10) : todayISO());
+        
+        const matchedVendor = vendors.find((v) => v.id === poContext.vendorId || v.name === poContext.vendorName);
+        if (matchedVendor) {
+          setVendorPhone(matchedVendor.phone || '');
+          setVendorGstin(matchedVendor.gstin || '');
+          setVendorPan(matchedVendor.pan || '');
+          setVendorAddress(matchedVendor.address || '');
+          setVendorState(matchedVendor.state || '');
+          setVendorStateCode(matchedVendor.stateCode || '');
+        }
+
+        const remaining = (poContext.items || [])
+          .filter((l) => Number(l.receivedQty || 0) < Number(l.orderedQty || 0) - 0.009)
+          .map((l) => {
+            const p = products.find((pr) => pr.id === l.productId);
+            const qtyNum = r2Local(Number(l.orderedQty) - Number(l.receivedQty || 0));
+            const rateNum = Number(l.rate) || 0;
+            const taxNum = Number(l.taxRate) || 0;
+            const sub = qtyNum * rateNum;
+            const lineTot = Math.round((sub + (sub * taxNum) / 100) * 100) / 100;
+            return {
+              ...blankLine(),
+              productId: l.productId,
+              name: l.productName || p?.name || '',
+              barcode: p?.barcode || '',
+              hsn: l.hsn || p?.hsn || '',
+              qty: qtyNum,
+              rate: rateNum,
+              taxRate: taxNum,
+              unit: l.unit || p?.unit || 'pcs',
+              total: lineTot,
+              trackBatches: Boolean(p?.trackBatches),
+              showBatch: Boolean(p?.trackBatches || batchTrackingEnabled),
+              sellPrice: p?.price ?? ''
+            };
+          });
+        setItems(remaining.length ? remaining : [blankLine()]);
+      } else {
+        setSelectedVendorId('');
+        setVendorName('');
+        setVendorPhone('');
+        setVendorGstin('');
+        setVendorPan('');
+        setVendorAddress('');
+        setVendorState('');
+        setVendorStateCode('');
+        setBuyerOrderNo('');
+        setBuyerOrderDate('');
+        setItems([blankLine()]);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, poContext]);
 
-  const vendor = vendors.find((v) => v.id === form.vendorId);
+  const isSoftMoney = ['UPI', 'Card', 'Net Banking', 'Bank Transfer', 'Cheque'].includes(paymentMode);
 
-  const setLine = (idx, patch) => setLines((ls) => ls.map((l, i) => (i === idx ? { ...l, ...patch } : l)));
-  const addLine = () => setLines((ls) => [...ls, blankLine()]);
-  const removeLine = (idx) => setLines((ls) => ls.filter((_, i) => i !== idx));
-
-  const pickProduct = (idx, productId) => {
-    if (productId === '__new__') {
-      setLine(idx, { productId: '', name: '', rate: '', taxRate: 0, unit: 'pcs', hsn: '', isNew: true });
+  // Vendor selection change
+  const handleVendorChange = (id) => {
+    setSelectedVendorId(id);
+    if (!id) {
+      setVendorName('');
+      setVendorPhone('');
+      setVendorGstin('');
+      setVendorPan('');
+      setVendorAddress('');
+      setVendorState('');
+      setVendorStateCode('');
       return;
     }
-    const p = products.find((pr) => pr.id === productId);
-    setLines((ls) => {
-      const next = ls.map((l, i) =>
-        i === idx
-          ? {
-              ...l,
-              productId,
-              name: p?.name || '',
-              rate: p?.purchasePrice ?? '',
-              taxRate: p?.taxRate ?? 0,
-              unit: p?.unit || 'pcs',
-              hsn: p?.hsn || '',
-              isNew: false
-            }
-          : l
-      );
+    const ven = vendors.find((v) => v.id === id);
+    if (ven) {
+      setVendorName(ven.name || '');
+      setVendorPhone(ven.phone || '');
+      setVendorGstin(ven.gstin || '');
+      setVendorPan(ven.pan || '');
+      setVendorAddress(ven.address || '');
+      setVendorState(ven.state || '');
+      setVendorStateCode(ven.stateCode || '');
+    }
+  };
 
-      const hasEmptyBelow = next.some((l, i) => i > idx && !l.productId && !l.name.trim());
-      if (!hasEmptyBelow) {
+  // Product selection
+  const handleProductSelect = (index, prod) => {
+    setItems((prev) => {
+      const next = [...prev];
+      const qty = Number(next[index]?.qty) || 1;
+      const rate = prod.purchasePrice !== undefined && prod.purchasePrice !== '' ? Number(prod.purchasePrice) : Number(prod.price) || 0;
+      const taxRate = Number(prod.taxRate || prod.gstRate) || 0;
+      const discount = Number(next[index]?.discount) || 0;
+      const sub = qty * rate;
+      const taxAmt = (sub * taxRate) / 100;
+      const total = Math.max(0, Math.round((sub + taxAmt - discount) * 100) / 100);
+
+      next[index] = {
+        ...next[index],
+        productId: prod.id || '',
+        name: prod.name,
+        barcode: prod.barcode || '',
+        hsn: prod.hsn || '',
+        unit: prod.unit || next[index]?.unit || 'pcs',
+        rate: prod.purchasePrice !== undefined ? prod.purchasePrice : (prod.price ?? ''),
+        taxRate,
+        discount,
+        total,
+        isCustom: !prod.id,
+        trackBatches: Boolean(prod.trackBatches),
+        showBatch: Boolean(prod.trackBatches || batchTrackingEnabled),
+        batches: [
+          {
+            id: `b_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+            batchNo: '',
+            qty,
+            mfgDate: '',
+            expiryDate: '',
+            sellPrice: prod.price ?? ''
+          }
+        ],
+        batchNo: '',
+        mfgDate: '',
+        expiryDate: '',
+        sellPrice: prod.price ?? ''
+      };
+
+      const hasEmptyRowBelow = next.some((r, i) => i > index && (!r.name || !r.name.trim()));
+      if (!hasEmptyRowBelow) {
         next.push(blankLine());
       }
       return next;
     });
   };
 
-  const backToCatalog = (idx) => setLine(idx, { productId: '', name: '', rate: '', taxRate: 0, unit: 'pcs', hsn: '', isNew: false });
+  const handleItemChange = (index, field, value) => {
+    setItems((prev) => {
+      const next = [...prev];
+      const updated = { ...next[index], [field]: value };
+      const qty = Number(updated.qty) || 0;
+      const rate = Number(updated.rate) || 0;
+      const taxRate = Number(updated.taxRate) || 0;
+      const discount = Number(updated.discount) || 0;
+      const sub = qty * rate;
+      const taxAmt = (sub * taxRate) / 100;
+      updated.total = Math.max(0, Math.round((sub + taxAmt - discount) * 100) / 100);
 
-  const lineAmount = (l) => (Number(l.qty) || 0) * (Number(l.rate) || 0) * (1 + (Number(l.taxRate) || 0) / 100);
-  const subtotal = useMemo(() => lines.reduce((s, l) => s + (Number(l.qty) || 0) * (Number(l.rate) || 0), 0), [lines]);
-  const tax = useMemo(
-    () => lines.reduce((s, l) => s + (Number(l.qty) || 0) * (Number(l.rate) || 0) * ((Number(l.taxRate) || 0) / 100), 0),
-    [lines]
+      if (field === 'qty' && Array.isArray(updated.batches) && updated.batches.length === 1) {
+        updated.batches = [{ ...updated.batches[0], qty }];
+      }
+      next[index] = updated;
+      return next;
+    });
+  };
+
+  const addBatchToLine = (lineIdx) => {
+    setItems((prev) => {
+      const next = [...prev];
+      const curItem = next[lineIdx];
+      const curBatches = Array.isArray(curItem.batches) && curItem.batches.length > 0 ? curItem.batches : [];
+      const totalQty = Number(curItem.qty) || 0;
+      const allocated = curBatches.reduce((s, b) => s + (Number(b.qty) || 0), 0);
+      const remaining = Math.max(0, r2Local(totalQty - allocated));
+
+      const newBatch = {
+        id: `b_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+        batchNo: '',
+        qty: remaining > 0 ? remaining : 1,
+        mfgDate: '',
+        expiryDate: '',
+        sellPrice: curItem.sellPrice || ''
+      };
+
+      const updatedBatches = [...curBatches, newBatch];
+      const newSumQty = updatedBatches.reduce((s, b) => s + (Number(b.qty) || 0), 0);
+      const rate = Number(curItem.rate) || 0;
+      const taxRate = Number(curItem.taxRate) || 0;
+      const discount = Number(curItem.discount) || 0;
+      const sub = newSumQty * rate;
+      const taxAmt = (sub * taxRate) / 100;
+      const total = Math.max(0, Math.round((sub + taxAmt - discount) * 100) / 100);
+
+      next[lineIdx] = {
+        ...curItem,
+        qty: newSumQty,
+        total,
+        trackBatches: true,
+        showBatch: true,
+        batches: updatedBatches
+      };
+      return next;
+    });
+  };
+
+  const updateBatchInLine = (lineIdx, batchIdx, field, value) => {
+    setItems((prev) => {
+      const next = [...prev];
+      const curItem = next[lineIdx];
+      const curBatches = Array.isArray(curItem.batches) ? [...curItem.batches] : [];
+      curBatches[batchIdx] = { ...curBatches[batchIdx], [field]: value };
+
+      let newQty = curItem.qty;
+      let newTotal = curItem.total;
+
+      if (field === 'qty') {
+        const sumQty = curBatches.reduce((s, b) => s + (Number(b.qty) || 0), 0);
+        newQty = sumQty;
+        const rate = Number(curItem.rate) || 0;
+        const taxRate = Number(curItem.taxRate) || 0;
+        const discount = Number(curItem.discount) || 0;
+        const sub = sumQty * rate;
+        const taxAmt = (sub * taxRate) / 100;
+        newTotal = Math.max(0, Math.round((sub + taxAmt - discount) * 100) / 100);
+      }
+
+      next[lineIdx] = {
+        ...curItem,
+        qty: newQty,
+        total: newTotal,
+        trackBatches: true,
+        batches: curBatches
+      };
+      return next;
+    });
+  };
+
+  const removeBatchFromLine = (lineIdx, batchIdx) => {
+    setItems((prev) => {
+      const next = [...prev];
+      const curItem = next[lineIdx];
+      const curBatches = (curItem.batches || []).filter((_, i) => i !== batchIdx);
+      if (curBatches.length === 0) return next;
+
+      const sumQty = curBatches.reduce((s, b) => s + (Number(b.qty) || 0), 0);
+      const rate = Number(curItem.rate) || 0;
+      const taxRate = Number(curItem.taxRate) || 0;
+      const discount = Number(curItem.discount) || 0;
+      const sub = sumQty * rate;
+      const taxAmt = (sub * taxRate) / 100;
+      const total = Math.max(0, Math.round((sub + taxAmt - discount) * 100) / 100);
+
+      next[lineIdx] = {
+        ...curItem,
+        qty: sumQty,
+        total,
+        batches: curBatches
+      };
+      return next;
+    });
+  };
+
+  const switchLineUnit = (index, line, newUnit) => {
+    const product = products.find((pr) => pr.id === line.productId);
+    if (!product) {
+      handleItemChange(index, 'unit', newUnit);
+      return;
+    }
+    const options = getProductUnitOptions(product);
+    const opt = options.find((o) => o.unit === newUnit);
+    const baseCost = Number(product.purchasePrice) || 0;
+    const newRate = opt && baseCost ? r2Local(baseCost * Number(opt.factor || 1)) : line.rate;
+    
+    setItems((prev) => {
+      const next = [...prev];
+      const updated = { ...next[index], unit: newUnit, rate: newRate };
+      const qty = Number(updated.qty) || 0;
+      const rate = Number(updated.rate) || 0;
+      const taxRate = Number(updated.taxRate) || 0;
+      const discount = Number(updated.discount) || 0;
+      const sub = qty * rate;
+      const taxAmt = (sub * taxRate) / 100;
+      updated.total = Math.max(0, Math.round((sub + taxAmt - discount) * 100) / 100);
+      next[index] = updated;
+      return next;
+    });
+  };
+
+  const addItemRow = () => setItems((prev) => [...prev, blankLine()]);
+  const removeItemRow = (index) => {
+    if (items.length === 1) return;
+    setItems((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  // Additional landed charges
+  const setCharge = (idx, patch) => setCharges((cs) => cs.map((c, i) => (i === idx ? { ...c, ...patch } : c)));
+  const addCharge = () => setCharges((cs) => [...cs, { label: '', amount: '' }]);
+  const removeCharge = (idx) => setCharges((cs) => cs.filter((_, i) => i !== idx));
+
+  // Financial calculations
+  const totals = useMemo(() => {
+    let subtotal = 0;
+    let taxTotal = 0;
+    let discountTotal = 0;
+
+    items.forEach((item) => {
+      const qty = Number(item.qty) || 0;
+      const rate = Number(item.rate) || 0;
+      const taxRate = Number(item.taxRate) || 0;
+      const disc = Number(item.discount) || 0;
+
+      const lineSub = qty * rate;
+      const lineTax = (lineSub * taxRate) / 100;
+
+      subtotal += lineSub;
+      taxTotal += lineTax;
+      discountTotal += disc;
+    });
+
+    const totalCharges = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0);
+    const netBeforeRound = Math.max(0, subtotal + taxTotal - discountTotal + totalCharges);
+    const roundedGrand = isRoundOff ? Math.round(netBeforeRound) : netBeforeRound;
+    const roundOff = isRoundOff ? Math.round((roundedGrand - netBeforeRound) * 100) / 100 : 0;
+
+    return {
+      subtotal: Math.round(subtotal * 100) / 100,
+      tax: Math.round(taxTotal * 100) / 100,
+      discount: Math.round(discountTotal * 100) / 100,
+      charges: Math.round(totalCharges * 100) / 100,
+      roundOff,
+      total: roundedGrand
+    };
+  }, [items, charges, isRoundOff]);
+
+  const handleSaveWithStatus = async (targetStatus, customPaidAmount) => {
+    const validItems = items.filter((i) => {
+      if (!i.name || !i.name.trim()) return false;
+      const qtyNum = Number(i.qty) || 0;
+      return qtyNum > 0;
+    });
+
+    if (validItems.length === 0) {
+      showToast('Please select or enter at least one valid product item for the purchase invoice.', 'error');
+      return;
+    }
+
+    if (!vendorName.trim()) {
+      showToast('Vendor name is required.', 'error');
+      return;
+    }
+
+    let finalPaid = 0;
+    if (targetStatus === 'UNPAID') {
+      finalPaid = 0;
+    } else if (targetStatus === 'PARTIALLY_PAID') {
+      finalPaid = Math.min(totals.total, Math.max(0, Number(customPaidAmount !== undefined ? customPaidAmount : initialPaidAmount) || 0));
+      if (finalPaid <= 0) {
+        showToast('Please enter an initial payment amount greater than zero for partial payment.', 'error');
+        return;
+      }
+    } else if (targetStatus === 'PAID') {
+      finalPaid = totals.total;
+    }
+
+    if (finalPaid > 0 && isSoftMoney && !paymentRef.trim()) {
+      const ok = window.confirm(`You are recording payment via ${paymentMode} without entering a Transaction Reference/UTR. Confirm that payment of ${money(finalPaid)} has been verified and settled with the vendor?`);
+      if (!ok) return;
+    }
+
+    setLoading(true);
+    try {
+      const payload = {
+        vendorId: selectedVendorId || undefined,
+        vendorName: vendorName.trim(),
+        vendorPhone: vendorPhone.trim(),
+        vendorGstin: vendorGstin.trim(),
+        vendorPan: vendorPan.trim(),
+        vendorAddress: vendorAddress.trim(),
+        vendorState: vendorState.trim(),
+        vendorStateCode: vendorStateCode.trim(),
+        invoiceNo: invoiceNo.trim() || undefined,
+        date: invoiceDate ? new Date(invoiceDate).toISOString() : new Date().toISOString(),
+        dueDate: dueDate ? new Date(dueDate).toISOString() : null,
+        paymentStatus: targetStatus === 'PARTIALLY_PAID' ? 'PARTIAL' : targetStatus,
+        paymentMode: finalPaid > 0 ? paymentMode : undefined,
+        paymentRef: paymentRef.trim() || '',
+        paidAmount: finalPaid,
+        settlementAccountId: finalPaid > 0 ? (settlementAccountId || undefined) : undefined,
+        placeOfSupply: placeOfSupply.trim() || '',
+        dispatchFrom: dispatchFrom.trim() || '',
+        dispatchDate: dispatchDate ? new Date(dispatchDate).toISOString() : null,
+        shipToName: shipToName.trim() || '',
+        shipToAddress: shipToAddress.trim() || '',
+        vehicleNo: vehicleNo.trim() || '',
+        shipBy: shipBy.trim() || '',
+        transporterName: transporterName.trim() || '',
+        dispatchDocNo: dispatchDocNo.trim() || '',
+        buyerOrderNo: buyerOrderNo.trim() || '',
+        buyerOrderDate: buyerOrderDate ? new Date(buyerOrderDate).toISOString() : null,
+        buyerRef: buyerRef.trim() || '',
+        buyerRefDate: buyerRefDate ? new Date(buyerRefDate).toISOString() : null,
+        vendorCode: vendorCode.trim() || '',
+        termsOfDelivery: termsOfDelivery.trim() || '',
+        paymentTerms: paymentTerms.trim() || '',
+        poId: poContext?.id || undefined,
+        notes: notes.trim() || '',
+        subtotal: totals.subtotal,
+        discount: totals.discount,
+        tax: totals.tax,
+        roundOff: totals.roundOff,
+        items: validItems.map((l) => {
+          const batches = Array.isArray(l.batches) && l.batches.length > 0 ? l.batches : [];
+          const hasBatch = Boolean(l.trackBatches || l.showBatch || batches.length > 0 || l.batchNo || l.expiryDate || l.mfgDate);
+          return {
+            productId: l.productId || null,
+            name: l.name,
+            barcode: l.barcode || '',
+            unit: l.unit || 'pcs',
+            hsn: l.hsn || '',
+            qty: Number(l.qty),
+            rate: Number(l.rate) || 0,
+            taxRate: Number(l.taxRate) || 0,
+            discount: Number(l.discount) || 0,
+            total: Number(l.total) || 0,
+            batches: hasBatch && batches.length > 0
+              ? batches.map((b) => ({
+                  batchNo: b.batchNo || '',
+                  qty: Number(b.qty) || 0,
+                  mfgDate: b.mfgDate || null,
+                  expiryDate: b.expiryDate || null,
+                  sellPrice: b.sellPrice !== undefined && b.sellPrice !== '' ? b.sellPrice : l.sellPrice
+                }))
+              : undefined,
+            batchNo: batches[0]?.batchNo || (hasBatch ? l.batchNo || '' : undefined),
+            mfgDate: batches[0]?.mfgDate || (hasBatch ? l.mfgDate || '' : undefined),
+            expiryDate: batches[0]?.expiryDate || (hasBatch ? l.expiryDate || '' : undefined),
+            sellPrice: batches[0]?.sellPrice || (hasBatch ? l.sellPrice || '' : undefined)
+          };
+        }),
+        additionalCharges: charges
+          .filter((c) => Number(c.amount) > 0)
+          .map((c) => ({ label: c.label || 'Other', amount: Number(c.amount) }))
+      };
+
+      const res = await api.post('/purchases', payload);
+      if (res.data?.accountingError) {
+        showToast(`Purchase saved, but accounting note: ${res.data.accountingError}`, 'error');
+      }
+      showToast(res.message || 'Vendor purchase invoice recorded successfully.');
+      onSaved();
+    } catch (err) {
+      showToast(api.message(err, 'Failed to record purchase invoice.'), 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!open) return null;
+
+  return (
+    <>
+      <Modal
+        open={open}
+        onClose={onClose}
+        title={poContext ? `Receive Against PO #${poContext.poNumber}` : 'New Purchase Invoice'}
+        subtitle={
+          poContext
+            ? `${poContext.vendorName} · Receiving stock against this purchase order with GST inputs, batch inward, and invoice settlement.`
+            : 'Generate a formal purchase invoice with vendor details, product items, GST taxes, batch tracking, and inventory inward.'
+        }
+        icon={Receipt}
+        size="xl"
+      >
+        <form onSubmit={(e) => e.preventDefault()} className="space-y-4">
+          {/* Vendor Information & Auto-fill Card */}
+          <div className="p-4 rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/70 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-extrabold uppercase tracking-wider text-[color:var(--text-secondary)] flex items-center gap-1.5">
+                <Truck className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                {poContext ? `Vendor & Invoice Details — PO #${poContext.poNumber}` : 'Vendor & Purchase Details'}
+              </span>
+              <span className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400">
+                Auto-fills vendor details upon selection
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <Field label="Select Registered Vendor">
+                <Select
+                  value={selectedVendorId}
+                  disabled={Boolean(poContext)}
+                  onChange={(e) => handleVendorChange(e.target.value)}
+                >
+                  <option value="">— Unregistered / Walk-in Supplier —</option>
+                  {(vendors || []).map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.name} {Number(v.outstandingPayable) > 0 ? `(Payable: ${money(v.outstandingPayable)})` : ''}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+
+              <Field label="Vendor / Supplier Name *">
+                <Input
+                  value={vendorName}
+                  onChange={(e) => setVendorName(e.target.value)}
+                  placeholder="Supplier / Company Name"
+                  required
+                />
+              </Field>
+
+              <Field label="Vendor Phone Number">
+                <Input
+                  value={vendorPhone}
+                  onChange={(e) => setVendorPhone(e.target.value)}
+                  placeholder="Contact number"
+                />
+              </Field>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+              <Field label="Vendor Invoice / Bill No. *">
+                <Input
+                  value={invoiceNo}
+                  onChange={(e) => setInvoiceNo(e.target.value)}
+                  placeholder="e.g. INV-2026-889"
+                  required
+                />
+              </Field>
+
+              <Field label="Vendor GSTIN / Tax ID">
+                <Input
+                  value={vendorGstin}
+                  onChange={(e) => setVendorGstin(e.target.value)}
+                  placeholder="Supplier GSTIN"
+                />
+              </Field>
+
+              <Field label="Purchase Date *">
+                <Input
+                  type="date"
+                  value={invoiceDate}
+                  onChange={(e) => setInvoiceDate(e.target.value)}
+                  required
+                />
+              </Field>
+
+              <Field label="Payment Due Date">
+                <div className="flex items-center gap-1">
+                  <Input
+                    type="date"
+                    value={dueDate}
+                    onChange={(e) => setDueDate(e.target.value)}
+                    className="flex-1"
+                  />
+                  {[
+                    { label: '15d', days: 15 },
+                    { label: '30d', days: 30 },
+                    { label: '45d', days: 45 }
+                  ].map((p) => (
+                    <button
+                      key={p.label}
+                      type="button"
+                      onClick={() => setDueDate(addDaysISO(invoiceDate, p.days))}
+                      className="rounded-lg border border-[color:var(--border)] px-1.5 py-1 text-[10px] font-bold text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-subtle)]"
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+            </div>
+
+            {/* Payment Method, Terms, and Settling Account */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <Field label="Payment Method">
+                <Select value={paymentMode} onChange={(e) => setPaymentMode(e.target.value)}>
+                  <option value="Cash">Cash (From Hand / Till)</option>
+                  <option value="UPI">UPI / QR Code</option>
+                  <option value="Card">Credit / Debit Card</option>
+                  <option value="Bank Transfer">Bank Transfer / NEFT / RTGS</option>
+                  <option value="Net Banking">Net Banking</option>
+                  <option value="Credit (Udhar)">Credit / On Account (Pay Later)</option>
+                  <option value="Cheque">Bank Cheque</option>
+                </Select>
+              </Field>
+
+              <Field label="Payment Status / Terms">
+                <Select
+                  value={paymentType}
+                  onChange={(e) => {
+                    setPaymentType(e.target.value);
+                    if (e.target.value === 'PARTIAL' && !initialPaidAmount) {
+                      setInitialPaidAmount(String(Math.round(totals.total / 2)));
+                    }
+                  }}
+                >
+                  <option value="FULL">Full Payment (Paid in Full)</option>
+                  <option value="PARTIAL">Partial Payment (Advance + Balance Due)</option>
+                  <option value="UNPAID">Unpaid / Credit (Full Balance Due)</option>
+                </Select>
+              </Field>
+
+              <Field label="Paid From Account" hint={paymentType === 'UNPAID' ? 'Disabled for unpaid purchase' : 'Bank or cash ledger'}>
+                <Select
+                  value={settlementAccountId}
+                  disabled={paymentType === 'UNPAID'}
+                  onChange={(e) => setSettlementAccountId(e.target.value)}
+                >
+                  <option value="">— Select payment account —</option>
+                  {(accounts || []).map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.code} · {a.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
+
+            {/* Partial Payment Configuration Card */}
+            {paymentType === 'PARTIAL' && (
+              <div className="p-3.5 rounded-xl bg-amber-50/80 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-xs text-amber-900 dark:text-amber-300 flex items-center gap-1.5">
+                    <CreditCard className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                    Partial / Advance Payment Setup
+                  </span>
+                  <span className="text-[11px] font-bold text-amber-700 dark:text-amber-300">
+                    Grand Total: {money(totals.total)}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+                  <Field label="Amount Paid Now (₹) *">
+                    <Input
+                      type="number"
+                      min="0.01"
+                      max={totals.total}
+                      step="0.01"
+                      value={initialPaidAmount}
+                      onChange={(e) => setInitialPaidAmount(e.target.value)}
+                      placeholder="Enter advance/partial amount"
+                      className="font-bold font-mono text-sm bg-white dark:bg-slate-900"
+                    />
+                  </Field>
+
+                  <div className="rounded-xl p-3 bg-white/80 dark:bg-slate-900/80 border border-amber-200 dark:border-amber-800 text-xs space-y-1">
+                    <div className="flex justify-between text-[11px] text-[color:var(--text-secondary)]">
+                      <span>Advance Paid Now:</span>
+                      <span className="font-bold font-mono text-emerald-600 dark:text-emerald-400">{money(Number(initialPaidAmount) || 0)}</span>
+                    </div>
+                    <div className="flex justify-between font-bold text-amber-800 dark:text-amber-300 border-t border-amber-100 dark:border-amber-900/60 pt-1">
+                      <span>Remaining Balance Payable:</span>
+                      <span className="font-mono">{money(Math.max(0, totals.total - (Number(initialPaidAmount) || 0)))}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {isSoftMoney && paymentType !== 'UNPAID' && (
+              <div className="p-3 rounded-xl bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <CreditCard className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  <div>
+                    <div className="font-bold text-xs text-indigo-900 dark:text-indigo-300">
+                      Soft Money Mode: {paymentMode}
+                    </div>
+                    <div className="text-[10.5px] text-indigo-700/80 dark:text-indigo-300/80">
+                      Enter transaction reference / UTR code / Cheque number for payment records.
+                    </div>
+                  </div>
+                </div>
+                <div className="min-w-[220px]">
+                  <Input
+                    value={paymentRef}
+                    onChange={(e) => setPaymentRef(e.target.value)}
+                    placeholder="e.g. UTR / Ref / Cheque #"
+                    className="bg-white dark:bg-slate-900"
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <Field label="Vendor Address / Location">
+                <Input value={vendorAddress} onChange={(e) => setVendorAddress(e.target.value)} placeholder="Supplier city / office" />
+              </Field>
+              <Field label="Vendor State Name" hint="For GST place-of-supply check">
+                <Input value={vendorState} onChange={(e) => setVendorState(e.target.value)} placeholder="e.g. Tamil Nadu" />
+              </Field>
+              <Field label="Vendor State Code (2-digit GST code)" hint="e.g. 33 for Tamil Nadu, 07 for Delhi">
+                <Input value={vendorStateCode} onChange={(e) => setVendorStateCode(e.target.value)} placeholder="e.g. 33" maxLength={2} />
+              </Field>
+            </div>
+          </div>
+
+          {/* Optional Transport, Dispatch & Delivery Details */}
+          <details className="rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/40 p-4 group">
+            <summary className="text-xs font-bold text-[color:var(--text-secondary)] cursor-pointer select-none flex items-center justify-between">
+              <span className="flex items-center gap-2">
+                <Truck className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                <span>Transport, Dispatch & Inward Shipment Fields (Optional)</span>
+              </span>
+              <span className="text-[10.5px] font-normal text-[color:var(--text-muted)] group-open:hidden">Click to expand</span>
+            </summary>
+            <div className="mt-3 space-y-3 pt-3 border-t border-[color:var(--border)] text-xs">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <Field label="Place of Supply">
+                  <Input value={placeOfSupply} onChange={(e) => setPlaceOfSupply(e.target.value)} placeholder="e.g. Tamil Nadu (33)" />
+                </Field>
+                <Field label="Dispatch From Address / Hub">
+                  <Input value={dispatchFrom} onChange={(e) => setDispatchFrom(e.target.value)} placeholder="Supplier dispatch depot" />
+                </Field>
+                <Field label="Dispatch Date">
+                  <Input type="date" value={dispatchDate} onChange={(e) => setDispatchDate(e.target.value)} />
+                </Field>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <Field label="Receiving Hub / Site Name">
+                  <Input value={shipToName} onChange={(e) => setShipToName(e.target.value)} placeholder="Main Store / Branch" />
+                </Field>
+                <Field label="Delivery Destination Address" className="md:col-span-2">
+                  <Input value={shipToAddress} onChange={(e) => setShipToAddress(e.target.value)} placeholder="Warehouse address" />
+                </Field>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <Field label="Vehicle No.">
+                  <Input value={vehicleNo} onChange={(e) => setVehicleNo(e.target.value.toUpperCase())} placeholder="e.g. TN01AB1234" />
+                </Field>
+                <Field label="Ship By / Mode">
+                  <Input value={shipBy} onChange={(e) => setShipBy(e.target.value)} placeholder="Road / Courier / Air" />
+                </Field>
+                <Field label="Transporter Name">
+                  <Input value={transporterName} onChange={(e) => setTransporterName(e.target.value)} placeholder="Logistics Agency" />
+                </Field>
+                <Field label="Dispatch Doc / LR No.">
+                  <Input value={dispatchDocNo} onChange={(e) => setDispatchDocNo(e.target.value)} placeholder="e.g. LR-99882" />
+                </Field>
+              </div>
+            </div>
+          </details>
+
+          {/* Optional Purchase Order & Supplier References */}
+          <details className="rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/40 p-4 group">
+            <summary className="text-xs font-bold text-[color:var(--text-secondary)] cursor-pointer select-none flex items-center justify-between">
+              <span className="flex items-center gap-2">
+                <FileText className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                <span>PO Numbers, Supplier References & Terms (Optional)</span>
+              </span>
+              <span className="text-[10.5px] font-normal text-[color:var(--text-muted)] group-open:hidden">Click to expand</span>
+            </summary>
+            <div className="mt-3 space-y-3 pt-3 border-t border-[color:var(--border)] text-xs">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <Field label="Purchase Order / PO No.">
+                  <Input value={buyerOrderNo} onChange={(e) => setBuyerOrderNo(e.target.value)} placeholder="e.g. PO-2026-001" />
+                </Field>
+                <Field label="Purchase Order Date">
+                  <Input type="date" value={buyerOrderDate} onChange={(e) => setBuyerOrderDate(e.target.value)} />
+                </Field>
+                <Field label="Supplier Reference / Quotation No.">
+                  <Input value={buyerRef} onChange={(e) => setBuyerRef(e.target.value)} placeholder="e.g. QT-9981" />
+                </Field>
+                <Field label="Supplier Reference Date">
+                  <Input type="date" value={buyerRefDate} onChange={(e) => setBuyerRefDate(e.target.value)} />
+                </Field>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <Field label="Vendor Code (our customer code with vendor)">
+                  <Input value={vendorCode} onChange={(e) => setVendorCode(e.target.value)} placeholder="e.g. CLI-8812" />
+                </Field>
+                <Field label="Terms of Delivery">
+                  <Input value={termsOfDelivery} onChange={(e) => setTermsOfDelivery(e.target.value)} placeholder="e.g. Door Delivery / Ex-works" />
+                </Field>
+                <Field label="Terms of Payment">
+                  <Input value={paymentTerms} onChange={(e) => setPaymentTerms(e.target.value)} placeholder="e.g. 30 Days Net" />
+                </Field>
+              </div>
+            </div>
+          </details>
+
+          {/* Line Items Table */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-extrabold uppercase tracking-wider text-[color:var(--text-secondary)]">
+                Line Items &amp; Products ({items.length})
+              </span>
+              <Button size="xs" variant="outline" icon={Plus} onClick={addItemRow}>
+                Add Blank Row
+              </Button>
+            </div>
+
+            <div className="overflow-x-auto rounded-2xl border border-[color:var(--border)]">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead>
+                  <tr className="border-b border-[color:var(--border)] bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-secondary)] text-[10.5px] uppercase tracking-wider">
+                    <th className="py-2.5 px-3 w-8 text-center">#</th>
+                    <th className="py-2.5 px-3 min-w-[200px]">Product / Service Description</th>
+                    <th className="py-2.5 px-3 w-20">HSN/SAC</th>
+                    <th className="py-2.5 px-3 w-20 text-right">Qty</th>
+                    <th className="py-2.5 px-3 w-24">Unit</th>
+                    <th className="py-2.5 px-3 w-24 text-right">Pur. Rate (₹)</th>
+                    <th className="py-2.5 px-3 w-24 text-right text-indigo-600 dark:text-indigo-400">Sell Price (₹)</th>
+                    <th className="py-2.5 px-3 w-20 text-right">GST %</th>
+                    <th className="py-2.5 px-3 w-20 text-right">Disc (₹)</th>
+                    <th className="py-2.5 px-3 w-24 text-right">Total (₹)</th>
+                    <th className="py-2.5 px-3 w-10 text-center"></th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                  {items.map((item, idx) => {
+                    const product = products.find((pr) => pr.id === item.productId);
+                    const unitOptions = product ? getProductUnitOptions(product) : [];
+
+                    return (
+                      <React.Fragment key={idx}>
+                        <tr className="hover:bg-[color:var(--bg-subtle)]/50">
+                          <td className="py-2 px-3 text-center text-slate-400 font-mono text-[11px]">{idx + 1}</td>
+
+                          <td className="py-2.5 px-3 min-w-[200px]">
+                            <ProductItemCell
+                              row={item}
+                              index={idx}
+                              onOpenPicker={(i) => setActivePickerIndex(i)}
+                              onUpdateName={(i, name) => handleItemChange(i, 'name', name)}
+                            />
+                            <div className="mt-1 flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const nextVal = !(item.showBatch || item.trackBatches);
+                                  handleItemChange(idx, 'showBatch', nextVal);
+                                  if (nextVal) {
+                                    handleItemChange(idx, 'trackBatches', true);
+                                    if (!item.batches || item.batches.length === 0) {
+                                      handleItemChange(idx, 'batches', [
+                                        {
+                                          id: `b_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+                                          batchNo: '',
+                                          qty: Number(item.qty) || 1,
+                                          mfgDate: '',
+                                          expiryDate: '',
+                                          sellPrice: item.sellPrice || ''
+                                        }
+                                      ]);
+                                    }
+                                  }
+                                }}
+                                className={`text-[10px] font-bold px-2 py-0.5 rounded-lg border transition-all inline-flex items-center gap-1 ${
+                                  (item.batches && item.batches.length > 1) || item.batches?.[0]?.batchNo || item.batchNo || item.expiryDate
+                                    ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border-amber-300 dark:border-amber-700'
+                                    : 'bg-white dark:bg-slate-900 text-slate-500 hover:text-indigo-600 border-slate-200 dark:border-slate-800'
+                                }`}
+                              >
+                                <Boxes className="w-3 h-3 text-amber-600" />
+                                {Array.isArray(item.batches) && item.batches.length > 1
+                                  ? `${item.batches.length} Batches (${item.batches.reduce((s, b) => s + (Number(b.qty) || 0), 0)} ${item.unit || 'pcs'})`
+                                  : item.batches?.[0]?.batchNo
+                                  ? `Batch #${item.batches[0].batchNo}`
+                                  : item.batchNo
+                                  ? `Batch #${item.batchNo}`
+                                  : (item.showBatch || item.trackBatches ? 'Hide Batch Details' : '+ Add Batch / Expiry')}
+                              </button>
+                            </div>
+                          </td>
+
+                          <td className="py-2 px-3">
+                            <Input
+                              value={item.hsn}
+                              onChange={(e) => handleItemChange(idx, 'hsn', e.target.value)}
+                              placeholder="HSN"
+                              className="text-xs font-mono"
+                            />
+                          </td>
+
+                          <td className="py-2 px-3">
+                            <Input
+                              type="number"
+                              step="any"
+                              value={item.qty}
+                              onChange={(e) => handleItemChange(idx, 'qty', e.target.value)}
+                              className="text-right text-xs font-mono font-bold"
+                            />
+                          </td>
+
+                          <td className="py-2 px-3">
+                            {unitOptions.length > 1 ? (
+                              <Select
+                                value={item.unit}
+                                onChange={(e) => switchLineUnit(idx, item, e.target.value)}
+                                className="text-xs"
+                              >
+                                {unitOptions.map((o) => (
+                                  <option key={o.unit} value={o.unit}>
+                                    {o.unit}
+                                  </option>
+                                ))}
+                              </Select>
+                            ) : (
+                              <Input
+                                value={item.unit}
+                                onChange={(e) => handleItemChange(idx, 'unit', e.target.value)}
+                                className="text-xs"
+                              />
+                            )}
+                          </td>
+
+                          <td className="py-2 px-3">
+                            <Input
+                              type="number"
+                              step="any"
+                              value={item.rate}
+                              onChange={(e) => handleItemChange(idx, 'rate', e.target.value)}
+                              placeholder="0.00"
+                              className="text-right text-xs font-mono font-bold"
+                            />
+                          </td>
+
+                          <td className="py-2 px-3">
+                            {Boolean(item.trackBatches || item.showBatch || (item.batches && item.batches.length > 1)) ? (
+                              <div
+                                className="text-right text-[11px] font-bold font-mono text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 px-2 py-1.5 rounded-lg border border-dashed border-amber-300 dark:border-amber-700 cursor-pointer hover:bg-amber-100 dark:hover:bg-amber-900/50 transition-colors"
+                                title="Selling price is configured individually per batch in the drawer below"
+                                onClick={() => handleItemChange(idx, 'showBatch', true)}
+                              >
+                                In Batch ↓
+                              </div>
+                            ) : (
+                              <Input
+                                type="number"
+                                step="any"
+                                value={item.sellPrice}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  handleItemChange(idx, 'sellPrice', val);
+                                  if (Array.isArray(item.batches) && item.batches.length === 1) {
+                                    updateBatchInLine(idx, 0, 'sellPrice', val);
+                                  }
+                                }}
+                                placeholder="Sell ₹"
+                                className="text-right text-xs font-mono"
+                              />
+                            )}
+                          </td>
+
+                          <td className="py-2 px-3">
+                            <Input
+                              type="number"
+                              step="any"
+                              value={item.taxRate}
+                              onChange={(e) => handleItemChange(idx, 'taxRate', e.target.value)}
+                              className="text-right text-xs font-mono"
+                            />
+                          </td>
+
+                          <td className="py-2 px-3">
+                            <Input
+                              type="number"
+                              step="any"
+                              value={item.discount}
+                              onChange={(e) => handleItemChange(idx, 'discount', e.target.value)}
+                              className="text-right text-xs font-mono"
+                            />
+                          </td>
+
+                          <td className="py-2 px-3 text-right font-mono font-bold text-xs text-[color:var(--text-primary)]">
+                            {money(item.total)}
+                          </td>
+
+                          <td className="py-2 px-3 text-center">
+                            <button
+                              type="button"
+                              onClick={() => removeItemRow(idx)}
+                              disabled={items.length === 1}
+                              className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/60 transition-colors disabled:opacity-30"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+
+                        {/* Batch Inward Drawer */}
+                        {(item.trackBatches || item.showBatch || (item.batches && item.batches.length > 0 && (item.batches.length > 1 || item.batches[0]?.batchNo || item.batches[0]?.expiryDate))) && (
+                          <tr>
+                            <td colSpan={10} className="!pt-0 !pb-3 bg-amber-50/20 dark:bg-amber-950/10">
+                              <div className="rounded-xl border border-amber-200 dark:border-amber-800/60 bg-amber-50/50 dark:bg-amber-950/30 p-3 space-y-3">
+                                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-200/60 dark:border-amber-800/40 pb-2">
+                                  <div className="space-y-0.5">
+                                    <span className="text-[11px] font-extrabold uppercase tracking-wider text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+                                      <Boxes className="w-3.5 h-3.5 text-amber-600" />
+                                      Batch / Lot Inward for {item.name || 'this item'} ({item.batches?.length || 1} {item.batches?.length === 1 ? 'batch' : 'batches'})
+                                    </span>
+                                    <div className="text-[10.5px] text-amber-700/80 dark:text-amber-400/80">
+                                      Total in batches: <strong className="font-mono text-indigo-600 dark:text-indigo-400">{(item.batches || []).reduce((s, b) => s + (Number(b.qty) || 0), 0)} {item.unit || 'pcs'}</strong>
+                                    </div>
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => addBatchToLine(idx)}
+                                    className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400 bg-white dark:bg-slate-900 border border-indigo-200 dark:border-indigo-800 px-2.5 py-1 rounded-lg hover:bg-indigo-50 dark:hover:bg-indigo-950/50 transition-colors flex items-center gap-1 shadow-xs"
+                                  >
+                                    <Plus className="w-3 h-3" />
+                                    <span>+ Add Another Batch for this Product</span>
+                                  </button>
+                                </div>
+
+                                <div className="space-y-2">
+                                  {(item.batches && item.batches.length > 0 ? item.batches : [{ id: 'b_0', batchNo: item.batchNo || '', qty: item.qty || 1, mfgDate: item.mfgDate || '', expiryDate: item.expiryDate || '', sellPrice: item.sellPrice || '' }]).map((batch, bIdx) => (
+                                    <div
+                                      key={batch.id || bIdx}
+                                      className="flex flex-wrap items-end gap-2.5 p-2.5 rounded-xl border border-amber-200/80 dark:border-amber-800/60 bg-white dark:bg-slate-900 shadow-xs"
+                                    >
+                                      <div className="text-[11px] font-mono font-bold text-amber-700 dark:text-amber-400 self-center px-1">
+                                        Batch #{bIdx + 1}
+                                      </div>
+
+                                      <Field label="Batch / Lot No." className="min-w-[130px] flex-1">
+                                        <Input
+                                          value={batch.batchNo}
+                                          onChange={(e) => updateBatchInLine(idx, bIdx, 'batchNo', e.target.value)}
+                                          placeholder="Auto (1, 2, …) if blank"
+                                          className="text-xs"
+                                        />
+                                      </Field>
+
+                                      <Field label={`Qty (${item.unit || 'pcs'}) *`} className="w-24">
+                                        <Input
+                                          type="number"
+                                          step="any"
+                                          min="0.01"
+                                          value={batch.qty}
+                                          onChange={(e) => updateBatchInLine(idx, bIdx, 'qty', e.target.value)}
+                                          className="text-right text-xs font-mono font-bold text-indigo-600 dark:text-indigo-400"
+                                        />
+                                      </Field>
+
+                                      <Field label="Mfg. Date" className="w-32">
+                                        <Input
+                                          type="date"
+                                          value={batch.mfgDate}
+                                          onChange={(e) => updateBatchInLine(idx, bIdx, 'mfgDate', e.target.value)}
+                                          className="text-xs"
+                                        />
+                                      </Field>
+
+                                      <Field label="Expiry Date" className="w-32">
+                                        <Input
+                                          type="date"
+                                          value={batch.expiryDate}
+                                          onChange={(e) => updateBatchInLine(idx, bIdx, 'expiryDate', e.target.value)}
+                                          className="text-xs"
+                                        />
+                                      </Field>
+
+                                      <Field label="Selling Price (₹)" hint="Blank = default" className="w-28">
+                                        <Input
+                                          type="number"
+                                          step="any"
+                                          value={batch.sellPrice}
+                                          onChange={(e) => updateBatchInLine(idx, bIdx, 'sellPrice', e.target.value)}
+                                          placeholder="Sell price"
+                                          className="text-xs font-mono"
+                                        />
+                                      </Field>
+
+                                      {(item.batches || []).length > 1 && (
+                                        <button
+                                          type="button"
+                                          onClick={() => removeBatchFromLine(idx, bIdx)}
+                                          className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/60 rounded-lg transition-colors self-center mb-0.5"
+                                          title="Remove this batch"
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Additional Landed Cost Charges */}
+          <div className="p-3.5 rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/40 space-y-2">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-[11px] font-extrabold uppercase tracking-wider text-[color:var(--text-secondary)]">
+                  Additional Landed Cost Charges (Freight, Customs, Handling…)
+                </span>
+                <p className="text-[10.5px] text-[color:var(--text-muted)] mt-0.5">
+                  Allocated across line items by value and capitalised into inventory cost.
+                </p>
+              </div>
+              <Button type="button" size="xs" variant="outline" icon={Plus} onClick={addCharge}>
+                Add Charge
+              </Button>
+            </div>
+
+            {charges.length > 0 && (
+              <div className="overflow-hidden rounded-xl border border-[color:var(--border)] bg-[color:var(--bg-surface)]">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="border-b border-[color:var(--border)] bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-secondary)] text-[10px] uppercase">
+                      <th className="py-2 px-3">Charge Description</th>
+                      <th className="py-2 px-3 w-40 text-right">Amount (₹)</th>
+                      <th className="py-2 px-3 w-10"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                    {charges.map((c, idx) => (
+                      <tr key={idx}>
+                        <td className="py-1.5 px-3">
+                          <Input
+                            value={c.label}
+                            onChange={(e) => setCharge(idx, { label: e.target.value })}
+                            placeholder="e.g. Freight / Transport / Customs"
+                            className="text-xs"
+                          />
+                        </td>
+                        <td className="py-1.5 px-3">
+                          <Input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={c.amount}
+                            onChange={(e) => setCharge(idx, { amount: e.target.value })}
+                            className="text-right text-xs font-mono font-bold"
+                            placeholder="0.00"
+                          />
+                        </td>
+                        <td className="py-1.5 px-3 text-center">
+                          <button
+                            type="button"
+                            onClick={() => removeCharge(idx)}
+                            className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/60"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Bottom Summary & Notes */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+            <div className="space-y-3">
+              <Field label="Purchase Invoice Notes / Remarks">
+                <Textarea
+                  rows={3}
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder="Narration, vendor payment terms, delivery notes…"
+                />
+              </Field>
+
+              <label className="flex items-center gap-2 cursor-pointer select-none text-xs font-bold text-[color:var(--text-secondary)]">
+                <input
+                  type="checkbox"
+                  checked={isRoundOff}
+                  onChange={(e) => setIsRoundOff(e.target.checked)}
+                  className="rounded border-[color:var(--border)] text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer accent-indigo-600"
+                />
+                <span>Automatically round off Grand Total to whole ₹</span>
+              </label>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-[color:var(--bg-subtle)] border border-[color:var(--border)] space-y-2">
+              <div className="space-y-1.5 text-xs">
+                <div className="flex justify-between py-1 border-b border-[color:var(--border)] text-[color:var(--text-secondary)]">
+                  <span>Subtotal (Taxable Value):</span>
+                  <span className="font-mono font-semibold text-[color:var(--text-primary)]">{money(totals.subtotal)}</span>
+                </div>
+                {totals.discount > 0 && (
+                  <div className="flex justify-between py-1 border-b border-[color:var(--border)] text-emerald-600 dark:text-emerald-400 font-semibold">
+                    <span>Total Discount:</span>
+                    <span className="font-mono">-{money(totals.discount)}</span>
+                  </div>
+                )}
+                {totals.tax > 0 && (
+                  <div className="flex justify-between py-1 border-b border-[color:var(--border)] text-[color:var(--text-secondary)] font-medium">
+                    <span>GST Input Tax:</span>
+                    <span className="font-mono font-bold text-[color:var(--text-primary)]">{money(totals.tax)}</span>
+                  </div>
+                )}
+                {totals.charges > 0 && (
+                  <div className="flex justify-between py-1 border-b border-[color:var(--border)] text-[color:var(--text-secondary)] font-medium">
+                    <span>Landed Cost Charges:</span>
+                    <span className="font-mono font-semibold">{money(totals.charges)}</span>
+                  </div>
+                )}
+                {isRoundOff && totals.roundOff !== 0 && (
+                  <div className="flex justify-between py-1 border-b border-[color:var(--border)] text-[color:var(--text-muted)]">
+                    <span>Round Off:</span>
+                    <span className="font-mono">{money(totals.roundOff)}</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-between py-2 border-t-2 border-[color:var(--border-strong)] mt-2">
+                <div>
+                  <div className="text-[10.5px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Total Invoiced</div>
+                  <div className="text-[13px] font-bold text-[color:var(--text-primary)]">Purchase Grand Total</div>
+                </div>
+                <div className="text-xl font-extrabold text-indigo-600 dark:text-indigo-400 font-mono">
+                  {money(totals.total)}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Footer Actions */}
+          <div className="flex flex-wrap items-center justify-between gap-2.5 pt-3 border-t border-[color:var(--border)]">
+            <Button type="button" onClick={onClose}>
+              Cancel
+            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                loading={loading}
+                icon={Clock}
+                onClick={() => handleSaveWithStatus('UNPAID')}
+              >
+                Record as Unpaid (Due)
+              </Button>
+              {paymentType === 'PARTIAL' && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  loading={loading}
+                  icon={CreditCard}
+                  onClick={() => handleSaveWithStatus('PARTIALLY_PAID', initialPaidAmount)}
+                >
+                  Record Partial Payment ({money(Number(initialPaidAmount) || 0)})
+                </Button>
+              )}
+              <Button
+                type="button"
+                variant="primary"
+                loading={loading}
+                icon={CheckCircle2}
+                onClick={() => handleSaveWithStatus('PAID')}
+              >
+                Save as Paid ({money(totals.total)})
+              </Button>
+            </div>
+          </div>
+        </form>
+      </Modal>
+
+      <PurchaseProductPickerModal
+        open={activePickerIndex !== null}
+        onClose={() => setActivePickerIndex(null)}
+        products={products}
+        onSelectProduct={(p) => {
+          if (activePickerIndex !== null) handleProductSelect(activePickerIndex, p);
+        }}
+        onAddNew={() => {
+          const idx = activePickerIndex;
+          setActivePickerIndex(null);
+          setNewProductLineIndex(idx !== null ? idx : items.length - 1);
+        }}
+      />
+
+      <ProductFormModal
+        open={newProductLineIndex !== null}
+        editing={null}
+        categories={categories}
+        units={units}
+        warehouses={warehouses}
+        products={products}
+        batchTrackingEnabled={batchTrackingEnabled}
+        storeNearExpiryDays={storeNearExpiryDays}
+        hideBatches={true}
+        showToast={showToast}
+        onClose={() => setNewProductLineIndex(null)}
+        onSaved={(newProduct) => {
+          const idx = newProductLineIndex;
+          setNewProductLineIndex(null);
+          if (newProduct && idx !== null) handleProductSelect(idx, newProduct);
+          onProductCreated?.(newProduct);
+        }}
+      />
+    </>
   );
-  const grandTotal = subtotal + tax;
+}
 
-  const lineIsValid = (l) => (l.productId || (l.isNew && l.name.trim())) && Number(l.qty) > 0;
-  const canSubmit = Boolean(form.vendorId) && lines.some(lineIsValid);
+/* ------------------------------------------------------------------ *
+ * Purchase Orders
+ * ------------------------------------------------------------------ */
+
+function POStatusBadge({ po }) {
+  const map = {
+    ISSUED: { tone: 'info', label: 'Open' },
+    PARTIALLY_RECEIVED: { tone: 'warning', label: 'Partially Received' },
+    RECEIVED: { tone: 'success', label: 'Received' },
+    CANCELLED: { tone: 'danger', label: 'Cancelled' }
+  };
+  const cfg = map[po.status] || { tone: 'neutral', label: po.status };
+  return <Badge tone={cfg.tone}>{cfg.label}</Badge>;
+}
+
+const blankPOLine = () => ({
+  productId: '',
+  name: '',
+  barcode: '',
+  hsn: '',
+  qty: 1,
+  unit: 'pcs',
+  rate: '',
+  sellPrice: '',
+  taxRate: 0,
+  total: 0,
+  isCustom: false
+});
+
+function PurchaseOrderModal({
+  open,
+  onClose,
+  vendors = [],
+  products = [],
+  categories = [],
+  units = [],
+  warehouses = [],
+  batchTrackingEnabled = false,
+  storeNearExpiryDays,
+  showToast,
+  onSaved,
+  onProductCreated
+}) {
+  const [selectedVendorId, setSelectedVendorId] = useState('');
+  const [vendorName, setVendorName] = useState('');
+  const [vendorPhone, setVendorPhone] = useState('');
+  const [vendorGstin, setVendorGstin] = useState('');
+  const [vendorAddress, setVendorAddress] = useState('');
+  const [poDate, setPoDate] = useState(() => todayISO());
+  const [expectedDate, setExpectedDate] = useState('');
+  const [supplierRef, setSupplierRef] = useState('');
+  const [notes, setNotes] = useState('');
+  const [lines, setLines] = useState([blankPOLine()]);
+  const [saving, setSaving] = useState(false);
+  const [activePickerIndex, setActivePickerIndex] = useState(null);
+  const [newProductLineIndex, setNewProductLineIndex] = useState(null);
+
+  useEffect(() => {
+    if (open) {
+      setSelectedVendorId('');
+      setVendorName('');
+      setVendorPhone('');
+      setVendorGstin('');
+      setVendorAddress('');
+      setPoDate(todayISO());
+      setExpectedDate('');
+      setSupplierRef('');
+      setNotes('');
+      setLines([blankPOLine()]);
+      setActivePickerIndex(null);
+      setNewProductLineIndex(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const handleVendorChange = (id) => {
+    setSelectedVendorId(id);
+    if (!id) {
+      setVendorName('');
+      setVendorPhone('');
+      setVendorGstin('');
+      setVendorAddress('');
+      return;
+    }
+    const ven = vendors.find((v) => v.id === id);
+    if (ven) {
+      setVendorName(ven.name || '');
+      setVendorPhone(ven.phone || '');
+      setVendorGstin(ven.gstin || '');
+      setVendorAddress(ven.address || '');
+    }
+  };
+
+  const addLine = () => setLines((ls) => [...ls, blankPOLine()]);
+  const removeLine = (idx) => {
+    if (lines.length === 1) return;
+    setLines((ls) => ls.filter((_, i) => i !== idx));
+  };
+
+  const handleProductSelect = (index, prod) => {
+    setLines((prev) => {
+      const next = [...prev];
+      const qty = Number(next[index]?.qty) || 1;
+      const rate = prod.purchasePrice !== undefined && prod.purchasePrice !== '' ? Number(prod.purchasePrice) : Number(prod.price) || 0;
+      const taxRate = Number(prod.taxRate || prod.gstRate) || 0;
+      const sub = qty * rate;
+      const taxAmt = (sub * taxRate) / 100;
+      const total = Math.round((sub + taxAmt) * 100) / 100;
+
+      next[index] = {
+        ...next[index],
+        productId: prod.id || '',
+        name: prod.name,
+        barcode: prod.barcode || '',
+        hsn: prod.hsn || '',
+        unit: prod.unit || next[index]?.unit || 'pcs',
+        rate: prod.purchasePrice !== undefined && prod.purchasePrice !== '' ? prod.purchasePrice : (prod.price ?? ''),
+        sellPrice: prod.price !== undefined ? prod.price : '',
+        taxRate,
+        total,
+        isCustom: !prod.id
+      };
+
+      const hasEmptyBelow = next.some((r, i) => i > index && (!r.name || !r.name.trim()));
+      if (!hasEmptyBelow) next.push(blankPOLine());
+      return next;
+    });
+  };
+
+  const handleLineChange = (index, field, value) => {
+    setLines((prev) => {
+      const next = [...prev];
+      const updated = { ...next[index], [field]: value };
+      const qty = Number(updated.qty) || 0;
+      const rate = Number(updated.rate) || 0;
+      const taxRate = Number(updated.taxRate) || 0;
+      const sub = qty * rate;
+      const taxAmt = (sub * taxRate) / 100;
+      updated.total = Math.max(0, Math.round((sub + taxAmt) * 100) / 100);
+      next[index] = updated;
+      return next;
+    });
+  };
+
+  const switchLineUnit = (idx, line, newUnit) => {
+    const product = products.find((pr) => pr.id === line.productId);
+    if (!product) {
+      handleLineChange(idx, 'unit', newUnit);
+      return;
+    }
+    const options = getProductUnitOptions(product);
+    const opt = options.find((o) => o.unit === newUnit);
+    const baseCost = Number(product.purchasePrice) || 0;
+    const newRate = opt && baseCost ? r2Local(baseCost * Number(opt.factor || 1)) : line.rate;
+
+    setLines((prev) => {
+      const next = [...prev];
+      const updated = { ...next[idx], unit: newUnit, rate: newRate };
+      const qty = Number(updated.qty) || 0;
+      const rate = Number(updated.rate) || 0;
+      const taxRate = Number(updated.taxRate) || 0;
+      const sub = qty * rate;
+      const taxAmt = (sub * taxRate) / 100;
+      updated.total = Math.max(0, Math.round((sub + taxAmt) * 100) / 100);
+      next[idx] = updated;
+      return next;
+    });
+  };
+
+  const totals = useMemo(() => {
+    let subtotal = 0;
+    let taxTotal = 0;
+    lines.forEach((l) => {
+      const qty = Number(l.qty) || 0;
+      const rate = Number(l.rate) || 0;
+      const taxRate = Number(l.taxRate) || 0;
+      const lineSub = qty * rate;
+      subtotal += lineSub;
+      taxTotal += (lineSub * taxRate) / 100;
+    });
+    return {
+      subtotal: Math.round(subtotal * 100) / 100,
+      tax: Math.round(taxTotal * 100) / 100,
+      grandTotal: Math.round((subtotal + taxTotal) * 100) / 100
+    };
+  }, [lines]);
+
+  const lineIsValid = (l) => Boolean(l.name && l.name.trim()) && Number(l.qty) > 0;
+  const canSubmit = Boolean(vendorName.trim()) && lines.some(lineIsValid);
 
   const submit = async (e) => {
     e.preventDefault();
     if (saving || !canSubmit) return;
     setSaving(true);
     try {
-      const res = await api.post('/purchases', {
-        vendorId: form.vendorId,
-        vendorName: vendor?.name || '',
-        invoiceNo: form.invoiceNo,
-        items: lines
-          .filter(lineIsValid)
-          .map((l) => ({
-            productId: l.productId || null,
-            name: l.name,
-            unit: l.unit || 'pcs',
-            hsn: l.hsn || '',
-            qty: Number(l.qty),
-            rate: Number(l.rate) || 0,
-            taxRate: Number(l.taxRate) || 0
-          })),
-        totalAmount: grandTotal,
-        tax,
-        paymentStatus: form.paymentStatus,
-        paymentMode: form.paymentStatus === 'PAID' ? form.paymentMode : undefined,
-        settlementAccountId: form.paymentStatus === 'PAID' ? form.settlementAccountId : undefined,
-        notes: form.notes,
-        date: form.date
+      const res = await api.post('/purchase-orders', {
+        vendorId: selectedVendorId || undefined,
+        vendorName: vendorName.trim(),
+        vendorPhone: vendorPhone.trim(),
+        vendorGstin: vendorGstin.trim(),
+        vendorAddress: vendorAddress.trim(),
+        supplierRef: supplierRef.trim(),
+        items: lines.filter(lineIsValid).map((l) => ({
+          productId: l.productId || null,
+          productName: l.name,
+          barcode: l.barcode || '',
+          unit: l.unit || 'pcs',
+          hsn: l.hsn || '',
+          qty: Number(l.qty),
+          rate: Number(l.rate) || 0,
+          sellPrice: l.sellPrice !== undefined && l.sellPrice !== '' ? Number(l.sellPrice) : undefined,
+          taxRate: Number(l.taxRate) || 0,
+          total: Number(l.total) || 0
+        })),
+        expectedDate: expectedDate || undefined,
+        notes: notes.trim(),
+        date: poDate
       });
-      showToast(res.message);
+      showToast(res.message || 'Purchase order created successfully.');
       onSaved();
     } catch (err) {
-      showToast(api.message(err, 'Could not record the purchase.'), 'error');
+      showToast(api.message(err, 'Could not create the purchase order.'), 'error');
     } finally {
       setSaving(false);
     }
@@ -776,221 +3098,622 @@ function NewPurchaseModal({ open, onClose, vendors, products, accounts, showToas
 
   return (
     <>
+      <Modal
+        open={open}
+        onClose={onClose}
+        title="New Purchase Order (PO)"
+        subtitle="Place an order commitment with a vendor. Physical stock and accounting entries are updated when you receive against it."
+        icon={FileText}
+        size="half"
+        footer={
+          <div className="flex items-center justify-between w-full">
+            <Button onClick={onClose}>Cancel</Button>
+            <Button variant="primary" onClick={submit} loading={saving} disabled={!canSubmit} icon={Plus}>
+              Create Purchase Order ({money(totals.grandTotal)})
+            </Button>
+          </div>
+        }
+      >
+        <form onSubmit={submit} className="space-y-4">
+          {/* Vendor & Order Details Card */}
+          <div className="p-4 rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/70 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-extrabold uppercase tracking-wider text-[color:var(--text-secondary)] flex items-center gap-1.5">
+                <Truck className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                Vendor &amp; PO Details
+              </span>
+              <span className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400">
+                Auto-fills vendor details on selection
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <Field label="Select Registered Vendor">
+                <Select value={selectedVendorId} onChange={(e) => handleVendorChange(e.target.value)}>
+                  <option value="">— Unregistered / Custom Vendor —</option>
+                  {(vendors || []).map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.name} {Number(v.outstandingPayable) > 0 ? `(Payable: ${money(v.outstandingPayable)})` : ''}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+
+              <Field label="Vendor / Supplier Name *" required>
+                <Input
+                  value={vendorName}
+                  onChange={(e) => setVendorName(e.target.value)}
+                  placeholder="Supplier / Company Name"
+                  required
+                />
+              </Field>
+
+              <Field label="Vendor Contact Phone">
+                <Input
+                  value={vendorPhone}
+                  onChange={(e) => setVendorPhone(e.target.value)}
+                  placeholder="Contact phone number"
+                />
+              </Field>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <Field label="PO Date *">
+                <Input type="date" value={poDate} onChange={(e) => setPoDate(e.target.value)} required />
+              </Field>
+
+              <Field label="Expected Delivery Date">
+                <div className="flex items-center gap-1">
+                  <Input
+                    type="date"
+                    value={expectedDate}
+                    onChange={(e) => setExpectedDate(e.target.value)}
+                    className="flex-1"
+                  />
+                  {[
+                    { label: '7d', days: 7 },
+                    { label: '15d', days: 15 },
+                    { label: '30d', days: 30 }
+                  ].map((p) => (
+                    <button
+                      key={p.label}
+                      type="button"
+                      onClick={() => setExpectedDate(addDaysISO(poDate, p.days))}
+                      className="rounded-lg border border-[color:var(--border)] px-1.5 py-1 text-[10px] font-bold text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-subtle)]"
+                    >
+                      +{p.label}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+
+              <Field label="Supplier Quote / Reference No.">
+                <Input
+                  value={supplierRef}
+                  onChange={(e) => setSupplierRef(e.target.value)}
+                  placeholder="e.g. QT-9901"
+                />
+              </Field>
+            </div>
+
+            {(vendorGstin || vendorAddress) && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1 border-t border-[color:var(--border-subtle)] text-xs text-[color:var(--text-secondary)]">
+                {vendorGstin && <div><strong>GSTIN:</strong> <span className="font-mono">{vendorGstin}</span></div>}
+                {vendorAddress && <div><strong>Address:</strong> {vendorAddress}</div>}
+              </div>
+            )}
+          </div>
+
+          {/* Line Items Table */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-extrabold uppercase tracking-wider text-[color:var(--text-secondary)]">
+                Order Line Items ({lines.length})
+              </span>
+              <Button size="xs" variant="outline" icon={Plus} onClick={addLine}>
+                Add Blank Row
+              </Button>
+            </div>
+
+            <div className="overflow-x-auto rounded-2xl border border-[color:var(--border)]">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead>
+                  <tr className="border-b border-[color:var(--border)] bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-secondary)] text-[10.5px] uppercase tracking-wider">
+                    <th className="py-2.5 px-3 w-8 text-center">#</th>
+                    <th className="py-2.5 px-3 min-w-[200px]">Product / Item Description</th>
+                    <th className="py-2.5 px-3 w-20">HSN/SAC</th>
+                    <th className="py-2.5 px-3 w-24 text-right">Order Qty</th>
+                    <th className="py-2.5 px-3 w-24">Unit</th>
+                    <th className="py-2.5 px-3 w-24 text-right">Pur. Rate (₹)</th>
+                    <th className="py-2.5 px-3 w-24 text-right text-indigo-600 dark:text-indigo-400">Sell Price (₹)</th>
+                    <th className="py-2.5 px-3 w-20 text-right">GST %</th>
+                    <th className="py-2.5 px-3 w-28 text-right">Total (₹)</th>
+                    <th className="py-2.5 px-3 w-10 text-center"></th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                  {lines.map((line, idx) => {
+                    const product = products.find((pr) => pr.id === line.productId);
+                    const unitOptions = product ? getProductUnitOptions(product) : [];
+
+                    return (
+                      <tr key={idx} className="hover:bg-[color:var(--bg-subtle)]/50">
+                        <td className="py-2 px-3 text-center text-slate-400 font-mono text-[11px]">{idx + 1}</td>
+
+                        <td className="py-2.5 px-3 min-w-[200px]">
+                          <ProductItemCell
+                            row={line}
+                            index={idx}
+                            onOpenPicker={(i) => setActivePickerIndex(i)}
+                            onUpdateName={(i, name) => handleLineChange(i, 'name', name)}
+                          />
+                        </td>
+
+                        <td className="py-2 px-3">
+                          <Input
+                            value={line.hsn}
+                            onChange={(e) => handleLineChange(idx, 'hsn', e.target.value)}
+                            placeholder="HSN"
+                            className="text-xs font-mono"
+                          />
+                        </td>
+
+                        <td className="py-2 px-3">
+                          <Input
+                            type="number"
+                            step="any"
+                            min="0.01"
+                            value={line.qty}
+                            onChange={(e) => handleLineChange(idx, 'qty', e.target.value)}
+                            className="text-right text-xs font-mono font-bold"
+                          />
+                        </td>
+
+                        <td className="py-2 px-3">
+                          {unitOptions.length > 1 ? (
+                            <Select
+                              value={line.unit}
+                              onChange={(e) => switchLineUnit(idx, line, e.target.value)}
+                              className="text-xs"
+                            >
+                              {unitOptions.map((o) => (
+                                <option key={o.unit} value={o.unit}>
+                                  {o.unit}
+                                </option>
+                              ))}
+                            </Select>
+                          ) : (
+                            <Input
+                              value={line.unit}
+                              onChange={(e) => handleLineChange(idx, 'unit', e.target.value)}
+                              className="text-xs"
+                            />
+                          )}
+                        </td>
+
+                        <td className="py-2 px-3">
+                          <Input
+                            type="number"
+                            step="any"
+                            value={line.rate}
+                            onChange={(e) => handleLineChange(idx, 'rate', e.target.value)}
+                            placeholder="0.00"
+                            className="text-right text-xs font-mono font-bold"
+                          />
+                        </td>
+
+                        <td className="py-2 px-3">
+                          <Input
+                            type="number"
+                            step="any"
+                            value={line.sellPrice}
+                            onChange={(e) => handleLineChange(idx, 'sellPrice', e.target.value)}
+                            placeholder="Sell ₹"
+                            className="text-right text-xs font-mono"
+                          />
+                        </td>
+
+                        <td className="py-2 px-3">
+                          <Input
+                            type="number"
+                            step="any"
+                            value={line.taxRate}
+                            onChange={(e) => handleLineChange(idx, 'taxRate', e.target.value)}
+                            className="text-right text-xs font-mono"
+                          />
+                        </td>
+
+                        <td className="py-2 px-3 text-right font-mono font-bold text-xs text-[color:var(--text-primary)]">
+                          {money(line.total)}
+                        </td>
+
+                        <td className="py-2 px-3 text-center">
+                          <button
+                            type="button"
+                            onClick={() => removeLine(idx)}
+                            disabled={lines.length === 1}
+                            className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/60 transition-colors disabled:opacity-30"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Bottom Summary & Notes */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+            <Field label="Purchase Order Notes / Instructions to Vendor">
+              <Textarea
+                rows={3}
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="Delivery instructions, freight terms, warehouse gate directions…"
+              />
+            </Field>
+
+            <div className="p-4 rounded-2xl bg-[color:var(--bg-subtle)] border border-[color:var(--border)] space-y-2 flex flex-col justify-between">
+              <div className="space-y-1.5 text-xs">
+                <div className="flex justify-between py-1 border-b border-[color:var(--border)] text-[color:var(--text-secondary)]">
+                  <span>Subtotal (Taxable Value):</span>
+                  <span className="font-mono font-semibold text-[color:var(--text-primary)]">{money(totals.subtotal)}</span>
+                </div>
+                {totals.tax > 0 && (
+                  <div className="flex justify-between py-1 border-b border-[color:var(--border)] text-[color:var(--text-secondary)] font-medium">
+                    <span>Estimated GST:</span>
+                    <span className="font-mono font-bold text-[color:var(--text-primary)]">{money(totals.tax)}</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-between py-2 border-t-2 border-[color:var(--border-strong)] mt-2">
+                <div>
+                  <div className="text-[10.5px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Order Estimated Total</div>
+                  <div className="text-[13px] font-bold text-[color:var(--text-primary)]">PO Grand Total</div>
+                </div>
+                <div className="text-xl font-extrabold text-indigo-600 dark:text-indigo-400 font-mono">
+                  {money(totals.grandTotal)}
+                </div>
+              </div>
+            </div>
+          </div>
+        </form>
+      </Modal>
+
+      <PurchaseProductPickerModal
+        open={activePickerIndex !== null}
+        onClose={() => setActivePickerIndex(null)}
+        products={products}
+        onSelectProduct={(p) => {
+          if (activePickerIndex !== null) handleProductSelect(activePickerIndex, p);
+        }}
+        onAddNew={() => {
+          const idx = activePickerIndex;
+          setActivePickerIndex(null);
+          setNewProductLineIndex(idx !== null ? idx : lines.length - 1);
+        }}
+      />
+
+      <ProductFormModal
+        open={newProductLineIndex !== null}
+        editing={null}
+        categories={categories}
+        units={units}
+        warehouses={warehouses}
+        products={products}
+        batchTrackingEnabled={batchTrackingEnabled}
+        storeNearExpiryDays={storeNearExpiryDays}
+        hideBatches={true}
+        showToast={showToast}
+        onClose={() => setNewProductLineIndex(null)}
+        onSaved={(createdProduct) => {
+          onProductCreated?.(createdProduct);
+          if (newProductLineIndex !== null && createdProduct) {
+            handleProductSelect(newProductLineIndex, createdProduct);
+          }
+          setNewProductLineIndex(null);
+        }}
+      />
+    </>
+  );
+}
+
+function PODetailModal({ po, onClose, onCancel, onReceive, onDownload }) {
+  const canReceive = Boolean(po) && (po.status === 'ISSUED' || po.status === 'PARTIALLY_RECEIVED');
+  const canCancel = canReceive && !(po?.items || []).some((l) => Number(l.receivedQty) > 0);
+
+  return (
     <Modal
-      open={open}
+      open={Boolean(po)}
       onClose={onClose}
-      title="New Purchase Invoice"
-      subtitle="Receives stock and books Inventory + GST Input against the vendor."
-      icon={Plus}
+      title={po ? `Purchase Order ${po.poNumber}` : ''}
+      subtitle={po ? `${po.vendorName} · ${fmtDate(po.date)}` : ''}
+      icon={FileText}
       size="xl"
+      footer={
+        <>
+          {po && onDownload && (
+            <Button variant="outline" icon={Download} onClick={() => onDownload(po)}>
+              Download / Export
+            </Button>
+          )}
+          {canCancel && (
+            <Button variant="danger" icon={Ban} onClick={() => onCancel(po)}>
+              Cancel PO
+            </Button>
+          )}
+          {canReceive && (
+            <Button variant="primary" onClick={() => onReceive(po)}>
+              Receive Items
+            </Button>
+          )}
+          <Button onClick={onClose}>Close</Button>
+        </>
+      }
+    >
+      {po && (
+        <div className="space-y-3">
+          <div className="grid grid-cols-3 gap-3">
+            <Summary label="Status" value={<POStatusBadge po={po} />} />
+            <Summary label="Expected delivery" value={po.expectedDate ? fmtDate(po.expectedDate) : '—'} />
+            <Summary label="Created by" value={po.createdBy || '—'} />
+          </div>
+
+          <DataTable
+            maxHeight="40vh"
+            dense
+            columns={[
+              { key: 'name', label: 'Product', render: (i) => i.productName },
+              { key: 'ordered', label: 'Ordered', align: 'right', width: 90, render: (i) => i.orderedQty },
+              {
+                key: 'received',
+                label: 'Received',
+                align: 'right',
+                width: 90,
+                render: (i) => (
+                  <span className={Number(i.receivedQty) >= Number(i.orderedQty) ? 'text-emerald-600 dark:text-emerald-400 font-bold' : ''}>
+                    {i.receivedQty || 0}
+                  </span>
+                )
+              },
+              { key: 'rate', label: 'Rate', align: 'right', width: 100, render: (i) => <Money value={i.rate} /> },
+              {
+                key: 'amount',
+                label: 'Amount',
+                align: 'right',
+                width: 120,
+                render: (i) => <Money value={i.orderedQty * i.rate * (1 + (i.taxRate || 0) / 100)} className="font-bold" />
+              }
+            ]}
+            rows={po.items || []}
+            rowKey={(i, idx) => `${i.productId}_${idx}`}
+            empty={<EmptyState title="No line items" />}
+          />
+
+          <div className="flex justify-end gap-6 rounded-xl px-4 py-2.5" style={{ background: 'var(--bg-subtle)' }}>
+            <Summary label="Taxable Value" value={money(po.subtotal)} />
+            <Summary label="GST" value={money(po.tax)} />
+            <Summary label="Grand Total" value={money(po.totalAmount)} bold />
+          </div>
+
+          {po.notes && (
+            <div className="text-[12px] text-[color:var(--text-secondary)]">
+              <span className="label-eyebrow mr-1.5">Notes</span>
+              {po.notes}
+            </div>
+          )}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Vendor Credits (Purchase Returns)
+ * ------------------------------------------------------------------ */
+
+const RETURN_REASONS = ['Damaged', 'Wrong Item', 'Expired', 'Quality Issue', 'Price Adjustment', 'Other'];
+
+function PurchaseReturnModal({ purchase, vendorCredits = [], showToast, onClose, onSaved }) {
+  const [qtys, setQtys] = useState({});
+  const [reason, setReason] = useState('Damaged');
+  const [customReason, setCustomReason] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (purchase) {
+      setQtys({});
+      setReason('Damaged');
+      setCustomReason('');
+    }
+  }, [purchase]);
+
+  const alreadyCredited = (productId, batchId) =>
+    vendorCredits
+      .filter((vc) => vc.status !== 'VOID')
+      .reduce(
+        (sum, vc) =>
+          sum +
+          (vc.items || [])
+            .filter((it) => it.productId === productId && (it.batchId || null) === (batchId || null))
+            .reduce((s, it) => s + Number(it.qty || 0), 0),
+        0
+      );
+
+  const lines = (purchase?.items || [])
+    .map((line, idx) => {
+      const key = `${line.productId}_${line.batchId || ''}_${idx}`;
+      const credited = alreadyCredited(line.productId, line.batchId);
+      const max = r2Local(Number(line.qty) - credited);
+      return { ...line, key, credited, max };
+    })
+    .filter((l) => l.max > 0.009);
+
+  const setQty = (key, v) => setQtys((q) => ({ ...q, [key]: v }));
+
+  const selected = lines.filter((l) => Number(qtys[l.key]) > 0);
+  const canSubmit = selected.length > 0 && selected.every((l) => Number(qtys[l.key]) <= l.max + 0.009);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (saving || !canSubmit || !purchase) return;
+    setSaving(true);
+    try {
+      const res = await api.post(`/purchases/${purchase.id}/return`, {
+        items: selected.map((l) => ({ productId: l.productId, batchId: l.batchId || undefined, qty: Number(qtys[l.key]) })),
+        reason: reason === 'Other' ? customReason || 'Other' : reason
+      });
+      showToast(res.message);
+      onSaved();
+    } catch (err) {
+      showToast(api.message(err, 'Could not record the return.'), 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={Boolean(purchase)}
+      onClose={onClose}
+      title="Return Items to Vendor"
+      subtitle={purchase ? `Against invoice ${purchase.invoiceNo} · ${purchase.vendorName}` : ''}
+      icon={Undo2}
+      size="lg"
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
           <Button variant="primary" onClick={submit} loading={saving} disabled={!canSubmit}>
-            Save Purchase
+            Record Return
           </Button>
         </>
       }
     >
-      <form onSubmit={submit} className="space-y-4">
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <Field label="Vendor" required className="lg:col-span-2">
-            <Select value={form.vendorId} onChange={(e) => setForm({ ...form, vendorId: e.target.value })}>
-              <option value="">— Select vendor —</option>
-              {vendors.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.name} — Payable {money(v.outstandingPayable)}
-                </option>
-              ))}
-            </Select>
-          </Field>
-
-          <Field label="Invoice no.">
-            <Input value={form.invoiceNo} onChange={(e) => setForm({ ...form, invoiceNo: e.target.value })} placeholder="Vendor's invoice no." />
-          </Field>
-
-          <Field label="Invoice date">
-            <Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} />
-          </Field>
-
-          <Field label="Payment status">
-            <Select value={form.paymentStatus} onChange={(e) => setForm({ ...form, paymentStatus: e.target.value })}>
-              <option value="UNPAID">Unpaid</option>
-              <option value="PAID">Paid</option>
-            </Select>
-          </Field>
-
-          <Field label="Payment mode" hint={form.paymentStatus !== 'PAID' ? 'Only used when marked Paid' : undefined}>
-            <Select
-              value={form.paymentMode}
-              disabled={form.paymentStatus !== 'PAID'}
-              onChange={(e) => setForm({ ...form, paymentMode: e.target.value })}
-            >
-              {PAYMENT_MODES.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </Select>
-          </Field>
-
-          <Field label="Paid from" required={form.paymentStatus === 'PAID'} hint={form.paymentStatus !== 'PAID' ? 'Only used when marked Paid' : undefined}>
-            <Select
-              value={form.settlementAccountId}
-              disabled={form.paymentStatus !== 'PAID'}
-              onChange={(e) => setForm({ ...form, settlementAccountId: e.target.value })}
-            >
-              <option value="">— Select account —</option>
-              {accounts.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.code} · {a.name}
-                </option>
-              ))}
-            </Select>
-          </Field>
-        </div>
-
-        <div>
-          <div className="mb-1.5 flex items-center justify-between">
-            <span className="label-eyebrow">Line items</span>
-            <Button type="button" size="sm" icon={Plus} onClick={addLine}>
-              Add line
-            </Button>
-          </div>
-
-          <div className="surface overflow-hidden rounded-2xl">
-            <table className="ledger-table w-full border-collapse">
-              <thead>
-                <tr>
-                  <th style={{ textAlign: 'left' }}>Product</th>
-                  <th style={{ width: 80, textAlign: 'right' }}>Qty</th>
-                  <th style={{ width: 100, textAlign: 'right' }}>Rate</th>
-                  <th style={{ width: 80, textAlign: 'right' }}>Tax %</th>
-                  <th style={{ width: 120, textAlign: 'right' }}>Amount</th>
-                  <th style={{ width: 40 }} />
-                </tr>
-              </thead>
-              <tbody>
-                {lines.map((line, idx) => (
-                  <tr key={idx}>
-                    <td>
-                      {line.isNew ? (
-                        <div className="flex items-center gap-1.5">
-                          <div className="flex-1 space-y-1">
-                            <Input
-                              autoFocus
-                              value={line.name}
-                              onChange={(e) => setLine(idx, { name: e.target.value })}
-                              placeholder="New product name"
-                            />
-                            <div className="flex items-center gap-1.5">
-                              <Input
-                                value={line.unit}
-                                onChange={(e) => setLine(idx, { unit: e.target.value })}
-                                placeholder="Unit (pcs)"
-                                className="w-20 text-xs"
-                              />
-                              <Input
-                                value={line.hsn}
-                                onChange={(e) => setLine(idx, { hsn: e.target.value })}
-                                placeholder="HSN (optional)"
-                                className="w-28 text-xs"
-                              />
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => backToCatalog(idx)}
-                            title="Pick from catalogue instead"
-                            className="rounded-lg p-1.5 text-[color:var(--text-muted)] transition-colors hover:bg-[color:var(--bg-subtle)]"
-                          >
-                            <X className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => setActivePickerIndex(idx)}
-                          className="field-input flex items-center justify-between gap-2 w-full text-left text-xs min-h-[36px]"
-                        >
-                          <span className="truncate">
-                            {line.name || <span className="text-[color:var(--text-muted)]">— Select product —</span>}
-                          </span>
-                          <Search className="h-3.5 w-3.5 shrink-0 text-[color:var(--text-muted)]" />
-                        </button>
-                      )}
-                    </td>
-                    <td>
-                      <Input
-                        type="number"
-                        min="0"
-                        step="1"
-                        value={line.qty}
-                        onChange={(e) => setLine(idx, { qty: e.target.value })}
-                        className="text-right"
-                      />
-                    </td>
-                    <td>
-                      <Input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={line.rate}
-                        onChange={(e) => setLine(idx, { rate: e.target.value })}
-                        className="text-right"
-                      />
-                    </td>
-                    <td>
-                      <Input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={line.taxRate}
-                        onChange={(e) => setLine(idx, { taxRate: e.target.value })}
-                        className="text-right"
-                      />
-                    </td>
-                    <td className="tabular text-right font-bold text-[color:var(--text-primary)]">{money(lineAmount(line))}</td>
-                    <td className="text-right">
-                      <button
-                        type="button"
-                        onClick={() => removeLine(idx)}
-                        disabled={lines.length === 1}
-                        className="rounded-lg p-1.5 text-[color:var(--text-muted)] transition-colors hover:bg-[color:var(--bg-subtle)] disabled:opacity-30"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </td>
+      {purchase && (
+        <form onSubmit={submit} className="space-y-4">
+          {lines.length === 0 ? (
+            <EmptyState icon={Undo2} title="Nothing left to return" hint="Every item on this invoice has already been fully returned." />
+          ) : (
+            <div className="surface overflow-hidden rounded-2xl">
+              <table className="ledger-table w-full border-collapse">
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: 'left' }}>Product</th>
+                    <th style={{ width: 90, textAlign: 'right' }}>Purchased</th>
+                    <th style={{ width: 90, textAlign: 'right' }}>Returnable</th>
+                    <th style={{ width: 120, textAlign: 'right' }}>Return Qty</th>
                   </tr>
+                </thead>
+                <tbody>
+                  {lines.map((l) => (
+                    <tr key={l.key}>
+                      <td>
+                        <div className="text-xs font-semibold">{l.name}</div>
+                        {l.batchNo && <div className="text-[10px] text-[color:var(--text-muted)]">Batch {l.batchNo}</div>}
+                      </td>
+                      <td className="tabular text-right">
+                        {l.qty} {l.unit}
+                      </td>
+                      <td className="tabular text-right font-bold">
+                        {l.max} {l.unit}
+                      </td>
+                      <td>
+                        <Input
+                          type="number"
+                          min="0"
+                          max={l.max}
+                          step="any"
+                          value={qtys[l.key] || ''}
+                          onChange={(e) => setQty(l.key, e.target.value)}
+                          className="text-right"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Reason">
+              <Select value={reason} onChange={(e) => setReason(e.target.value)}>
+                {RETURN_REASONS.map((r) => (
+                  <option key={r} value={r}>
+                    {r}
+                  </option>
                 ))}
-              </tbody>
-            </table>
+              </Select>
+            </Field>
+            {reason === 'Other' && (
+              <Field label="Specify reason">
+                <Input value={customReason} onChange={(e) => setCustomReason(e.target.value)} />
+              </Field>
+            )}
+          </div>
+        </form>
+      )}
+    </Modal>
+  );
+}
+
+function VendorCreditDetailModal({ vendorCredit, onClose, onVoid }) {
+  const isVoid = vendorCredit?.status === 'VOID';
+  return (
+    <Modal
+      open={Boolean(vendorCredit)}
+      onClose={onClose}
+      title={vendorCredit ? `Return — ${vendorCredit.vendorName}` : ''}
+      subtitle={vendorCredit ? `Against invoice ${vendorCredit.purchaseInvoiceNo} · ${fmtDate(vendorCredit.date)}` : ''}
+      icon={Undo2}
+      size="lg"
+      footer={
+        <>
+          {vendorCredit && !isVoid && (
+            <Button variant="danger" onClick={() => onVoid(vendorCredit)}>
+              Void Return
+            </Button>
+          )}
+          <Button onClick={onClose}>Close</Button>
+        </>
+      }
+    >
+      {vendorCredit && (
+        <div className="space-y-3">
+          {isVoid && (
+            <div className="rounded-xl px-3 py-2 text-[11.5px] font-semibold text-rose-600 dark:text-rose-400" style={{ background: 'var(--bg-subtle)' }}>
+              This return was voided{vendorCredit.voidedBy ? ` by ${vendorCredit.voidedBy}` : ''}{vendorCredit.voidedAt ? ` on ${fmtDate(vendorCredit.voidedAt)}` : ''}. Stock was restored.
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-3">
+            <Summary label="Reason" value={vendorCredit.reason} />
+            <Summary label="Voucher" value={vendorCredit.voucherNo || '—'} />
+          </div>
+          <DataTable
+            maxHeight="40vh"
+            dense
+            columns={[
+              { key: 'name', label: 'Product', render: (i) => i.productName },
+              { key: 'batch', label: 'Batch', width: 100, render: (i) => i.batchNo || '—' },
+              { key: 'qty', label: 'Qty', align: 'right', width: 90, render: (i) => `${i.qty} ${i.unit || ''}` },
+              { key: 'rate', label: 'Rate', align: 'right', width: 100, render: (i) => <Money value={i.rate} /> },
+              { key: 'amount', label: 'Amount', align: 'right', width: 120, render: (i) => <Money value={i.lineTotal} className="font-bold" /> }
+            ]}
+            rows={vendorCredit.items || []}
+            rowKey={(i, idx) => `${i.productId}_${idx}`}
+            empty={<EmptyState title="No line items" />}
+          />
+          <div className="flex justify-end gap-6 rounded-xl px-4 py-2.5" style={{ background: 'var(--bg-subtle)' }}>
+            <Summary label="Taxable Value" value={money(vendorCredit.subtotal)} />
+            <Summary label="GST" value={money(vendorCredit.tax)} />
+            <Summary label="Total Credited" value={money(vendorCredit.totalAmount)} bold />
           </div>
         </div>
-
-        <div className="flex justify-end gap-6 rounded-xl px-4 py-2.5" style={{ background: 'var(--bg-subtle)' }}>
-          <Summary label="Taxable Value" value={money(subtotal)} />
-          <Summary label="GST" value={money(tax)} />
-          <Summary label="Grand Total" value={money(grandTotal)} bold />
-        </div>
-
-        <Field label="Notes">
-          <Textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Optional narration" />
-        </Field>
-      </form>
+      )}
     </Modal>
-
-    <PurchaseProductPickerModal
-      open={activePickerIndex !== null}
-      onClose={() => setActivePickerIndex(null)}
-      products={products}
-      onSelectProduct={(p) => {
-        if (activePickerIndex !== null) pickProduct(activePickerIndex, p.id);
-      }}
-      onAddNew={() => {
-        if (activePickerIndex !== null) pickProduct(activePickerIndex, '__new__');
-      }}
-    />
-    </>
   );
 }

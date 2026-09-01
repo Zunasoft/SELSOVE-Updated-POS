@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Search, ChevronDown, Inbox, Loader2, Printer, Download, Check } from 'lucide-react';
+import { X, Search, ChevronDown, Inbox, Loader2, Printer, Download, Check, Maximize2, Minimize2 } from 'lucide-react';
 import { money } from './api';
 
 const cx = (...parts) => parts.filter(Boolean).join(' ');
@@ -117,17 +118,54 @@ Textarea.displayName = 'Textarea';
 export function Select({ className = '', children, value, onChange, ...rest }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
-  const containerRef = useRef(null);
+  const [coords, setCoords] = useState(null);
+  const triggerRef = useRef(null);
+  const panelRef = useRef(null);
+
+  // Position the dropdown against the trigger's actual on-screen location and
+  // portal it to <body> — otherwise a modal's `overflow-y-auto` body clips
+  // any option list that would extend past its scrollable bounds.
+  const computeCoords = () => {
+    const el = triggerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const estimatedPanelHeight = 280;
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const openUp = spaceBelow < estimatedPanelHeight && rect.top > spaceBelow;
+    setCoords({
+      left: rect.left,
+      width: rect.width,
+      top: openUp ? null : rect.bottom + 4,
+      bottom: openUp ? window.innerHeight - rect.top + 4 : null
+    });
+  };
 
   useEffect(() => {
-    const handler = (e) => {
-      if (containerRef.current && !containerRef.current.contains(e.target)) {
-        setOpen(false);
-      }
+    if (!open) return undefined;
+    computeCoords();
+
+    const closeIfOutside = (e) => {
+      const insideTrigger = triggerRef.current && triggerRef.current.contains(e.target);
+      const insidePanel = panelRef.current && panelRef.current.contains(e.target);
+      if (!insideTrigger && !insidePanel) setOpen(false);
     };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
+    // Scroll doesn't bubble, so this must be a capturing listener to catch it
+    // from any scrollable ancestor (e.g. a modal body). Scrolling inside the
+    // dropdown's own option list is exempt so it doesn't close mid-search.
+    const closeOnOutsideScroll = (e) => {
+      if (panelRef.current && panelRef.current.contains(e.target)) return;
+      setOpen(false);
+    };
+
+    document.addEventListener('mousedown', closeIfOutside);
+    document.addEventListener('scroll', closeOnOutsideScroll, true);
+    window.addEventListener('resize', closeOnOutsideScroll);
+    return () => {
+      document.removeEventListener('mousedown', closeIfOutside);
+      document.removeEventListener('scroll', closeOnOutsideScroll, true);
+      window.removeEventListener('resize', closeOnOutsideScroll);
+    };
+  }, [open]);
 
   // Parse children options
   const options = [];
@@ -159,22 +197,32 @@ export function Select({ className = '', children, value, onChange, ...rest }) {
   };
 
   return (
-    <div className={cx('relative', className)} ref={containerRef}>
-      <div 
+    <div className={cx('relative', className)}>
+      <div
+        ref={triggerRef}
         className={cx('field-input pr-8 cursor-pointer flex items-center min-h-[36px]', rest.disabled && 'opacity-50 cursor-not-allowed')}
-        onClick={() => !rest.disabled && setOpen(!open)}
+        onClick={() => !rest.disabled && setOpen((o) => !o)}
       >
         <span className="truncate">{selectedLabel}</span>
       </div>
       <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[color:var(--text-muted)]" />
-      
-      {open && (
-        <div className="absolute z-50 mt-1 w-full rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] shadow-xl overflow-hidden">
+
+      {open && coords && createPortal(
+        <div
+          ref={panelRef}
+          className="fixed z-[9999] rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] shadow-xl overflow-hidden"
+          style={{
+            left: coords.left,
+            width: coords.width,
+            top: coords.top !== null ? coords.top : undefined,
+            bottom: coords.bottom !== null ? coords.bottom : undefined
+          }}
+        >
           <div className="p-2 border-b border-[color:var(--border-subtle)]">
-            <input 
-              type="text" 
-              className="w-full text-xs p-1.5 rounded-lg border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] text-[color:var(--text-primary)] placeholder-[color:var(--text-muted)] focus:outline-none focus:border-indigo-500" 
-              placeholder="Search..." 
+            <input
+              type="text"
+              className="w-full text-xs p-1.5 rounded-lg border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] text-[color:var(--text-primary)] placeholder-[color:var(--text-muted)] focus:outline-none focus:border-indigo-500"
+              placeholder="Search..."
               value={search}
               onChange={e => setSearch(e.target.value)}
               onClick={e => e.stopPropagation()}
@@ -186,7 +234,7 @@ export function Select({ className = '', children, value, onChange, ...rest }) {
               <div className="p-2 text-center text-xs text-[color:var(--text-muted)]">No results found</div>
             ) : (
               filtered.map((opt, idx) => (
-                <div 
+                <div
                   key={idx}
                   className={cx(
                     'px-2.5 py-2 text-xs rounded-lg cursor-pointer transition-colors',
@@ -202,7 +250,8 @@ export function Select({ className = '', children, value, onChange, ...rest }) {
               ))
             )}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -621,14 +670,35 @@ const MODAL_WIDTH = {
   sm: 'max-w-sm',
   md: 'max-w-md',
   lg: 'max-w-2xl',
-  xl: 'max-w-4xl',
-  '2xl': 'max-w-5xl',
-  full: 'max-w-6xl',
-  fullscreen: 'max-w-[98vw] w-[98vw] max-h-[96vh] h-[96vh] flex flex-col'
+  '70': 'w-[70vw] min-w-[750px] max-w-[95vw]',
+  half: 'w-[70vw] min-w-[750px] max-w-[95vw]',
+  xl: 'w-[70vw] min-w-[750px] max-w-[95vw]',
+  '2xl': 'w-[78vw] min-w-[850px] max-w-[96vw]',
+  full: 'w-[88vw] min-w-[950px] max-w-[98vw]',
+  fullscreen: 'max-w-[99vw] w-[99vw] max-h-[98vh] h-[98vh] flex flex-col'
 };
 
-export function Modal({ open, onClose, title, subtitle, icon: Icon, size = 'md', className = '', footer, children }) {
+export function Modal({
+  open,
+  onClose,
+  title,
+  subtitle,
+  icon: Icon,
+  size = 'md',
+  className = '',
+  footer,
+  allowFullscreen = false,
+  headerActions = null,
+  children
+}) {
   const ref = useRef(null);
+  const [isFullscreen, setIsFullscreen] = useState(size === 'fullscreen');
+
+  useEffect(() => {
+    if (open) {
+      setIsFullscreen(size === 'fullscreen');
+    }
+  }, [open, size]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -637,6 +707,9 @@ export function Modal({ open, onClose, title, subtitle, icon: Icon, size = 'md',
     return () => window.removeEventListener('keydown', onKey);
   }, [open, onClose]);
 
+  const activeSizeClass = isFullscreen ? MODAL_WIDTH.fullscreen : MODAL_WIDTH[size] || MODAL_WIDTH.md;
+  const isExpandable = allowFullscreen || size === 'fullscreen' || size === 'xl' || size === 'full' || size === '2xl';
+
   return (
     <AnimatePresence>
       {open && (
@@ -644,7 +717,7 @@ export function Modal({ open, onClose, title, subtitle, icon: Icon, size = 'md',
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-slate-950/65 p-2 sm:p-4 backdrop-blur-md"
+          className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-slate-950/70 p-1 sm:p-2 backdrop-blur-md"
           onMouseDown={(e) => e.target === ref.current && onClose?.()}
           ref={ref}
         >
@@ -653,26 +726,42 @@ export function Modal({ open, onClose, title, subtitle, icon: Icon, size = 'md',
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.98 }}
             transition={{ duration: 0.16 }}
-            className={cx('surface-raised w-full rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[95vh]', MODAL_WIDTH[size], className)}
+            className={cx('surface-raised w-full rounded-2xl shadow-2xl overflow-hidden flex flex-col', activeSizeClass, isFullscreen ? 'h-[98vh] max-h-[98vh]' : 'max-h-[95vh]', className)}
             style={{ background: 'var(--surface-raised, #ffffff)' }}
           >
             <div
-              className="flex items-start justify-between gap-3 px-5 py-4 shrink-0"
+              className="flex items-start justify-between gap-3 px-5 py-3.5 shrink-0"
               style={{ borderBottom: '1px solid var(--border)' }}
             >
-              <div className="min-w-0">
+              <div className="min-w-0 flex-1">
                 <h3 className="flex items-center gap-2 text-sm font-bold text-[color:var(--text-primary)]">
                   {Icon && <Icon className="h-4 w-4 text-[color:var(--accent)]" />}
                   {title}
                 </h3>
                 {subtitle && <p className="mt-0.5 text-[11px] text-[color:var(--text-secondary)]">{subtitle}</p>}
               </div>
-              <button
-                onClick={onClose}
-                className="rounded-lg p-1 text-[color:var(--text-muted)] transition-colors hover:bg-[color:var(--bg-subtle)]"
-              >
-                <X className="h-4 w-4" />
-              </button>
+
+              <div className="flex items-center gap-1.5 shrink-0">
+                {headerActions}
+                {isExpandable && (
+                  <button
+                    type="button"
+                    onClick={() => setIsFullscreen(!isFullscreen)}
+                    className="rounded-lg p-1.5 text-[color:var(--text-muted)] transition-colors hover:bg-[color:var(--bg-subtle)] hover:text-[color:var(--text-primary)]"
+                    title={isFullscreen ? 'Restore Window Size' : 'Expand Full Screen'}
+                  >
+                    {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="rounded-lg p-1.5 text-[color:var(--text-muted)] transition-colors hover:bg-[color:var(--bg-subtle)] hover:text-rose-600"
+                  title="Close (Esc)"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
             </div>
 
             <div className="px-5 py-4 flex-1 min-h-0 flex flex-col overflow-y-auto">{children}</div>

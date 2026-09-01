@@ -9,11 +9,11 @@ import {
 import api, { money, API_BASE, fmtDateTime } from '../lib/api';
 import {
   Panel, SectionHeader, StatTile, Button, Modal, Field, Input, Select, MultiSelect, Textarea,
-  Badge, Money, Spinner, EmptyState, SearchInput, SegmentedControl, DataTable
+  Badge, Money, Spinner, EmptyState, SearchInput, DataTable
 } from '../lib/ui';
 import { exportReport } from '../lib/exporters';
 import BarcodePrinterModal from './BarcodePrinterModal';
-import { getProductAutoVisual, getProductImageUrl, fetchRealProductPhoto } from './POSTerminal';
+import { getProductAutoVisual, getProductImageUrl, fetchRealProductPhoto, formatUnitBreakdown } from './POSTerminal';
 import { getCategoryTheme, AVAILABLE_CATEGORY_COLORS, getNextAvailableColor } from '../lib/categoryTheme';
 
 const TABS = [
@@ -24,6 +24,7 @@ const TABS = [
   { id: 'warehouses', label: 'Warehouses & Transfers', icon: Building2 },
   { id: 'adjust', label: 'Stock Adjustment', icon: Boxes },
   { id: 'history', label: 'Stock History', icon: History },
+  { id: 'batches', label: 'Batch Tracking', icon: AlertTriangle },
   { id: 'pricesheet', label: 'Price Sheets', icon: IndianRupee },
   { id: 'importexport', label: 'Import / Export', icon: FileSpreadsheet }
 ];
@@ -67,11 +68,13 @@ export default function InventoryManager({ products, categories, onRefresh, show
   const [units, setUnits] = useState([]);
   const [warehouses, setWarehouses] = useState([]);
   const [summary, setSummary] = useState(null);
+  const [posSettings, setPosSettings] = useState({});
 
   const fetchAuxData = () => {
     api.get('/units').then((res) => setUnits(Array.isArray(res) ? res : res?.data || [])).catch(() => {});
     api.get('/warehouses').then((res) => setWarehouses(Array.isArray(res) ? res : res?.data || [])).catch(() => {});
     api.get('/inventory/summary').then((res) => setSummary(res?.data || res)).catch(() => {});
+    api.get('/settings').then((res) => setPosSettings((res?.data || res)?.pos || {})).catch(() => {});
   };
 
   useEffect(() => {
@@ -87,6 +90,11 @@ export default function InventoryManager({ products, categories, onRefresh, show
     onRefresh();
     fetchAuxData();
   };
+
+  const batchAlertCount = useMemo(
+    () => findExpiringBatches(products, posSettings.nearExpiryDays).length,
+    [products, posSettings.nearExpiryDays]
+  );
 
   return (
     <div className="space-y-4">
@@ -113,13 +121,18 @@ export default function InventoryManager({ products, categories, onRefresh, show
             >
               <Icon className="h-3.5 w-3.5" />
               {t.label}
+              {t.id === 'batches' && batchAlertCount > 0 && (
+                <span className={`inline-flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full text-[9px] font-extrabold ${active ? 'bg-white text-indigo-700' : 'bg-red-500 text-white'}`}>
+                  {batchAlertCount}
+                </span>
+              )}
             </button>
           );
         })}
       </div>
 
       {tab === 'dashboard' && (
-        <DashboardTab summary={summary} products={products} setTab={setTab} />
+        <DashboardTab summary={summary} products={products} setTab={setTab} nearExpiryDays={posSettings.nearExpiryDays} />
       )}
 
       {tab === 'products' && (
@@ -130,6 +143,8 @@ export default function InventoryManager({ products, categories, onRefresh, show
           warehouses={warehouses}
           showToast={showToast}
           onRefresh={refreshAll}
+          batchTrackingEnabled={Boolean(posSettings.enableBatchTracking)}
+          storeNearExpiryDays={posSettings.nearExpiryDays}
         />
       )}
 
@@ -150,6 +165,15 @@ export default function InventoryManager({ products, categories, onRefresh, show
       )}
 
       {tab === 'history' && <HistoryTab products={products} />}
+
+      {tab === 'batches' && (
+        <BatchesTab
+          products={products}
+          showToast={showToast}
+          onRefresh={refreshAll}
+          storeNearExpiryDays={posSettings.nearExpiryDays}
+        />
+      )}
 
       {tab === 'pricesheet' && (
         <PricesheetTab products={products} showToast={showToast} onRefresh={refreshAll} />
@@ -233,7 +257,33 @@ export function resolveProductStockInfo(p, allProducts = []) {
   };
 }
 
-function DashboardTab({ summary, products, setTab }) {
+const NEAR_EXPIRY_DAYS = 30;
+
+/**
+ * The near-expiry warning window for a product: its own override if set
+ * (e.g. eggs at 14 days), else the store-wide default, else the hard fallback.
+ */
+function resolveNearExpiryDays(product, storeDefaultDays) {
+  return Number(product?.nearExpiryDays) || Number(storeDefaultDays) || NEAR_EXPIRY_DAYS;
+}
+
+/** Every batch (across all batch-tracked products) expiring within its product's alert window, or already expired. */
+function findExpiringBatches(products, storeDefaultDays = NEAR_EXPIRY_DAYS) {
+  const today = new Date();
+  const rows = [];
+  (products || []).forEach((p) => {
+    if (!p.trackBatches || !Array.isArray(p.batches)) return;
+    const windowDays = resolveNearExpiryDays(p, storeDefaultDays);
+    p.batches.forEach((b) => {
+      if (!b.expiryDate || !(Number(b.qty) > 0)) return;
+      const days = Math.ceil((new Date(b.expiryDate) - today) / 86400000);
+      if (days <= windowDays) rows.push({ product: p, batch: b, days });
+    });
+  });
+  return rows.sort((a, b) => a.days - b.days);
+}
+
+function DashboardTab({ summary, products, setTab, nearExpiryDays }) {
   if (!summary) return <Spinner text="Loading inventory insights..." />;
 
   const evaluated = (products || []).map((p) => ({
@@ -243,6 +293,7 @@ function DashboardTab({ summary, products, setTab }) {
 
   const lowStock = evaluated.filter((e) => !e.stockInfo.isService && e.stockInfo.isLow);
   const outOfStock = evaluated.filter((e) => !e.stockInfo.isService && e.stockInfo.isOut);
+  const expiringBatches = findExpiringBatches(products, Number(nearExpiryDays) || NEAR_EXPIRY_DAYS);
 
   return (
     <div className="space-y-4">
@@ -353,6 +404,33 @@ function DashboardTab({ summary, products, setTab }) {
           </div>
         </Panel>
       </div>
+
+      {expiringBatches.length > 0 && (
+        <Panel
+          title="Near Expiry / Expired Batches"
+          icon={AlertTriangle}
+          action={<Button size="sm" variant="secondary" onClick={() => setTab('products')}>Manage Batches</Button>}
+        >
+          <div className="divide-y divide-[color:var(--border-subtle)] max-h-64 overflow-y-auto">
+            {expiringBatches.slice(0, 15).map(({ product: p, batch: b, days }) => {
+              const expired = days < 0;
+              return (
+                <div key={b.id} className="py-2.5 flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-bold text-[color:var(--text-primary)]">{p.name}</div>
+                    <div className="text-xs text-[color:var(--text-muted)]">
+                      Batch {b.batchNo} — {b.qty} {p.unit} — Expires {String(b.expiryDate).slice(0, 10)}
+                    </div>
+                  </div>
+                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold ${expired ? 'bg-red-500/10 text-red-600' : 'bg-amber-500/10 text-amber-600'}`}>
+                    {expired ? `Expired ${Math.abs(days)}d ago` : days === 0 ? 'Expires today' : `${days}d left`}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </Panel>
+      )}
     </div>
   );
 }
@@ -377,6 +455,55 @@ function getDefaultSubUnit(unitName, units = []) {
   if (['box', 'carton', 'case'].includes(u)) return { name: 'pcs', factor: 12 };
   if (['m', 'meter', 'metre'].includes(u)) return { name: 'cm', factor: 100 };
   return { name: '', factor: '' };
+}
+
+/**
+ * Default bigger pack unit to offer as an Additional Unit alongside the base
+ * unit — e.g. a 25 kg bag of rice. Purely a starting suggestion; the row is
+ * fully editable/removable in the form.
+ */
+function getDefaultBigUnit(unitName) {
+  const u = String(unitName || '').toLowerCase().trim();
+  if (u === 'kg') return { unit: 'bag', factor: 25 };
+  return null;
+}
+
+/**
+ * Writes a real computed Price/MRP into the sub-unit and every Additional
+ * Unit row whose price/mrp is still flagged "auto" (see *Auto fields below),
+ * so the numbers are visibly filled in — not just a placeholder hint — and
+ * stay in sync as the main Price/MRP or a unit's factor changes. A field
+ * stops auto-updating the moment the user types their own value into it
+ * (updateAltUnit / the price inputs flip the *Auto flag to false); clearing
+ * it back to blank re-enables auto-tracking.
+ */
+function recomputeAutoUnitPricing(f) {
+  const price = Number(f.price) || 0;
+  const mrp = Number(f.mrp) || 0;
+  const factorNum = Number(f.customSubUnitFactor) || 0;
+
+  const customSubUnitPrice = f.customSubUnitPriceAuto !== false && factorNum > 0
+    ? (price > 0 ? (price / factorNum).toFixed(4) : '')
+    : f.customSubUnitPrice;
+
+  const customSubUnitMrp = f.customSubUnitMrpAuto !== false && factorNum > 0
+    ? (mrp > 0 ? (mrp / factorNum).toFixed(4) : '')
+    : f.customSubUnitMrp;
+
+  const altUnits = Array.isArray(f.altUnits)
+    ? f.altUnits.map((u) => {
+        const factor = Number(u.factor) || 0;
+        const nextPrice = u.priceAuto !== false && factor > 0
+          ? (price > 0 ? (price * factor).toFixed(2) : '')
+          : u.price;
+        const nextMrp = u.mrpAuto !== false && factor > 0
+          ? (mrp > 0 ? (mrp * factor).toFixed(2) : '')
+          : u.mrp;
+        return nextPrice === u.price && nextMrp === u.mrp ? u : { ...u, price: nextPrice, mrp: nextMrp };
+      })
+    : f.altUnits;
+
+  return { ...f, customSubUnitPrice, customSubUnitMrp, altUnits };
 }
 
 const blankProduct = (categories) => ({
@@ -412,7 +539,14 @@ const blankProduct = (categories) => ({
   customSubUnitName: '',
   customSubUnitFactor: '',
   customSubUnitPrice: '',
-  customSubUnitBarcode: ''
+  customSubUnitPriceAuto: true,
+  customSubUnitMrp: '',
+  customSubUnitMrpAuto: true,
+  customSubUnitBarcode: '',
+  altUnits: [],
+  trackBatches: false,
+  batches: [],
+  nearExpiryDays: ''
 });
 
 /**
@@ -442,90 +576,51 @@ function computeRecipeTotals(ingredients, products) {
   return { rows, unitCost, producible: Math.max(0, Number.isFinite(producible) ? producible : 0) };
 }
 
-function ProductsTab({ products, categories, units, warehouses, showToast, onRefresh }) {
-  const [query, setQuery] = useState('');
-  const [categoryId, setCategoryId] = useState('all');
-  const [typeFilter, setTypeFilter] = useState('all');
-  const [stockFilter, setStockFilter] = useState('ALL');
-  const [statusFilter, setStatusFilter] = useState('all');
-  const [warehouseFilter, setWarehouseFilter] = useState('all');
-
-  const [editing, setEditing] = useState(null);
-  const [showForm, setShowForm] = useState(false);
-  const [labelProduct, setLabelProduct] = useState(null);
+/**
+ * The full product create/edit form, as its own reusable modal — extracted
+ * out of ProductsTab so any screen (not just Inventory > Products) can open
+ * it, e.g. Purchases' "add an item not in the catalogue" flow. Visibility
+ * and which product is being edited are owned by the caller (`open`/
+ * `editing`); everything about the form itself (image upload, units,
+ * batches, recipe/combo builders, save) lives here.
+ */
+export function ProductFormModal({
+  open,
+  editing,
+  categories,
+  units,
+  warehouses,
+  products,
+  batchTrackingEnabled,
+  storeNearExpiryDays,
+  showToast,
+  onClose,
+  onSaved,
+  hideBatches = false
+}) {
+  const [form, setForm] = useState(() => blankProduct(categories));
+  const [saving, setSaving] = useState(false);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [findingPhoto, setFindingPhoto] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [writeOffTarget, setWriteOffTarget] = useState(null);
+  const [writeOffForm, setWriteOffForm] = useState({ qty: '', reason: 'Expired' });
+  const [writingOff, setWritingOff] = useState(false);
 
-  const [form, setForm] = useState(blankProduct(categories));
+  const unitNameList = useMemo(
+    () => (units || []).map((u) => (typeof u === 'object' ? u.name : u)).filter(Boolean),
+    [units]
+  );
 
-  const deferredQuery = useDeferredValue(query);
-
-  const rows = useMemo(() => {
-    const needle = deferredQuery.trim().toLowerCase();
-    return products.filter((p) => {
-      if (categoryId !== 'all') {
-        const belongs = Array.isArray(p.categoryIds) && p.categoryIds.length
-          ? p.categoryIds.includes(categoryId)
-          : p.categoryId === categoryId;
-        if (!belongs) return false;
-      }
-      if (typeFilter !== 'all') {
-        const primaryType = canonicalProductType(p.productType || (Array.isArray(p.productTypes) && p.productTypes.length > 1 ? 'both' : p.productTypes?.[0]));
-        if (typeFilter === 'standard') {
-          if (primaryType !== 'standard' && primaryType !== 'both' && !p.productTypes?.includes('standard')) return false;
-        } else if (typeFilter === 'raw') {
-          if (primaryType !== 'raw' && primaryType !== 'both' && !p.productTypes?.includes('raw')) return false;
-        } else if (primaryType !== typeFilter) {
-          return false;
-        }
-      }
-      if (statusFilter === 'active' && p.isActive === false) return false;
-      if (statusFilter === 'inactive' && p.isActive !== false) return false;
-
-      let displayStock = p.stock;
-      if (warehouseFilter !== 'all') {
-        if (p.warehouses) {
-          displayStock = p.warehouses[warehouseFilter] || 0;
-        } else {
-          if (warehouseFilter === 'wh_main') displayStock = Math.max(0, (p.stock || 0) - 10);
-          else if (warehouseFilter === 'wh_shop') displayStock = Math.min(p.stock || 0, 10);
-          else displayStock = 0;
-        }
-      }
-
-      // If a specific warehouse is selected, optionally hide products that have never been in this warehouse (unless OUT is selected)
-      if (warehouseFilter !== 'all' && stockFilter !== 'OUT' && displayStock <= 0) return false;
-
-      const stockInfo = resolveProductStockInfo(p, products);
-      if (stockFilter === 'LOW' && (stockInfo.isService || !stockInfo.isLow)) return false;
-      if (stockFilter === 'OUT' && (stockInfo.isService || !stockInfo.isOut)) return false;
-
-      if (!needle) return true;
-      return (
-        p.name.toLowerCase().includes(needle) ||
-        (p.regionalName || '').toLowerCase().includes(needle) ||
-        (p.printName || '').toLowerCase().includes(needle) ||
-        (p.barcodes || [p.barcode]).some((b) => String(b).includes(needle))
-      );
-    });
-  }, [products, deferredQuery, categoryId, typeFilter, stockFilter, statusFilter, warehouseFilter]);
-
-  const productsById = useMemo(() => {
-    const map = {};
-    for (const p of products) {
-      map[p.id] = p;
+  // Seeds `form` from the product being edited (or a blank product) every
+  // time the modal opens or the target product changes — mirrors the old
+  // openAdd/openEdit logic, just driven by props instead of local state.
+  useEffect(() => {
+    if (!open) return;
+    if (!editing) {
+      setForm(blankProduct(categories));
+      return;
     }
-    return map;
-  }, [products]);
-
-  const openAdd = () => {
-    setEditing(null);
-    setForm(blankProduct(categories));
-    setShowForm(true);
-  };
-
-  const openEdit = (product) => {
+    const product = editing;
     const def = getDefaultSubUnit(product.unit, units);
     const hasCustom = !!product.customSubUnitName && Number(product.customSubUnitFactor) > 0;
     const enableMinor = product.enableMinorUnit !== undefined ? Boolean(product.enableMinorUnit) : (!!def.name || hasCustom);
@@ -533,12 +628,12 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
     const subName = product.customSubUnitName || def.name || '';
     const subFactor = product.customSubUnitFactor || def.factor || '';
     const subPrice = product.customSubUnitPrice || (subFactor && product.price ? (Number(product.price) / Number(subFactor)).toFixed(4) : '');
+    const subMrp = product.customSubUnitMrp || (subFactor && product.mrp ? (Number(product.mrp) / Number(subFactor)).toFixed(4) : '');
 
     const rawType = product.productType || (Array.isArray(product.productTypes) && product.productTypes.length > 1 ? 'both' : product.productTypes?.[0]) || 'standard';
     const primaryType = canonicalProductType(rawType);
     const resolvedTypes = primaryType === 'both' ? ['standard', 'raw'] : [primaryType];
 
-    setEditing(product);
     setForm({
       ...blankProduct(categories),
       ...product,
@@ -557,7 +652,18 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       customSubUnitName: subName,
       customSubUnitFactor: subFactor,
       customSubUnitPrice: subPrice,
+      customSubUnitPriceAuto: !product.customSubUnitPrice,
+      customSubUnitMrp: subMrp,
+      customSubUnitMrpAuto: !product.customSubUnitMrp,
       customSubUnitBarcode: product.customSubUnitBarcode || '',
+      altUnits: Array.isArray(product.altUnits)
+        ? product.altUnits
+            .filter((u) => u && u.unit && String(u.unit).toLowerCase() !== String(subName).toLowerCase())
+            .map((u) => ({ ...u, priceAuto: !u.price, mrpAuto: !u.mrp }))
+        : [],
+      trackBatches: Boolean(product.trackBatches),
+      batches: Array.isArray(product.batches) ? product.batches.map((b) => ({ ...b })) : [],
+      nearExpiryDays: product.nearExpiryDays ?? '',
       comboItems: Array.isArray(product.comboItems) ? product.comboItems.map((i) => ({ ...i })) : [],
       recipeItems: Array.isArray(product.recipeItems) && product.recipeItems.length > 0
         ? product.recipeItems.map((i) => ({ ...i }))
@@ -568,8 +674,8 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       recipeNotes: product.recipeNotes || product.recipe?.notes || '',
       useCustomPricing: product.useCustomPricing || false
     });
-    setShowForm(true);
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, editing]);
 
   const addIngredient = () => {
     setForm((f) => ({
@@ -615,6 +721,130 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
     }));
   };
 
+  const addAltUnit = () => {
+    setForm((f) => ({
+      ...f,
+      altUnits: [...(f.altUnits || []), { unit: '', factor: '', price: '', mrp: '', barcode: '', priceAuto: true, mrpAuto: true }]
+    }));
+  };
+
+  const updateAltUnit = (index, patch) => {
+    setForm((f) => {
+      const altUnits = [...(f.altUnits || [])];
+      altUnits[index] = { ...altUnits[index], ...patch };
+      return recomputeAutoUnitPricing({ ...f, altUnits });
+    });
+  };
+
+  const removeAltUnit = (index) => {
+    setForm((f) => ({
+      ...f,
+      altUnits: (f.altUnits || []).filter((_, i) => i !== index)
+    }));
+  };
+
+  // Keep every auto-tracked unit price/MRP in sync whenever the main Price or MRP changes.
+  useEffect(() => {
+    setForm((f) => recomputeAutoUnitPricing(f));
+  }, [form.price, form.mrp]);
+
+  const addBatchRow = () => {
+    setForm((f) => {
+      const existing = f.batches || [];
+      let maxNum = 0;
+      existing.forEach((b) => {
+        const num = parseInt(b.batchNo, 10);
+        if (!isNaN(num) && String(num) === String(b.batchNo).trim() && num > maxNum) {
+          maxNum = num;
+        }
+      });
+      const nextBatchNo = maxNum > 0 ? String(maxNum + 1) : String(existing.length + 1);
+      const defaultWh = f.primaryWarehouse || (warehouses || []).find((w) => w.isDefault)?.id || warehouses?.[0]?.id || 'wh_main';
+
+      const newBatches = [
+        ...existing,
+        {
+          id: `new_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+          batchNo: nextBatchNo,
+          mfgDate: '',
+          expiryDate: '',
+          qty: '',
+          costPrice: f.purchasePrice || '',
+          sellPrice: '',
+          warehouseId: defaultWh
+        }
+      ];
+
+      const whMap = {};
+      newBatches.forEach((b) => {
+        const whId = b.warehouseId || defaultWh;
+        whMap[whId] = (whMap[whId] || 0) + (Number(b.qty) || 0);
+      });
+      const stock = newBatches.reduce((sum, b) => sum + (Number(b.qty) || 0), 0);
+
+      return {
+        ...f,
+        batches: newBatches,
+        warehouses: whMap,
+        stock: Math.round(stock * 10000) / 10000
+      };
+    });
+  };
+
+  const updateBatchRow = (index, patch) => {
+    setForm((f) => {
+      const batches = [...(f.batches || [])];
+      batches[index] = { ...batches[index], ...patch };
+      const defaultWh = f.primaryWarehouse || (warehouses || []).find((w) => w.isDefault)?.id || warehouses?.[0]?.id || 'wh_main';
+      const whMap = {};
+      batches.forEach((b) => {
+        const whId = b.warehouseId || defaultWh;
+        whMap[whId] = (whMap[whId] || 0) + (Number(b.qty) || 0);
+      });
+      const stock = batches.reduce((sum, b) => sum + (Number(b.qty) || 0), 0);
+      return { ...f, batches, warehouses: whMap, stock: Math.round(stock * 10000) / 10000 };
+    });
+  };
+
+  const removeBatchRow = (index) => {
+    setForm((f) => {
+      const batches = (f.batches || []).filter((_, i) => i !== index);
+      const defaultWh = f.primaryWarehouse || (warehouses || []).find((w) => w.isDefault)?.id || warehouses?.[0]?.id || 'wh_main';
+      const whMap = {};
+      batches.forEach((b) => {
+        const whId = b.warehouseId || defaultWh;
+        whMap[whId] = (whMap[whId] || 0) + (Number(b.qty) || 0);
+      });
+      const stock = batches.reduce((sum, b) => sum + (Number(b.qty) || 0), 0);
+      return { ...f, batches, warehouses: whMap, stock: Math.round(stock * 10000) / 10000 };
+    });
+  };
+
+  const submitWriteOff = async (e) => {
+    e?.preventDefault();
+    if (!writeOffTarget) return;
+    const qty = Number(writeOffForm.qty);
+    if (!(qty > 0)) {
+      showToast('Enter a quantity to write off.', 'error');
+      return;
+    }
+    setWritingOff(true);
+    try {
+      await api.post('/inventory/batches/writeoff', {
+        productId: writeOffTarget.product.id,
+        batchId: writeOffTarget.batch.id,
+        quantity: qty,
+        reason: writeOffForm.reason
+      });
+      showToast(`Wrote off ${qty} ${writeOffTarget.product.unit} from batch ${writeOffTarget.batch.batchNo}.`);
+      setWriteOffTarget(null);
+      onSaved?.();
+    } catch (err) {
+      showToast(api.message(err, 'Failed to write off batch.'), 'error');
+    } finally {
+      setWritingOff(false);
+    }
+  };
 
   const handleImageUpload = async (e) => {
     const file = e.target.files?.[0];
@@ -674,6 +904,21 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       return;
     }
 
+    if (form.trackBatches) {
+      const seen = new Set();
+      const dupe = (form.batches || []).find((b) => {
+        const key = String(b.batchNo || '').trim().toLowerCase();
+        if (!key) return false;
+        if (seen.has(key)) return true;
+        seen.add(key);
+        return false;
+      });
+      if (dupe) {
+        showToast(`Batch number "${dupe.batchNo}" is used more than once — batch numbers must be unique for this product.`, 'error');
+        return;
+      }
+    }
+
     const isComposite = form.productType === 'composite';
     const isCombo = form.productType === 'combo';
 
@@ -702,6 +947,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       const minorUnit = form.customSubUnitName.trim().toLowerCase();
       const minorFactor = 1 / factorNum; // e.g. 1 g = 0.001 kg
       const minorPrice = form.customSubUnitPrice ? Number(form.customSubUnitPrice) : (Number(form.price) / factorNum);
+      const minorMrp = form.customSubUnitMrp ? Number(form.customSubUnitMrp) : (Number(form.mrp) / factorNum);
       const minorBarcode = form.customSubUnitBarcode ? form.customSubUnitBarcode.trim() : '';
 
       altUnits = altUnits.filter((u) => u.unit !== minorUnit);
@@ -709,6 +955,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
         unit: minorUnit,
         factor: minorFactor,
         price: minorPrice,
+        mrp: minorMrp,
         barcode: minorBarcode
       });
     }
@@ -724,6 +971,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       customSubUnitName: form.enableMinorUnit ? form.customSubUnitName : '',
       customSubUnitFactor: form.enableMinorUnit ? form.customSubUnitFactor : '',
       customSubUnitPrice: form.enableMinorUnit ? form.customSubUnitPrice : '',
+      customSubUnitMrp: form.enableMinorUnit ? form.customSubUnitMrp : '',
       customSubUnitBarcode: form.enableMinorUnit ? form.customSubUnitBarcode : '',
       altUnits,
       comboItems: isCombo ? validComboItems : [],
@@ -734,7 +982,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
     if (isComposite && !form.useCustomPricing) {
       payload.purchasePrice = computeRecipeTotals(form.recipeItems, products).unitCost;
     }
-    
+
     if (isCombo && !form.useCustomPricing) {
       const rows = validComboItems.map(ing => {
         const material = (products || []).find(p => p.id === ing.productId);
@@ -752,13 +1000,1061 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
         : await api.post('/products', payload);
 
       showToast(res.message || 'Product saved.');
-      setShowForm(false);
-      onRefresh();
+      onClose();
+      onSaved?.(res.data);
     } catch (err) {
       showToast(api.message(err, 'Failed to save product.'), 'error');
     } finally {
       setSaving(false);
     }
+  };
+
+  if (!open) return null;
+
+  return (
+    <>
+        <Modal open={open} title={editing ? 'Edit Product' : 'Create New Product'} icon={Package} onClose={onClose} className="!max-w-[clamp(728px,50vw,1100px)]">
+          <form onSubmit={save} className="space-y-4 max-h-[80vh] overflow-y-auto pr-1">
+            {/* Image Upload section */}
+            <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] flex items-center gap-4">
+              <div className="h-16 w-16 rounded-xl border-2 border-dashed border-indigo-300 dark:border-indigo-800 flex items-center justify-center bg-[color:var(--bg-surface)] overflow-hidden relative">
+                {form.imageUrl ? (
+                  <img src={form.imageUrl.startsWith('/') ? `${API_BASE.replace('/api/pos', '')}${form.imageUrl}` : form.imageUrl} alt="Preview" className="h-full w-full object-cover" />
+                ) : (
+                  <ImageIcon className="h-6 w-6 text-indigo-400" />
+                )}
+              </div>
+              <div className="space-y-1.5 flex-1">
+                <label className="text-xs font-bold text-[color:var(--text-primary)] block">Product Image</label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" id="prod-img-upload" />
+                  <label htmlFor="prod-img-upload" className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-700 transition-all shadow-xs">
+                    <Upload className="h-3.5 w-3.5" />
+                    {uploadingImage ? 'Uploading...' : 'Choose Image (Manual)'}
+                  </label>
+
+                  <button
+                    type="button"
+                    onClick={autoFindRealPhoto}
+                    disabled={findingPhoto || (!form.name && !form.barcodes && !form.barcode)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-[color:var(--bg-surface)] text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 transition-all disabled:opacity-50 shadow-2xs"
+                    title="Auto-fetch real product photo online based on product name or barcode"
+                  >
+                    <Search className="h-3.5 w-3.5" />
+                    {findingPhoto ? 'Finding photo...' : '✨ Auto-Find Real Photo'}
+                  </button>
+
+                  {form.imageUrl && (
+                    <button type="button" onClick={() => setForm((p) => ({ ...p, imageUrl: '' }))} className="text-xs text-red-500 hover:underline">
+                      Remove
+                    </button>
+                  )}
+                </div>
+                <div className="text-[10px] text-[color:var(--text-muted)]">
+                  Manually uploaded images take priority. If no image is provided, a real photo is auto-generated.
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Product Name *">
+                <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Organic Himachal Apples" required />
+              </Field>
+
+              <Field label="Regional Name (Tamil/Hindi)">
+                <Input value={form.regionalName} onChange={(e) => setForm({ ...form, regionalName: e.target.value, printName: e.target.value })} placeholder="e.g. ஆப்பிள் / தமிழ் பெயர்" />
+              </Field>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3">
+              <Field label="Categories">
+                <MultiSelect
+                  value={form.categoryIds}
+                  onChange={(e) => setForm({ ...form, categoryIds: e.target.value, categoryId: e.target.value[0] || '' })}
+                  placeholder="Select categories..."
+                >
+                  {categories.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </MultiSelect>
+              </Field>
+
+              <Field label="Product Type">
+                <Select
+                  value={canonicalProductType(form.productType || (Array.isArray(form.productTypes) && form.productTypes.length > 1 ? 'both' : form.productTypes?.[0]) || 'standard')}
+                  onChange={(e) => {
+                    const t = e.target.value;
+                    const types = t === 'both' ? ['standard', 'raw'] : [t];
+                    setForm({ ...form, productType: t, productTypes: types });
+                  }}
+                >
+                  <option value="standard">Standard Item</option>
+                  <option value="raw">Raw Material</option>
+                  <option value="both">Both Raw Material & Standard Product</option>
+                  <option value="service">Service (No stock level)</option>
+                  <option value="combo">Combo Bundle</option>
+                  <option value="composite">Composite (Recipe)</option>
+                </Select>
+              </Field>
+
+              {form.productType !== 'service' && (
+                <Field label="Main Unit of Measurement">
+                  <Select
+                    value={form.unit}
+                    onChange={(e) => {
+                      const newUnit = e.target.value;
+                      const def = getDefaultSubUnit(newUnit, units);
+                      const isStandardSub = !!def.name;
+
+                      // Offer a default bigger pack unit too (e.g. bag for kg) —
+                      // just a starting suggestion, removable from the Additional Units list.
+                      const bigDef = getDefaultBigUnit(newUnit);
+                      let altUnits = Array.isArray(form.altUnits) ? [...form.altUnits] : [];
+                      if (bigDef && !altUnits.some((u) => String(u.unit).toLowerCase() === bigDef.unit)) {
+                        altUnits = [...altUnits, { unit: bigDef.unit, factor: bigDef.factor, price: '', mrp: '', barcode: '', priceAuto: true, mrpAuto: true }];
+                      }
+
+                      setForm(recomputeAutoUnitPricing({
+                        ...form,
+                        unit: newUnit,
+                        enableMinorUnit: isStandardSub ? true : form.enableMinorUnit,
+                        customSubUnitName: isStandardSub ? def.name : form.customSubUnitName,
+                        customSubUnitFactor: isStandardSub ? def.factor : form.customSubUnitFactor,
+                        // Reset to auto-tracking so the values below always follow the current Price/MRP.
+                        customSubUnitPrice: isStandardSub ? '' : form.customSubUnitPrice,
+                        customSubUnitPriceAuto: isStandardSub ? true : form.customSubUnitPriceAuto,
+                        customSubUnitMrp: isStandardSub ? '' : form.customSubUnitMrp,
+                        customSubUnitMrpAuto: isStandardSub ? true : form.customSubUnitMrpAuto,
+                        altUnits
+                      }));
+                    }}
+                  >
+                    {units.map((u) => {
+                      const name = typeof u === 'object' ? u.name : u;
+                      const sub = typeof u === 'object' && u.subUnit ? u.subUnit : null;
+                      const factor = typeof u === 'object' && u.factor ? u.factor : null;
+                      const label = sub && factor
+                        ? `${name} (1 ${name} = ${factor} ${sub})`
+                        : sub
+                        ? `${name} (→ ${sub})`
+                        : name;
+                      return (
+                        <option key={name} value={name}>{label}</option>
+                      );
+                    })}
+                  </Select>
+                </Field>
+              )}
+            </div>
+
+            {/* Other Units — smaller (sub-unit) and bigger (additional) units, on top of the base unit above */}
+            {form.productType !== 'service' && (
+              <div className="p-3.5 rounded-xl border border-indigo-200 dark:border-indigo-800/80 bg-indigo-50/40 dark:bg-indigo-950/30 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Sliders className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                  <h4 className="text-xs font-bold text-[color:var(--text-primary)] uppercase tracking-wider">
+                    Other Units
+                  </h4>
+                </div>
+                <p className="text-[11px] text-[color:var(--text-muted)] -mt-2">
+                  Configure smaller units (e.g. g for kg) and bigger pack units (e.g. bag, box, case) this product can also be billed and stocked in.
+                </p>
+
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-[color:var(--text-secondary)]">Sub-Unit (smaller than the base unit)</span>
+                  <label className="flex items-center gap-2 cursor-pointer text-xs font-bold text-indigo-600 dark:text-indigo-400">
+                    <input
+                      type="checkbox"
+                      checked={form.enableMinorUnit}
+                      onChange={(e) => {
+                        const enabled = e.target.checked;
+                        if (enabled && !form.customSubUnitName) {
+                          const def = getDefaultSubUnit(form.unit, units);
+                          setForm(recomputeAutoUnitPricing({
+                            ...form,
+                            enableMinorUnit: true,
+                            customSubUnitName: def.name || 'pcs',
+                            customSubUnitFactor: def.factor || 1,
+                            customSubUnitPrice: '',
+                            customSubUnitPriceAuto: true,
+                            customSubUnitMrp: '',
+                            customSubUnitMrpAuto: true
+                          }));
+                        } else {
+                          setForm({ ...form, enableMinorUnit: enabled });
+                        }
+                      }}
+                      className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+                    />
+                    Enable Sub-Unit (e.g. g for kg, ml for ltr, pcs for dozen/box)
+                  </label>
+                </div>
+
+                {form.enableMinorUnit && (
+                  <div className="space-y-3 pt-2 border-t border-indigo-200/60 dark:border-indigo-800/60">
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                      <Field label="Minor Unit *" hint="Pick a unit smaller than the base unit">
+                        <Select
+                          value={form.customSubUnitName || ''}
+                          onChange={(e) => setForm({ ...form, customSubUnitName: e.target.value })}
+                        >
+                          <option value="">Select unit…</option>
+                          {unitNameList
+                            .filter((name) => name.toLowerCase() !== String(form.unit).toLowerCase())
+                            .map((name) => (
+                              <option key={name} value={name}>{name}</option>
+                            ))}
+                          {form.customSubUnitName &&
+                            !unitNameList.some((name) => name.toLowerCase() === String(form.customSubUnitName).toLowerCase()) && (
+                              <option value={form.customSubUnitName}>{form.customSubUnitName}</option>
+                            )}
+                        </Select>
+                      </Field>
+
+                      <Field label={`1 ${form.unit || 'unit'} contains (${form.customSubUnitName || 'sub-units'})`}>
+                        <Input
+                          type="number"
+                          step="any"
+                          value={form.customSubUnitFactor || ''}
+                          onChange={(e) => setForm((f) => recomputeAutoUnitPricing({ ...f, customSubUnitFactor: e.target.value }))}
+                          placeholder="e.g. 1000"
+                        />
+                      </Field>
+
+                      <Field label={`Price per 1 ${form.customSubUnitName || 'sub-unit'} (₹)`} hint={form.customSubUnitPriceAuto !== false ? 'Auto-calculated from Price' : 'Manually set'}>
+                        <Input
+                          type="number"
+                          step="any"
+                          value={form.customSubUnitPrice || ''}
+                          onChange={(e) => setForm((f) => recomputeAutoUnitPricing({
+                            ...f,
+                            customSubUnitPrice: e.target.value,
+                            customSubUnitPriceAuto: e.target.value === ''
+                          }))}
+                          placeholder="Auto-calculated"
+                        />
+                      </Field>
+
+                      <Field label={`MRP per 1 ${form.customSubUnitName || 'sub-unit'} (₹)`} hint={form.customSubUnitMrpAuto !== false ? 'Auto-calculated from MRP' : 'Manually set'}>
+                        <Input
+                          type="number"
+                          step="any"
+                          value={form.customSubUnitMrp || ''}
+                          onChange={(e) => setForm((f) => recomputeAutoUnitPricing({
+                            ...f,
+                            customSubUnitMrp: e.target.value,
+                            customSubUnitMrpAuto: e.target.value === ''
+                          }))}
+                          placeholder="Auto-calculated"
+                        />
+                      </Field>
+
+                      <Field label="Minor Unit Barcode">
+                        <Input
+                          value={form.customSubUnitBarcode || ''}
+                          onChange={(e) => setForm({ ...form, customSubUnitBarcode: e.target.value })}
+                          placeholder="Optional sub-unit barcode"
+                        />
+                      </Field>
+                    </div>
+
+                    {form.customSubUnitName && Number(form.customSubUnitFactor) > 0 && (
+                      <div className="p-2.5 rounded-lg bg-indigo-100/70 dark:bg-indigo-900/40 text-[11px] text-indigo-900 dark:text-indigo-200 flex flex-wrap items-center justify-between gap-2 font-medium">
+                        <div>
+                          <strong>1 {form.unit}</strong> = <strong>{form.customSubUnitFactor} {form.customSubUnitName}</strong>
+                          {Number(form.price) > 0 && (
+                            <span className="ml-2">
+                              | Price: <strong>{money(form.price)} / {form.unit}</strong> (<strong>₹{Number(form.customSubUnitPrice || (Number(form.price) / Number(form.customSubUnitFactor))).toFixed(4)} / {form.customSubUnitName}</strong>)
+                            </span>
+                          )}
+                          {Number(form.mrp) > 0 && (
+                            <span className="ml-2">
+                              | MRP: <strong>{money(form.mrp)} / {form.unit}</strong> (<strong>₹{Number(form.customSubUnitMrp || (Number(form.mrp) / Number(form.customSubUnitFactor))).toFixed(4)} / {form.customSubUnitName}</strong>)
+                            </span>
+                          )}
+                        </div>
+                        {Number(form.stock) > 0 && (
+                          <div className="font-bold text-emerald-700 dark:text-emerald-400">
+                            Total Stock: {form.stock} {form.unit} ({Number(form.stock) * Number(form.customSubUnitFactor)} {form.customSubUnitName})
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="pt-2 border-t border-indigo-200/60 dark:border-indigo-800/60 space-y-1">
+                  <span className="text-xs font-bold text-[color:var(--text-secondary)]">Additional Units (bigger packs, e.g. bag, box, case)</span>
+                </div>
+
+                {(form.altUnits || []).length > 0 && (
+                  <div className="hidden md:grid grid-cols-12 gap-2 px-2 text-[10px] font-bold uppercase text-[color:var(--text-muted)]">
+                    <div className="col-span-2">Unit Name</div>
+                    <div className="col-span-3">1 unit = ? {form.unit || 'base unit'}</div>
+                    <div className="col-span-2">Price (₹)</div>
+                    <div className="col-span-2">MRP (₹)</div>
+                    <div className="col-span-2">Barcode</div>
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  {(form.altUnits || []).map((row, idx) => {
+                    const usedElsewhere = new Set(
+                      [
+                        form.unit,
+                        form.enableMinorUnit ? form.customSubUnitName : '',
+                        ...(form.altUnits || []).filter((_, i) => i !== idx).map((u) => u.unit)
+                      ]
+                        .filter(Boolean)
+                        .map((s) => String(s).toLowerCase())
+                    );
+                    const rowUnitOptions = unitNameList.filter((name) => !usedElsewhere.has(name.toLowerCase()));
+                    return (
+                    <div key={idx} className="grid grid-cols-12 gap-2 items-center p-2 rounded-lg border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)]">
+                      <div className="col-span-6 md:col-span-2">
+                        <Select
+                          value={row.unit || ''}
+                          onChange={(e) => updateAltUnit(idx, { unit: e.target.value })}
+                          className="text-xs"
+                        >
+                          <option value="">Select unit…</option>
+                          {rowUnitOptions.map((name) => (
+                            <option key={name} value={name}>{name}</option>
+                          ))}
+                          {row.unit && !unitNameList.some((name) => name.toLowerCase() === String(row.unit).toLowerCase()) && (
+                            <option value={row.unit}>{row.unit}</option>
+                          )}
+                        </Select>
+                      </div>
+                      <div className="col-span-6 md:col-span-3">
+                        <Input
+                          type="number"
+                          step="any"
+                          min="0"
+                          value={row.factor ?? ''}
+                          onChange={(e) => updateAltUnit(idx, { factor: e.target.value })}
+                          placeholder={`e.g. 25 ${form.unit || ''}`}
+                          className="text-xs"
+                        />
+                      </div>
+                      <div className="col-span-4 md:col-span-2">
+                        <Input
+                          type="number"
+                          step="any"
+                          value={row.price ?? ''}
+                          onChange={(e) => updateAltUnit(idx, { price: e.target.value, priceAuto: e.target.value === '' })}
+                          placeholder="Auto"
+                          title={row.priceAuto !== false ? 'Auto-calculated from Price' : 'Manually set'}
+                          className="text-xs"
+                        />
+                      </div>
+                      <div className="col-span-4 md:col-span-2">
+                        <Input
+                          type="number"
+                          step="any"
+                          value={row.mrp ?? ''}
+                          onChange={(e) => updateAltUnit(idx, { mrp: e.target.value, mrpAuto: e.target.value === '' })}
+                          placeholder="Auto"
+                          title={row.mrpAuto !== false ? 'Auto-calculated from MRP' : 'Manually set'}
+                          className="text-xs"
+                        />
+                      </div>
+                      <div className="col-span-4 md:col-span-2">
+                        <Input
+                          value={row.barcode || ''}
+                          onChange={(e) => updateAltUnit(idx, { barcode: e.target.value })}
+                          placeholder="Optional"
+                          className="text-xs"
+                        />
+                      </div>
+                      <div className="col-span-1 text-right">
+                        <button
+                          type="button"
+                          onClick={() => removeAltUnit(idx)}
+                          className="p-1 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)] hover:text-red-600"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                    );
+                  })}
+
+                  <Button type="button" size="sm" variant="secondary" icon={Plus} onClick={addAltUnit}>
+                    Add Unit
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Primary Barcode">
+                <Input value={form.barcode} onChange={(e) => setForm({ ...form, barcode: e.target.value })} placeholder="Leave blank to auto-generate" />
+              </Field>
+
+              <Field label="Multiple Barcodes (Comma Separated)">
+                <Input value={form.barcodes} onChange={(e) => setForm({ ...form, barcodes: e.target.value })} placeholder="e.g. 89012345001, 89012345002" />
+              </Field>
+            </div>
+
+            {form.productType === 'service' ? (
+              <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
+                <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">Service Pricing</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <Field label="Price (₹) *">
+                    <Input type="number" step="0.01" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} required />
+                  </Field>
+                </div>
+              </div>
+            ) : form.productType !== 'combo' && form.productType !== 'composite' ? (
+              <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
+                <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">Multiple Selling Prices</h4>
+                <div className="grid grid-cols-4 gap-3">
+                  <Field label="Purchase Price (₹)" hint={form.productType === 'composite' ? 'Calculated from the recipe' : undefined}>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={
+                        form.productType === 'composite' && !form.useCustomPricing
+                          ? computeRecipeTotals(form.recipeItems, products).unitCost.toFixed(2)
+                          : form.purchasePrice
+                      }
+                      onChange={(e) => setForm({ ...form, purchasePrice: e.target.value })}
+                      disabled={form.productType === 'composite' && !form.useCustomPricing}
+                      className={form.productType === 'composite' && !form.useCustomPricing ? 'opacity-70 cursor-not-allowed' : ''}
+                    />
+                  </Field>
+                  <Field label="Selling Price (₹) *">
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={
+                        form.productType === 'combo' && !form.useCustomPricing
+                          ? (() => {
+                              const rows = (form.comboItems || []).map(ing => {
+                                const material = (products || []).find(p => p.id === ing.productId);
+                                const qty = Number(ing.qty) || 0;
+                                const cost = material ? Number(material.price) || 0 : 0;
+                                return { lineCost: qty * cost };
+                              });
+                              return rows.reduce((sum, r) => sum + r.lineCost, 0).toFixed(2);
+                            })()
+                          : form.price
+                      }
+                      onChange={(e) => setForm({ ...form, price: e.target.value })}
+                      required
+                      disabled={form.productType === 'combo' && !form.useCustomPricing}
+                      className={form.productType === 'combo' && !form.useCustomPricing ? 'opacity-70 cursor-not-allowed' : ''}
+                    />
+                  </Field>
+                  <Field label="MRP (₹)">
+                    <Input type="number" step="0.01" value={form.mrp} onChange={(e) => setForm({ ...form, mrp: e.target.value })} />
+                  </Field>
+                  <Field label="Wholesale Price (₹)">
+                    <Input type="number" step="0.01" value={form.wholesalePrice} onChange={(e) => setForm({ ...form, wholesalePrice: e.target.value })} />
+                  </Field>
+                </div>
+                {(form.productType === 'composite' || form.productType === 'combo') && (
+                  <div className="pt-2">
+                    <label className="flex items-center gap-2 cursor-pointer text-xs font-medium text-[color:var(--text-secondary)]">
+                      <input
+                        type="checkbox"
+                        checked={form.useCustomPricing}
+                        onChange={(e) => setForm({ ...form, useCustomPricing: e.target.checked })}
+                        className="rounded border-[color:var(--border-strong)] text-indigo-600 focus:ring-indigo-500"
+                      />
+                      Enable Custom Pricing Override (Override auto-calculated {form.productType === 'composite' ? 'Purchase Price' : 'Selling Price'})
+                    </label>
+                  </div>
+                )}
+              </div>
+            ) : null}
+
+            {form.productType !== 'service' && form.productType !== 'composite' && form.productType !== 'combo' && (
+              <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
+                <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider flex items-center justify-between">
+                  <span>Warehouse Distribution & Minimum Stock</span>
+                  <span className="bg-indigo-100 text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300 px-2 py-0.5 rounded-full text-[9px]">Total: {form.stock || 0}</span>
+                </h4>
+                <div className="grid grid-cols-3 gap-3">
+                  <Field
+                    label="Select Warehouse"
+                    hint={form.trackBatches ? 'Disabled — select warehouse per batch below' : undefined}
+                  >
+                    <Select
+                      value={form.primaryWarehouse || warehouses[0]?.id || ''}
+                      onChange={(e) => setForm({ ...form, primaryWarehouse: e.target.value })}
+                      disabled={Boolean(form.trackBatches)}
+                      className={form.trackBatches ? 'opacity-60 cursor-not-allowed bg-slate-100 dark:bg-slate-800' : ''}
+                    >
+                      {(warehouses || []).map((w) => (
+                        <option key={w.id} value={w.id}>{w.name}</option>
+                      ))}
+                    </Select>
+                  </Field>
+                  <Field label="Stock in Selected Warehouse" hint={form.trackBatches ? 'Derived from batches below' : undefined}>
+                    <Input
+                      type="number"
+                      step="any"
+                      value={form.trackBatches ? form.stock || 0 : (form.warehouses?.[form.primaryWarehouse || warehouses[0]?.id] ?? '')}
+                      onChange={(e) => {
+                        const whId = form.primaryWarehouse || warehouses[0]?.id;
+                        if (!whId) return;
+                        const newStock = Number(e.target.value) || 0;
+                        const newWarehouses = { ...form.warehouses, [whId]: newStock };
+                        const totalStock = Object.values(newWarehouses).reduce((sum, val) => sum + (Number(val) || 0), 0);
+                        setForm({ ...form, warehouses: newWarehouses, stock: totalStock });
+                      }}
+                      disabled={form.productType === 'combo' || Boolean(form.trackBatches)}
+                      className={form.productType === 'combo' || form.trackBatches ? 'opacity-60 cursor-not-allowed bg-slate-100 dark:bg-slate-800' : ''}
+                    />
+                    {(() => {
+                        const validAltUnits = (form.altUnits || []).filter((u) => u.unit && Number(u.factor) > 0);
+                        const breakdown = formatUnitBreakdown({ ...form, altUnits: validAltUnits }, Number(form.stock) || 0);
+                        return breakdown
+                          ? <div className="text-[10px] text-indigo-600 dark:text-indigo-400 mt-1 ml-1 font-medium">Auto-converted: {breakdown} total</div>
+                          : null;
+                    })()}
+                  </Field>
+                  <Field label="Minimum Alert Level">
+                    <Input type="number" value={form.minStock} onChange={(e) => setForm({ ...form, minStock: e.target.value })} />
+                  </Field>
+                </div>
+
+                {(batchTrackingEnabled || form.trackBatches) ? (
+                  <label className="flex items-center gap-2 cursor-pointer text-xs font-bold text-indigo-600 dark:text-indigo-400 pt-2 border-t border-[color:var(--border-subtle)]">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(form.trackBatches)}
+                      onChange={(e) => setForm({ ...form, trackBatches: e.target.checked })}
+                      className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+                    />
+                    Track by Batch (lot number, expiry date, batch-wise cost)
+                  </label>
+                ) : (
+                  <div className="text-[10px] text-[color:var(--text-muted)] pt-2 border-t border-[color:var(--border-subtle)]">
+                    Batch tracking is off for this store. Enable it under Settings → Billing & Tax → Inventory to use it here.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {!hideBatches && form.trackBatches && form.productType !== 'service' && form.productType !== 'composite' && form.productType !== 'combo' && (
+              <div className="p-3.5 rounded-xl border border-amber-200 dark:border-amber-800/80 bg-amber-50/40 dark:bg-amber-950/20 space-y-3">
+                <div>
+                  <h4 className="text-xs font-bold text-[color:var(--text-primary)] uppercase tracking-wider flex items-center gap-2">
+                    <History className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+                    Batches
+                  </h4>
+                  <p className="text-[11px] text-[color:var(--text-muted)] mt-0.5">
+                    New batches are normally added automatically when you receive a Purchase for this product. Add one here for opening stock or a manual correction.
+                  </p>
+                </div>
+
+                <Field
+                  label="Near-Expiry Alert Window (days)"
+                  hint="Overrides the store default for this product only — e.g. eggs need a much shorter warning than rice. Leave blank to use the store default."
+                >
+                  <Input
+                    type="number"
+                    min="1"
+                    value={form.nearExpiryDays}
+                    onChange={(e) => setForm({ ...form, nearExpiryDays: e.target.value })}
+                    placeholder="Store default"
+                    className="max-w-[160px]"
+                  />
+                </Field>
+
+                <div className="space-y-2">
+                  {(form.batches || []).map((row, idx) => (
+                    <div key={row.id || idx} className="flex flex-wrap items-end gap-2 p-2.5 rounded-lg border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)]">
+                      <Field label="Batch / Lot No." className="w-36">
+                        <Input
+                          value={row.batchNo || ''}
+                          onChange={(e) => updateBatchRow(idx, { batchNo: e.target.value })}
+                          placeholder="Auto if blank"
+                          className="text-xs"
+                        />
+                      </Field>
+                      <Field label="Mfg. Date" className="w-36">
+                        <Input
+                          type="date"
+                          value={row.mfgDate ? String(row.mfgDate).slice(0, 10) : ''}
+                          onChange={(e) => updateBatchRow(idx, { mfgDate: e.target.value })}
+                          className="text-xs"
+                        />
+                      </Field>
+                      <Field label="Expiry Date" className="w-36">
+                        <Input
+                          type="date"
+                          value={row.expiryDate ? String(row.expiryDate).slice(0, 10) : ''}
+                          onChange={(e) => updateBatchRow(idx, { expiryDate: e.target.value })}
+                          className="text-xs"
+                        />
+                      </Field>
+                      <Field label="Qty" className="w-20">
+                        <Input
+                          type="number"
+                          step="any"
+                          min="0"
+                          value={row.qty ?? ''}
+                          onChange={(e) => updateBatchRow(idx, { qty: e.target.value })}
+                          placeholder="Qty"
+                          className="text-xs"
+                        />
+                      </Field>
+                      <Field label="Cost Price (₹)" className="w-24">
+                        <Input
+                          type="number"
+                          step="any"
+                          value={row.costPrice ?? ''}
+                          onChange={(e) => updateBatchRow(idx, { costPrice: e.target.value })}
+                          placeholder="Cost"
+                          className="text-xs"
+                        />
+                      </Field>
+                      <Field label="Selling Price (₹)" hint="Blank = product's price" className="w-32">
+                        <Input
+                          type="number"
+                          step="any"
+                          value={row.sellPrice ?? ''}
+                          onChange={(e) => updateBatchRow(idx, { sellPrice: e.target.value })}
+                          placeholder={form.price ? `Auto ₹${form.price}` : 'Sell ₹'}
+                          className="text-xs"
+                        />
+                      </Field>
+                      {(warehouses || []).length > 0 && (
+                        <Field label="Warehouse" className="w-32">
+                          <Select
+                            value={row.warehouseId || form.primaryWarehouse || warehouses.find((w) => w.isDefault)?.id || warehouses[0]?.id}
+                            onChange={(e) => updateBatchRow(idx, { warehouseId: e.target.value })}
+                            className="text-xs"
+                          >
+                            {warehouses.map((w) => (
+                              <option key={w.id} value={w.id}>{w.name}</option>
+                            ))}
+                          </Select>
+                        </Field>
+                      )}
+                      <div className="flex items-center gap-0.5 ml-auto self-center">
+                        {editing && !String(row.id).startsWith('new_') && Number(row.qty) > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setWriteOffForm({ qty: '', reason: 'Expired' });
+                              setWriteOffTarget({ product: editing, batch: row });
+                            }}
+                            className="p-1 rounded-lg hover:bg-amber-50 dark:hover:bg-amber-950/40 text-[color:var(--text-muted)] hover:text-amber-600"
+                            title="Write off (expired/damaged)"
+                          >
+                            <AlertTriangle className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => removeBatchRow(idx)}
+                          className="p-1 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)] hover:text-red-600"
+                          title="Remove row"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+
+                  <Button type="button" size="sm" variant="secondary" icon={Plus} onClick={addBatchRow}>
+                    Add Batch
+                  </Button>
+                </div>
+
+                <div className="text-[11px] font-bold text-amber-700 dark:text-amber-400">
+                  Total across batches: {form.stock || 0} {form.unit}
+                </div>
+              </div>
+            )}
+
+            {form.productType === 'composite' && (
+              <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] text-[11px] text-[color:var(--text-muted)]">
+                This is a composite item — it has no stock of its own. Its availability is computed live from the raw materials in its recipe below ("Can produce").
+              </div>
+            )}
+
+            {form.productType === 'composite' && (
+              <div className="p-3 rounded-xl border border-emerald-300/50 dark:border-emerald-800/60 bg-emerald-50/40 dark:bg-emerald-950/20 space-y-3">
+                <div>
+                  <h4 className="text-xs font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Boxes className="h-3.5 w-3.5" /> Recipe — Raw Materials
+                  </h4>
+                  <p className="text-[11px] text-[color:var(--text-muted)] mt-0.5">
+                    Selling one {form.unit || 'unit'} of this product consumes these raw materials from stock. At least one material with a quantity is required.
+                  </p>
+                </div>
+
+
+
+                <div className="space-y-2">
+                  {(form.recipeItems || []).length > 0 && (
+                    <div className="hidden md:grid grid-cols-12 gap-2 px-2 text-[10px] font-bold uppercase text-[color:var(--text-muted)]">
+                      <div className="col-span-5">Raw Material</div>
+                      <div className="col-span-2">Qty</div>
+                      <div className="col-span-1 text-center">Unit</div>
+                      <div className="col-span-2 text-right">Cost</div>
+                      <div className="col-span-1 text-right">Line Cost</div>
+                    </div>
+                  )}
+
+                  {(form.recipeItems || []).map((row, idx) => (
+                    <IngredientRow
+                      key={idx}
+                      row={row}
+                      index={idx}
+                      products={products}
+                      excludeIds={[editing?.id, ...(form.recipeItems || []).map((i) => i.productId)].filter(Boolean)}
+                      onChange={updateIngredient}
+                      onRemove={removeIngredient}
+                    />
+                  ))}
+
+                  <Button type="button" size="sm" variant="secondary" icon={Plus} onClick={addIngredient}>
+                    Add Raw Material
+                  </Button>
+                </div>
+
+                {(() => {
+                  const totals = computeRecipeTotals(form.recipeItems, products);
+                  const sellingPrice = Number(form.price) || 0;
+                  const margin = sellingPrice - totals.unitCost;
+                  const marginPct = sellingPrice ? (margin / sellingPrice) * 100 : 0;
+                  return (
+                    <div className="pt-2 border-t border-emerald-300/40 dark:border-emerald-800/40 space-y-3">
+                      <div className="grid grid-cols-3 gap-2">
+                        <StatBlock label="Material Cost" value={money(totals.unitCost)} />
+                        <StatBlock label="Margin" value={money(margin)} tone={margin < 0 ? 'danger' : 'success'} />
+                        <StatBlock label="Margin %" value={`${marginPct.toFixed(1)}%`} tone={margin < 0 ? 'danger' : 'success'} />
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 pt-2">
+                        <Field label="Final Selling Price (₹) *">
+                          <Input
+                            type="number"
+                            step="1"
+                            value={form.price}
+                            onChange={(e) => setForm({ ...form, price: e.target.value })}
+                            required
+                          />
+                        </Field>
+                      </div>
+                      <div className="text-xs font-bold text-[color:var(--text-secondary)]">
+                        Can produce:{' '}
+                        <span className={totals.producible <= 0 ? 'text-red-600' : totals.producible <= 5 ? 'text-amber-600' : 'text-emerald-600'}>
+                          {totals.producible} {form.unit || 'unit'}(s)
+                        </span>{' '}
+                        from current raw material stock.
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+            {form.productType === 'combo' && (
+              <div className="p-3 rounded-xl border border-indigo-300/50 dark:border-indigo-800/60 bg-indigo-50/40 dark:bg-indigo-950/20 space-y-3">
+                <div>
+                  <h4 className="text-xs font-bold text-indigo-700 dark:text-indigo-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Boxes className="h-3.5 w-3.5" /> Combo Products
+                  </h4>
+                  <p className="text-[11px] text-[color:var(--text-muted)] mt-0.5">
+                    Select existing products to include in this combo bundle.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  {(form.comboItems || []).length > 0 && (
+                    <div className="hidden md:grid grid-cols-12 gap-2 px-2 text-[10px] font-bold uppercase text-[color:var(--text-muted)]">
+                      <div className="col-span-5">Product</div>
+                      <div className="col-span-2">Qty</div>
+                      <div className="col-span-1 text-center">Unit</div>
+                      <div className="col-span-2 text-right">Value</div>
+                      <div className="col-span-1 text-right">Line Value</div>
+                    </div>
+                  )}
+
+                  {(form.comboItems || []).map((row, idx) => (
+                    <IngredientRow
+                      key={idx}
+                      row={row}
+                      index={idx}
+                      products={products}
+                      excludeIds={[editing?.id, ...(form.comboItems || []).map((i) => i.productId)].filter(Boolean)}
+                      onChange={updateComboItem}
+                      onRemove={removeComboItem}
+                    />
+                  ))}
+
+                  <Button type="button" size="sm" variant="secondary" icon={Plus} onClick={addComboItem}>
+                    Add Product to Combo
+                  </Button>
+                </div>
+
+                {(() => {
+                  const rows = (form.comboItems || []).map(ing => {
+                    const material = (products || []).find(p => p.id === ing.productId);
+                    const qty = Number(ing.qty) || 0;
+                    const cost = material ? Number(material.price) || 0 : 0;
+                    return { qty, cost, lineCost: qty * cost };
+                  }).filter(r => r.qty > 0);
+                  const totalComboPrice = rows.reduce((sum, r) => sum + r.lineCost, 0);
+                  const sellingPrice = form.useCustomPricing ? (Number(form.price) || 0) : totalComboPrice;
+                  const discount = totalComboPrice - sellingPrice;
+                  const discountPct = totalComboPrice ? (discount / totalComboPrice) * 100 : 0;
+                  const comboBuyable = (form.comboItems || []).length > 0
+                    ? Math.max(0, Math.floor(Math.min(...(form.comboItems || []).map(item => {
+                        const material = (products || []).find(p => p.id === item.productId);
+                        return material && Number(item.qty) > 0 ? (material.stock || 0) / Number(item.qty) : 0;
+                      }))))
+                    : 0;
+
+                  return (
+                    <div className="pt-2 border-t border-indigo-300/40 dark:border-indigo-800/40 space-y-3">
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                        <StatBlock label="Items Total Value" value={money(totalComboPrice)} />
+                        <StatBlock label="Combo Selling Price" value={money(sellingPrice)} />
+                        <StatBlock label="Customer Savings" value={money(discount)} tone={discount < 0 ? 'danger' : 'success'} />
+                      </div>
+                      <div className="grid grid-cols-3 gap-3 pt-2">
+                        <Field label="Discount (%)">
+                          <Input
+                            type="number"
+                            step="1"
+                            value={form.useCustomPricing ? parseFloat(discountPct.toFixed(2)) : ''}
+                            onChange={(e) => {
+                              let newPct = Number(e.target.value) || 0;
+                              if (newPct > 100) newPct = 100;
+                              const newDiscount = (totalComboPrice * newPct) / 100;
+                              setForm({ ...form, price: (totalComboPrice - newDiscount).toFixed(2), useCustomPricing: true });
+                            }}
+                            placeholder="0"
+                          />
+                        </Field>
+                        <Field label="Discount Amount (₹)">
+                          <Input
+                            type="number"
+                            step="1"
+                            value={form.useCustomPricing ? parseFloat(discount.toFixed(2)) : ''}
+                            onChange={(e) => {
+                              const newDiscount = Number(e.target.value) || 0;
+                              setForm({ ...form, price: (totalComboPrice - newDiscount).toFixed(2), useCustomPricing: true });
+                            }}
+                            placeholder="0.00"
+                          />
+                        </Field>
+                        <Field label="Final Selling Price (₹) *">
+                          <Input
+                            type="number"
+                            step="1"
+                            value={sellingPrice}
+                            onChange={(e) => setForm({ ...form, price: e.target.value, useCustomPricing: true })}
+                            required
+                          />
+                        </Field>
+                      </div>
+                      <div className="text-xs font-bold text-[color:var(--text-secondary)]">
+                        Available to sell:{' '}
+                        <span className={comboBuyable <= 0 ? 'text-red-600' : comboBuyable <= 5 ? 'text-amber-600' : 'text-emerald-600'}>
+                          {comboBuyable} {form.unit || 'combo'}(s)
+                        </span>{' '}
+                        from current component products stock.
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+
+
+
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="HSN Code">
+                <Input value={form.hsn} onChange={(e) => setForm({ ...form, hsn: e.target.value })} />
+              </Field>
+              <Field label="GST Tax Rate (%)">
+                <Select value={form.taxRate} onChange={(e) => setForm({ ...form, taxRate: e.target.value })}>
+                  <option value={0}>0% (Exempt)</option>
+                  <option value={5}>5% GST</option>
+                  <option value={12}>12% GST</option>
+                  <option value={18}>18% GST</option>
+                  <option value={28}>28% GST</option>
+                </Select>
+              </Field>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-3 border-t border-[color:var(--border-subtle)]">
+              <Button variant="secondary" onClick={onClose}>Cancel</Button>
+              <Button icon={Save} type="submit" loading={saving} disabled={saving}>{editing ? 'Update Product' : 'Save Product'}</Button>
+            </div>
+          </form>
+        </Modal>
+
+        {/* Batch Write-Off Modal */}
+        {writeOffTarget && (
+          <Modal
+            open={true}
+            title={`Write Off Batch ${writeOffTarget.batch.batchNo}`}
+            icon={AlertTriangle}
+            onClose={() => setWriteOffTarget(null)}
+          >
+            <form onSubmit={submitWriteOff} className="space-y-4">
+              <p className="text-xs text-[color:var(--text-muted)]">
+                {writeOffTarget.product.name} — {writeOffTarget.batch.qty} {writeOffTarget.product.unit} available in this batch
+                {writeOffTarget.batch.expiryDate ? ` (expires ${String(writeOffTarget.batch.expiryDate).slice(0, 10)})` : ''}.
+              </p>
+              <Field label={`Quantity to Write Off (max ${writeOffTarget.batch.qty})`}>
+                <Input
+                  type="number"
+                  step="any"
+                  min="0"
+                  max={writeOffTarget.batch.qty}
+                  value={writeOffForm.qty}
+                  onChange={(e) => setWriteOffForm({ ...writeOffForm, qty: e.target.value })}
+                  autoFocus
+                />
+              </Field>
+              <Field label="Reason">
+                <Select value={writeOffForm.reason} onChange={(e) => setWriteOffForm({ ...writeOffForm, reason: e.target.value })}>
+                  <option value="Expired">Expired</option>
+                  <option value="Damaged">Damaged</option>
+                  <option value="Quality Issue">Quality Issue</option>
+                  <option value="Other">Other</option>
+                </Select>
+              </Field>
+              <div className="flex justify-end gap-2 pt-3 border-t border-[color:var(--border-subtle)]">
+                <Button type="button" variant="secondary" onClick={() => setWriteOffTarget(null)}>Cancel</Button>
+                <Button icon={AlertTriangle} type="submit" loading={writingOff} disabled={writingOff}>Write Off</Button>
+              </div>
+            </form>
+          </Modal>
+        )}
+    </>
+  );
+}
+
+function ProductsTab({ products, categories, units, warehouses, showToast, onRefresh, batchTrackingEnabled, storeNearExpiryDays }) {
+  const [query, setQuery] = useState('');
+  const [categoryId, setCategoryId] = useState('all');
+  const [typeFilter, setTypeFilter] = useState('all');
+  const [stockFilter, setStockFilter] = useState('ALL');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [warehouseFilter, setWarehouseFilter] = useState('all');
+  const [batchFilter, setBatchFilter] = useState('all');
+  const [batchNoFilter, setBatchNoFilter] = useState('');
+
+  const [editing, setEditing] = useState(null);
+  const [showForm, setShowForm] = useState(false);
+  const [labelProduct, setLabelProduct] = useState(null);
+
+  const allBatchOptions = useMemo(() => {
+    const opts = [];
+    (products || []).forEach((p) => {
+      if (!p.trackBatches || !Array.isArray(p.batches)) return;
+      p.batches.forEach((b) => {
+        opts.push({
+          value: b.batchNo,
+          label: `${b.batchNo} — ${p.name} (${b.qty} ${p.unit}${b.expiryDate ? `, exp ${String(b.expiryDate).slice(0, 10)}` : ''})`
+        });
+      });
+    });
+    return opts.sort((a, b) => a.value.localeCompare(b.value));
+  }, [products]);
+
+  const deferredQuery = useDeferredValue(query);
+
+  const rows = useMemo(() => {
+    const needle = deferredQuery.trim().toLowerCase();
+    return products.filter((p) => {
+      if (categoryId !== 'all') {
+        const belongs = Array.isArray(p.categoryIds) && p.categoryIds.length
+          ? p.categoryIds.includes(categoryId)
+          : p.categoryId === categoryId;
+        if (!belongs) return false;
+      }
+      if (typeFilter !== 'all') {
+        const primaryType = canonicalProductType(p.productType || (Array.isArray(p.productTypes) && p.productTypes.length > 1 ? 'both' : p.productTypes?.[0]));
+        if (typeFilter === 'standard') {
+          if (primaryType !== 'standard' && primaryType !== 'both' && !p.productTypes?.includes('standard')) return false;
+        } else if (typeFilter === 'raw') {
+          if (primaryType !== 'raw' && primaryType !== 'both' && !p.productTypes?.includes('raw')) return false;
+        } else if (primaryType !== typeFilter) {
+          return false;
+        }
+      }
+      if (statusFilter === 'active' && p.isActive === false) return false;
+      if (statusFilter === 'inactive' && p.isActive !== false) return false;
+
+      let displayStock = p.stock;
+      if (warehouseFilter !== 'all') {
+        if (p.warehouses) {
+          displayStock = p.warehouses[warehouseFilter] || 0;
+        } else {
+          if (warehouseFilter === 'wh_main') displayStock = Math.max(0, (p.stock || 0) - 10);
+          else if (warehouseFilter === 'wh_shop') displayStock = Math.min(p.stock || 0, 10);
+          else displayStock = 0;
+        }
+      }
+
+      // If a specific warehouse is selected, optionally hide products that have never been in this warehouse (unless OUT is selected)
+      if (warehouseFilter !== 'all' && stockFilter !== 'OUT' && displayStock <= 0) return false;
+
+      const stockInfo = resolveProductStockInfo(p, products);
+      if (stockFilter === 'LOW' && (stockInfo.isService || !stockInfo.isLow)) return false;
+      if (stockFilter === 'OUT' && (stockInfo.isService || !stockInfo.isOut)) return false;
+
+      if (batchFilter === 'tracked' && !p.trackBatches) return false;
+      if (batchFilter === 'untracked' && p.trackBatches) return false;
+      if (batchFilter === 'nearExpiry' || batchFilter === 'expired') {
+        if (!p.trackBatches || !Array.isArray(p.batches)) return false;
+        const today = new Date();
+        const windowDays = resolveNearExpiryDays(p, storeNearExpiryDays);
+        const hasMatch = p.batches.some((b) => {
+          if (!b.expiryDate || !(Number(b.qty) > 0)) return false;
+          const days = Math.ceil((new Date(b.expiryDate) - today) / 86400000);
+          return batchFilter === 'expired' ? days < 0 : days >= 0 && days <= windowDays;
+        });
+        if (!hasMatch) return false;
+      }
+
+      if (batchNoFilter) {
+        if (!p.trackBatches || !Array.isArray(p.batches)) return false;
+        if (!p.batches.some((b) => b.batchNo === batchNoFilter)) return false;
+      }
+
+      if (!needle) return true;
+      return (
+        p.name.toLowerCase().includes(needle) ||
+        (p.regionalName || '').toLowerCase().includes(needle) ||
+        (p.printName || '').toLowerCase().includes(needle) ||
+        (p.barcodes || [p.barcode]).some((b) => String(b).includes(needle))
+      );
+    });
+  }, [products, deferredQuery, categoryId, typeFilter, stockFilter, statusFilter, warehouseFilter, batchFilter, batchNoFilter, storeNearExpiryDays]);
+
+  const productsById = useMemo(() => {
+    const map = {};
+    for (const p of products) {
+      map[p.id] = p;
+    }
+    return map;
+  }, [products]);
+
+  // Form state, unit/batch/recipe builders and the actual save/upload logic
+  // now live in the shared ProductFormModal (also reused by Purchases' "add
+  // a product not in the catalogue" flow) — this tab only decides which
+  // product (if any) to open it for.
+  const openAdd = () => {
+    setEditing(null);
+    setShowForm(true);
+  };
+
+  const openEdit = (product) => {
+    setEditing(product);
+    setShowForm(true);
   };
 
   const removeProduct = async (id) => {
@@ -802,15 +2098,30 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
             ))}
           </Select>
 
-          <SegmentedControl
-            options={[
-              { value: 'ALL', label: 'All Stock' },
-              { value: 'LOW', label: 'Low Stock' },
-              { value: 'OUT', label: 'Out of Stock' }
-            ]}
-            value={stockFilter}
-            onChange={setStockFilter}
-          />
+          {batchTrackingEnabled && (
+            <Select value={batchFilter} onChange={(e) => setBatchFilter(e.target.value)} className="w-44">
+              <option value="all">All (Batch & Non-Batch)</option>
+              <option value="tracked">Batch-Tracked Only</option>
+              <option value="untracked">Not Batch-Tracked</option>
+              <option value="nearExpiry">Near Expiry Batches</option>
+              <option value="expired">Expired Batches</option>
+            </Select>
+          )}
+
+          {batchTrackingEnabled && allBatchOptions.length > 0 && (
+            <Select value={batchNoFilter} onChange={(e) => setBatchNoFilter(e.target.value)} className="w-56">
+              <option value="">Search a Batch No…</option>
+              {allBatchOptions.map((opt, idx) => (
+                <option key={`${opt.value}_${idx}`} value={opt.value}>{opt.label}</option>
+              ))}
+            </Select>
+          )}
+
+          <Select value={stockFilter} onChange={(e) => setStockFilter(e.target.value)} className="w-36">
+            <option value="ALL">All Stock</option>
+            <option value="LOW">Low Stock</option>
+            <option value="OUT">Out of Stock</option>
+          </Select>
         </div>
 
         <Button icon={Plus} onClick={openAdd}>Add Product</Button>
@@ -926,6 +2237,37 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                               <div className="text-xs text-indigo-600 font-medium">{p.regionalName || p.printName}</div>
                             )}
                             <div className="text-[11px] text-[color:var(--text-muted)] font-mono">HSN: {p.hsn || '—'}</div>
+                            {p.trackBatches && Array.isArray(p.batches) && p.batches.some((b) => Number(b.qty) > 0) && (() => {
+                              const activeBatches = p.batches.filter((b) => Number(b.qty) > 0);
+                              const windowDays = resolveNearExpiryDays(p, storeNearExpiryDays);
+                              const today = new Date();
+                              let worst = null;
+                              activeBatches.forEach((b) => {
+                                if (!b.expiryDate) return;
+                                const days = Math.ceil((new Date(b.expiryDate) - today) / 86400000);
+                                if (days < 0) worst = 'expired';
+                                else if (days <= windowDays && worst !== 'expired') worst = 'near';
+                              });
+                              const batchNoLabel = activeBatches.length === 1
+                                ? activeBatches[0].batchNo
+                                : `${activeBatches[0].batchNo} +${activeBatches.length - 1} more`;
+                              return (
+                                <div
+                                  title={activeBatches.map((b) => b.batchNo).join(', ')}
+                                  className={`inline-flex items-center gap-1 mt-0.5 px-1.5 py-0.2 rounded text-[9px] font-extrabold normal-case ${
+                                    worst === 'expired'
+                                      ? 'bg-red-500/10 text-red-600'
+                                      : worst === 'near'
+                                      ? 'bg-amber-500/10 text-amber-600'
+                                      : 'bg-indigo-500/10 text-indigo-600'
+                                  }`}
+                                >
+                                  <History className="h-2.5 w-2.5 shrink-0" />
+                                  <span className="font-mono">{batchNoLabel}</span>
+                                  {worst === 'expired' ? ' · Expired' : worst === 'near' ? ' · Near Expiry' : ''}
+                                </div>
+                              );
+                            })()}
                           </div>
                         </div>
                       </td>
@@ -1042,15 +2384,8 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                           }`}>
                             <span>{displayStock} {p.unit}</span>
                             {(() => {
-                               const isKg = p.unit?.toLowerCase() === 'kg';
-                               const isLtr = ['ltr', 'l', 'liter', 'liters', 'litre', 'litres'].includes(p.unit?.toLowerCase());
-                               const hasCustom = !!p.customSubUnitName && Number(p.customSubUnitFactor) > 0;
-                               if (isKg || isLtr) {
-                                  return <span className="text-[10px] opacity-75 font-medium">{Number(displayStock)*1000} {isKg ? 'g' : 'ml'}</span>;
-                               } else if (hasCustom) {
-                                  return <span className="text-[10px] opacity-75 font-medium">{Number(displayStock)*Number(p.customSubUnitFactor)} {p.customSubUnitName}</span>;
-                               }
-                               return null;
+                               const breakdown = formatUnitBreakdown(p, Number(displayStock) || 0);
+                               return breakdown ? <span className="text-[10px] opacity-75 font-medium">{breakdown}</span> : null;
                             })()}
                             {isOut && <span className="text-[9px] text-red-500 uppercase mt-0.5">Out of Stock</span>}
                             {isLow && !isOut && <span className="text-[9px] text-amber-600 uppercase mt-0.5">Low Stock</span>}
@@ -1081,612 +2416,28 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       </Panel>
 
       {/* Product Form Drawer/Modal */}
-      {showForm && (
-        <Modal open={true} title={editing ? 'Edit Product' : 'Create New Product'} icon={Package} onClose={() => setShowForm(false)} className="!max-w-[728px]">
-          <form onSubmit={save} className="space-y-4 max-h-[80vh] overflow-y-auto pr-1">
-            {/* Image Upload section */}
-            <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] flex items-center gap-4">
-              <div className="h-16 w-16 rounded-xl border-2 border-dashed border-indigo-300 dark:border-indigo-800 flex items-center justify-center bg-[color:var(--bg-surface)] overflow-hidden relative">
-                {form.imageUrl ? (
-                  <img src={form.imageUrl.startsWith('/') ? `${API_BASE.replace('/api/pos', '')}${form.imageUrl}` : form.imageUrl} alt="Preview" className="h-full w-full object-cover" />
-                ) : (
-                  <ImageIcon className="h-6 w-6 text-indigo-400" />
-                )}
-              </div>
-              <div className="space-y-1.5 flex-1">
-                <label className="text-xs font-bold text-[color:var(--text-primary)] block">Product Image</label>
-                <div className="flex flex-wrap items-center gap-2">
-                  <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" id="prod-img-upload" />
-                  <label htmlFor="prod-img-upload" className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-700 transition-all shadow-xs">
-                    <Upload className="h-3.5 w-3.5" />
-                    {uploadingImage ? 'Uploading...' : 'Choose Image (Manual)'}
-                  </label>
-
-                  <button
-                    type="button"
-                    onClick={autoFindRealPhoto}
-                    disabled={findingPhoto || (!form.name && !form.barcodes && !form.barcode)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-[color:var(--bg-surface)] text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 transition-all disabled:opacity-50 shadow-2xs"
-                    title="Auto-fetch real product photo online based on product name or barcode"
-                  >
-                    <Search className="h-3.5 w-3.5" />
-                    {findingPhoto ? 'Finding photo...' : '✨ Auto-Find Real Photo'}
-                  </button>
-
-                  {form.imageUrl && (
-                    <button type="button" onClick={() => setForm((p) => ({ ...p, imageUrl: '' }))} className="text-xs text-red-500 hover:underline">
-                      Remove
-                    </button>
-                  )}
-                </div>
-                <div className="text-[10px] text-[color:var(--text-muted)]">
-                  Manually uploaded images take priority. If no image is provided, a real photo is auto-generated.
-                </div>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Product Name *">
-                <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Organic Himachal Apples" required />
-              </Field>
-
-              <Field label="Regional Name (Tamil/Hindi)">
-                <Input value={form.regionalName} onChange={(e) => setForm({ ...form, regionalName: e.target.value, printName: e.target.value })} placeholder="e.g. ஆப்பிள் / தமிழ் பெயர்" />
-              </Field>
-            </div>
-
-            <div className="grid grid-cols-3 gap-3">
-              <Field label="Categories">
-                <MultiSelect
-                  value={form.categoryIds}
-                  onChange={(e) => setForm({ ...form, categoryIds: e.target.value, categoryId: e.target.value[0] || '' })}
-                  placeholder="Select categories..."
-                >
-                  {categories.map((c) => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
-                </MultiSelect>
-              </Field>
-
-              <Field label="Product Type">
-                <Select
-                  value={canonicalProductType(form.productType || (Array.isArray(form.productTypes) && form.productTypes.length > 1 ? 'both' : form.productTypes?.[0]) || 'standard')}
-                  onChange={(e) => {
-                    const t = e.target.value;
-                    const types = t === 'both' ? ['standard', 'raw'] : [t];
-                    setForm({ ...form, productType: t, productTypes: types });
-                  }}
-                >
-                  <option value="standard">Standard Item</option>
-                  <option value="raw">Raw Material</option>
-                  <option value="both">Both Raw Material & Standard Product</option>
-                  <option value="service">Service (No stock level)</option>
-                  <option value="combo">Combo Bundle</option>
-                  <option value="composite">Composite (Recipe)</option>
-                </Select>
-              </Field>
-
-              {form.productType !== 'service' && (
-                <Field label="Main Unit of Measurement">
-                  <Select
-                    value={form.unit}
-                    onChange={(e) => {
-                      const newUnit = e.target.value;
-                      const def = getDefaultSubUnit(newUnit, units);
-                      const isStandardSub = !!def.name;
-                      const priceNum = Number(form.price) || 0;
-                      const subPrice = def.factor && priceNum ? (priceNum / def.factor).toFixed(4) : form.customSubUnitPrice;
-                      setForm({
-                        ...form,
-                        unit: newUnit,
-                        enableMinorUnit: isStandardSub ? true : form.enableMinorUnit,
-                        customSubUnitName: isStandardSub ? def.name : form.customSubUnitName,
-                        customSubUnitFactor: isStandardSub ? def.factor : form.customSubUnitFactor,
-                        customSubUnitPrice: isStandardSub ? subPrice : form.customSubUnitPrice
-                      });
-                    }}
-                  >
-                    {units.map((u) => {
-                      const name = typeof u === 'object' ? u.name : u;
-                      const sub = typeof u === 'object' && u.subUnit ? u.subUnit : null;
-                      const factor = typeof u === 'object' && u.factor ? u.factor : null;
-                      const label = sub && factor
-                        ? `${name} (1 ${name} = ${factor} ${sub})`
-                        : sub
-                        ? `${name} (→ ${sub})`
-                        : name;
-                      return (
-                        <option key={name} value={name}>{label}</option>
-                      );
-                    })}
-                  </Select>
-                </Field>
-              )}
-            </div>
-
-            {/* Sub-Unit / Minor Unit Configuration Block */}
-            {form.productType !== 'service' && (
-              <div className="p-3.5 rounded-xl border border-indigo-200 dark:border-indigo-800/80 bg-indigo-50/40 dark:bg-indigo-950/30 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Sliders className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
-                    <h4 className="text-xs font-bold text-[color:var(--text-primary)] uppercase tracking-wider">
-                      Minor / Sub-Unit Configuration
-                    </h4>
-                  </div>
-                  <label className="flex items-center gap-2 cursor-pointer text-xs font-bold text-indigo-600 dark:text-indigo-400">
-                    <input
-                      type="checkbox"
-                      checked={form.enableMinorUnit}
-                      onChange={(e) => {
-                        const enabled = e.target.checked;
-                        if (enabled && !form.customSubUnitName) {
-                          const def = getDefaultSubUnit(form.unit, units);
-                          const priceNum = Number(form.price) || 0;
-                          const subPrice = def.factor && priceNum ? (priceNum / def.factor).toFixed(4) : '';
-                          setForm({
-                            ...form,
-                            enableMinorUnit: true,
-                            customSubUnitName: def.name || 'pcs',
-                            customSubUnitFactor: def.factor || 1,
-                            customSubUnitPrice: subPrice
-                          });
-                        } else {
-                          setForm({ ...form, enableMinorUnit: enabled });
-                        }
-                      }}
-                      className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
-                    />
-                    Enable Sub-Unit (e.g. g for kg, ml for ltr, pcs for dozen/box)
-                  </label>
-                </div>
-
-                {form.enableMinorUnit && (
-                  <div className="space-y-3 pt-2 border-t border-indigo-200/60 dark:border-indigo-800/60">
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                      <Field label="Minor Unit Name *" hint="e.g. g, gm, grams, ml, pcs">
-                        <Input
-                          value={form.customSubUnitName || ''}
-                          onChange={(e) => setForm({ ...form, customSubUnitName: e.target.value })}
-                          placeholder="e.g. g"
-                        />
-                        {String(form.unit).toLowerCase() === 'kg' && (
-                          <div className="flex items-center gap-1 mt-1 text-[10px]">
-                            <span className="text-[color:var(--text-muted)]">Presets:</span>
-                            {['g', 'gm', 'grams'].map((name) => (
-                              <button
-                                key={name}
-                                type="button"
-                                onClick={() => setForm({ ...form, customSubUnitName: name })}
-                                className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${
-                                  form.customSubUnitName === name
-                                    ? 'bg-indigo-600 text-white border-indigo-600'
-                                    : 'bg-[color:var(--bg-subtle)] text-[color:var(--text-secondary)] border-[color:var(--border-subtle)] hover:border-indigo-400'
-                                }`}
-                              >
-                                {name}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </Field>
-
-                      <Field label={`1 ${form.unit || 'unit'} contains (${form.customSubUnitName || 'sub-units'})`}>
-                        <Input
-                          type="number"
-                          step="any"
-                          value={form.customSubUnitFactor || ''}
-                          onChange={(e) => {
-                            const factor = Number(e.target.value) || 0;
-                            const priceNum = Number(form.price) || 0;
-                            const subPrice = factor > 0 && priceNum ? (priceNum / factor).toFixed(4) : form.customSubUnitPrice;
-                            setForm({ ...form, customSubUnitFactor: e.target.value, customSubUnitPrice: subPrice });
-                          }}
-                          placeholder="e.g. 1000"
-                        />
-                      </Field>
-
-                      <Field label={`Price per 1 ${form.customSubUnitName || 'sub-unit'} (₹)`}>
-                        <Input
-                          type="number"
-                          step="any"
-                          value={form.customSubUnitPrice || ''}
-                          onChange={(e) => setForm({ ...form, customSubUnitPrice: e.target.value })}
-                          placeholder="Auto-calculated"
-                        />
-                      </Field>
-
-                      <Field label="Minor Unit Barcode">
-                        <Input
-                          value={form.customSubUnitBarcode || ''}
-                          onChange={(e) => setForm({ ...form, customSubUnitBarcode: e.target.value })}
-                          placeholder="Optional sub-unit barcode"
-                        />
-                      </Field>
-                    </div>
-
-                    {form.customSubUnitName && Number(form.customSubUnitFactor) > 0 && (
-                      <div className="p-2.5 rounded-lg bg-indigo-100/70 dark:bg-indigo-900/40 text-[11px] text-indigo-900 dark:text-indigo-200 flex flex-wrap items-center justify-between gap-2 font-medium">
-                        <div>
-                          <strong>1 {form.unit}</strong> = <strong>{form.customSubUnitFactor} {form.customSubUnitName}</strong>
-                          {Number(form.price) > 0 && (
-                            <span className="ml-2">
-                              | Price: <strong>{money(form.price)} / {form.unit}</strong> (<strong>₹{Number(form.customSubUnitPrice || (Number(form.price) / Number(form.customSubUnitFactor))).toFixed(4)} / {form.customSubUnitName}</strong>)
-                            </span>
-                          )}
-                        </div>
-                        {Number(form.stock) > 0 && (
-                          <div className="font-bold text-emerald-700 dark:text-emerald-400">
-                            Total Stock: {form.stock} {form.unit} ({Number(form.stock) * Number(form.customSubUnitFactor)} {form.customSubUnitName})
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Primary Barcode">
-                <Input value={form.barcode} onChange={(e) => setForm({ ...form, barcode: e.target.value })} placeholder="Leave blank to auto-generate" />
-              </Field>
-
-              <Field label="Multiple Barcodes (Comma Separated)">
-                <Input value={form.barcodes} onChange={(e) => setForm({ ...form, barcodes: e.target.value })} placeholder="e.g. 89012345001, 89012345002" />
-              </Field>
-            </div>
-
-            {form.productType === 'service' ? (
-              <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
-                <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">Service Pricing</h4>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <Field label="Price (₹) *">
-                    <Input type="number" step="0.01" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} required />
-                  </Field>
-                </div>
-              </div>
-            ) : form.productType !== 'combo' && form.productType !== 'composite' ? (
-              <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
-                <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">Multiple Selling Prices</h4>
-                <div className="grid grid-cols-4 gap-3">
-                  <Field label="Purchase Price (₹)" hint={form.productType === 'composite' ? 'Calculated from the recipe' : undefined}>
-                    <Input
-                      type="number"
-                      step="0.01"
-                      value={
-                        form.productType === 'composite' && !form.useCustomPricing
-                          ? computeRecipeTotals(form.recipeItems, products).unitCost.toFixed(2)
-                          : form.purchasePrice
-                      }
-                      onChange={(e) => setForm({ ...form, purchasePrice: e.target.value })}
-                      disabled={form.productType === 'composite' && !form.useCustomPricing}
-                      className={form.productType === 'composite' && !form.useCustomPricing ? 'opacity-70 cursor-not-allowed' : ''}
-                    />
-                  </Field>
-                  <Field label="Selling Price (₹) *">
-                    <Input 
-                      type="number" 
-                      step="0.01" 
-                      value={
-                        form.productType === 'combo' && !form.useCustomPricing
-                          ? (() => {
-                              const rows = (form.comboItems || []).map(ing => {
-                                const material = (products || []).find(p => p.id === ing.productId);
-                                const qty = Number(ing.qty) || 0;
-                                const cost = material ? Number(material.price) || 0 : 0;
-                                return { lineCost: qty * cost };
-                              });
-                              return rows.reduce((sum, r) => sum + r.lineCost, 0).toFixed(2);
-                            })()
-                          : form.price
-                      } 
-                      onChange={(e) => setForm({ ...form, price: e.target.value })} 
-                      required 
-                      disabled={form.productType === 'combo' && !form.useCustomPricing}
-                      className={form.productType === 'combo' && !form.useCustomPricing ? 'opacity-70 cursor-not-allowed' : ''}
-                    />
-                  </Field>
-                  <Field label="MRP (₹)">
-                    <Input type="number" step="0.01" value={form.mrp} onChange={(e) => setForm({ ...form, mrp: e.target.value })} />
-                  </Field>
-                  <Field label="Wholesale Price (₹)">
-                    <Input type="number" step="0.01" value={form.wholesalePrice} onChange={(e) => setForm({ ...form, wholesalePrice: e.target.value })} />
-                  </Field>
-                </div>
-                {(form.productType === 'composite' || form.productType === 'combo') && (
-                  <div className="pt-2">
-                    <label className="flex items-center gap-2 cursor-pointer text-xs font-medium text-[color:var(--text-secondary)]">
-                      <input 
-                        type="checkbox" 
-                        checked={form.useCustomPricing} 
-                        onChange={(e) => setForm({ ...form, useCustomPricing: e.target.checked })}
-                        className="rounded border-[color:var(--border-strong)] text-indigo-600 focus:ring-indigo-500"
-                      />
-                      Enable Custom Pricing Override (Override auto-calculated {form.productType === 'composite' ? 'Purchase Price' : 'Selling Price'})
-                    </label>
-                  </div>
-                )}
-              </div>
-            ) : null}
-
-            {form.productType !== 'service' && form.productType !== 'composite' && form.productType !== 'combo' && (
-              <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
-                <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider flex items-center justify-between">
-                  <span>Warehouse Distribution & Minimum Stock</span>
-                  <span className="bg-indigo-100 text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300 px-2 py-0.5 rounded-full text-[9px]">Total: {form.stock || 0}</span>
-                </h4>
-                <div className="grid grid-cols-3 gap-3">
-                  <Field label="Select Warehouse">
-                    <Select 
-                      value={form.primaryWarehouse || warehouses[0]?.id || ''}
-                      onChange={(e) => setForm({ ...form, primaryWarehouse: e.target.value })}
-                    >
-                      {(warehouses || []).map((w) => (
-                        <option key={w.id} value={w.id}>{w.name}</option>
-                      ))}
-                    </Select>
-                  </Field>
-                  <Field label="Stock in Selected Warehouse">
-                    <Input 
-                      type="number" 
-                      step="any"
-                      value={form.warehouses?.[form.primaryWarehouse || warehouses[0]?.id] ?? ''} 
-                      onChange={(e) => {
-                        const whId = form.primaryWarehouse || warehouses[0]?.id;
-                        if (!whId) return;
-                        const newStock = Number(e.target.value) || 0;
-                        const newWarehouses = { ...form.warehouses, [whId]: newStock };
-                        const totalStock = Object.values(newWarehouses).reduce((sum, val) => sum + (Number(val) || 0), 0);
-                        setForm({ ...form, warehouses: newWarehouses, stock: totalStock });
-                      }}
-                      disabled={form.productType === 'combo'}
-                      className={form.productType === 'combo' ? 'opacity-70 cursor-not-allowed' : ''}
-                    />
-                    {(() => {
-                        const isKg = String(form.unit).toLowerCase() === 'kg';
-                        const isLtr = ['ltr', 'l', 'liter', 'liters', 'litre', 'litres'].includes(String(form.unit).toLowerCase());
-                        const hasCustom = !!form.customSubUnitName && Number(form.customSubUnitFactor) > 0;
-                        if (isKg || isLtr) {
-                            return <div className="text-[10px] text-indigo-600 dark:text-indigo-400 mt-1 ml-1 font-medium">Auto-converted: {Number(form.stock || 0) * 1000} {isKg ? 'g' : 'ml'} total</div>
-                        } else if (hasCustom) {
-                            return <div className="text-[10px] text-indigo-600 dark:text-indigo-400 mt-1 ml-1 font-medium">Auto-converted: {Number(form.stock || 0) * Number(form.customSubUnitFactor)} {form.customSubUnitName} total</div>
-                        }
-                        return null;
-                    })()}
-                  </Field>
-                  <Field label="Minimum Alert Level">
-                    <Input type="number" value={form.minStock} onChange={(e) => setForm({ ...form, minStock: e.target.value })} />
-                  </Field>
-                </div>
-              </div>
-            )}
-
-            {form.productType === 'composite' && (
-              <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] text-[11px] text-[color:var(--text-muted)]">
-                This is a composite item — it has no stock of its own. Its availability is computed live from the raw materials in its recipe below ("Can produce").
-              </div>
-            )}
-
-            {form.productType === 'composite' && (
-              <div className="p-3 rounded-xl border border-emerald-300/50 dark:border-emerald-800/60 bg-emerald-50/40 dark:bg-emerald-950/20 space-y-3">
-                <div>
-                  <h4 className="text-xs font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
-                    <Boxes className="h-3.5 w-3.5" /> Recipe — Raw Materials
-                  </h4>
-                  <p className="text-[11px] text-[color:var(--text-muted)] mt-0.5">
-                    Selling one {form.unit || 'unit'} of this product consumes these raw materials from stock. At least one material with a quantity is required.
-                  </p>
-                </div>
-
-
-
-                <div className="space-y-2">
-                  {(form.recipeItems || []).length > 0 && (
-                    <div className="hidden md:grid grid-cols-12 gap-2 px-2 text-[10px] font-bold uppercase text-[color:var(--text-muted)]">
-                      <div className="col-span-5">Raw Material</div>
-                      <div className="col-span-2">Qty</div>
-                      <div className="col-span-1 text-center">Unit</div>
-                      <div className="col-span-2 text-right">Cost</div>
-                      <div className="col-span-1 text-right">Line Cost</div>
-                    </div>
-                  )}
-
-                  {(form.recipeItems || []).map((row, idx) => (
-                    <IngredientRow
-                      key={idx}
-                      row={row}
-                      index={idx}
-                      products={products}
-                      excludeIds={[editing?.id, ...(form.recipeItems || []).map((i) => i.productId)].filter(Boolean)}
-                      onChange={updateIngredient}
-                      onRemove={removeIngredient}
-                    />
-                  ))}
-
-                  <Button type="button" size="sm" variant="secondary" icon={Plus} onClick={addIngredient}>
-                    Add Raw Material
-                  </Button>
-                </div>
-
-                {(() => {
-                  const totals = computeRecipeTotals(form.recipeItems, products);
-                  const sellingPrice = Number(form.price) || 0;
-                  const margin = sellingPrice - totals.unitCost;
-                  const marginPct = sellingPrice ? (margin / sellingPrice) * 100 : 0;
-                  return (
-                    <div className="pt-2 border-t border-emerald-300/40 dark:border-emerald-800/40 space-y-3">
-                      <div className="grid grid-cols-3 gap-2">
-                        <StatBlock label="Material Cost" value={money(totals.unitCost)} />
-                        <StatBlock label="Margin" value={money(margin)} tone={margin < 0 ? 'danger' : 'success'} />
-                        <StatBlock label="Margin %" value={`${marginPct.toFixed(1)}%`} tone={margin < 0 ? 'danger' : 'success'} />
-                      </div>
-                      <div className="grid grid-cols-2 gap-3 pt-2">
-                        <Field label="Final Selling Price (₹) *">
-                          <Input 
-                            type="number" 
-                            step="1" 
-                            value={form.price}
-                            onChange={(e) => setForm({ ...form, price: e.target.value })} 
-                            required 
-                          />
-                        </Field>
-                      </div>
-                      <div className="text-xs font-bold text-[color:var(--text-secondary)]">
-                        Can produce:{' '}
-                        <span className={totals.producible <= 0 ? 'text-red-600' : totals.producible <= 5 ? 'text-amber-600' : 'text-emerald-600'}>
-                          {totals.producible} {form.unit || 'unit'}(s)
-                        </span>{' '}
-                        from current raw material stock.
-                      </div>
-                    </div>
-                  );
-                })()}
-              </div>
-            )}
-            {form.productType === 'combo' && (
-              <div className="p-3 rounded-xl border border-indigo-300/50 dark:border-indigo-800/60 bg-indigo-50/40 dark:bg-indigo-950/20 space-y-3">
-                <div>
-                  <h4 className="text-xs font-bold text-indigo-700 dark:text-indigo-400 uppercase tracking-wider flex items-center gap-1.5">
-                    <Boxes className="h-3.5 w-3.5" /> Combo Products
-                  </h4>
-                  <p className="text-[11px] text-[color:var(--text-muted)] mt-0.5">
-                    Select existing products to include in this combo bundle.
-                  </p>
-                </div>
-
-                <div className="space-y-2">
-                  {(form.comboItems || []).length > 0 && (
-                    <div className="hidden md:grid grid-cols-12 gap-2 px-2 text-[10px] font-bold uppercase text-[color:var(--text-muted)]">
-                      <div className="col-span-5">Product</div>
-                      <div className="col-span-2">Qty</div>
-                      <div className="col-span-1 text-center">Unit</div>
-                      <div className="col-span-2 text-right">Value</div>
-                      <div className="col-span-1 text-right">Line Value</div>
-                    </div>
-                  )}
-
-                  {(form.comboItems || []).map((row, idx) => (
-                    <IngredientRow
-                      key={idx}
-                      row={row}
-                      index={idx}
-                      products={products}
-                      excludeIds={[editing?.id, ...(form.comboItems || []).map((i) => i.productId)].filter(Boolean)}
-                      onChange={updateComboItem}
-                      onRemove={removeComboItem}
-                    />
-                  ))}
-
-                  <Button type="button" size="sm" variant="secondary" icon={Plus} onClick={addComboItem}>
-                    Add Product to Combo
-                  </Button>
-                </div>
-
-                {(() => {
-                  const rows = (form.comboItems || []).map(ing => {
-                    const material = (products || []).find(p => p.id === ing.productId);
-                    const qty = Number(ing.qty) || 0;
-                    const cost = material ? Number(material.price) || 0 : 0;
-                    return { qty, cost, lineCost: qty * cost };
-                  }).filter(r => r.qty > 0);
-                  const totalComboPrice = rows.reduce((sum, r) => sum + r.lineCost, 0);
-                  const sellingPrice = form.useCustomPricing ? (Number(form.price) || 0) : totalComboPrice;
-                  const discount = totalComboPrice - sellingPrice;
-                  const discountPct = totalComboPrice ? (discount / totalComboPrice) * 100 : 0;
-                  const comboBuyable = (form.comboItems || []).length > 0
-                    ? Math.max(0, Math.floor(Math.min(...(form.comboItems || []).map(item => {
-                        const material = (products || []).find(p => p.id === item.productId);
-                        return material && Number(item.qty) > 0 ? (material.stock || 0) / Number(item.qty) : 0;
-                      }))))
-                    : 0;
-                  
-                  return (
-                    <div className="pt-2 border-t border-indigo-300/40 dark:border-indigo-800/40 space-y-3">
-                      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                        <StatBlock label="Items Total Value" value={money(totalComboPrice)} />
-                        <StatBlock label="Combo Selling Price" value={money(sellingPrice)} />
-                        <StatBlock label="Customer Savings" value={money(discount)} tone={discount < 0 ? 'danger' : 'success'} />
-                      </div>
-                      <div className="grid grid-cols-3 gap-3 pt-2">
-                        <Field label="Discount (%)">
-                          <Input 
-                            type="number" 
-                            step="1" 
-                            value={form.useCustomPricing ? parseFloat(discountPct.toFixed(2)) : ''}
-                            onChange={(e) => {
-                              let newPct = Number(e.target.value) || 0;
-                              if (newPct > 100) newPct = 100;
-                              const newDiscount = (totalComboPrice * newPct) / 100;
-                              setForm({ ...form, price: (totalComboPrice - newDiscount).toFixed(2), useCustomPricing: true });
-                            }} 
-                            placeholder="0"
-                          />
-                        </Field>
-                        <Field label="Discount Amount (₹)">
-                          <Input 
-                            type="number" 
-                            step="1" 
-                            value={form.useCustomPricing ? parseFloat(discount.toFixed(2)) : ''}
-                            onChange={(e) => {
-                              const newDiscount = Number(e.target.value) || 0;
-                              setForm({ ...form, price: (totalComboPrice - newDiscount).toFixed(2), useCustomPricing: true });
-                            }} 
-                            placeholder="0.00"
-                          />
-                        </Field>
-                        <Field label="Final Selling Price (₹) *">
-                          <Input 
-                            type="number" 
-                            step="1" 
-                            value={sellingPrice}
-                            onChange={(e) => setForm({ ...form, price: e.target.value, useCustomPricing: true })} 
-                            required 
-                          />
-                        </Field>
-                      </div>
-                      <div className="text-xs font-bold text-[color:var(--text-secondary)]">
-                        Available to sell:{' '}
-                        <span className={comboBuyable <= 0 ? 'text-red-600' : comboBuyable <= 5 ? 'text-amber-600' : 'text-emerald-600'}>
-                          {comboBuyable} {form.unit || 'combo'}(s)
-                        </span>{' '}
-                        from current component products stock.
-                      </div>
-                    </div>
-                  );
-                })()}
-              </div>
-            )}
-
-
-
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="HSN Code">
-                <Input value={form.hsn} onChange={(e) => setForm({ ...form, hsn: e.target.value })} />
-              </Field>
-              <Field label="GST Tax Rate (%)">
-                <Select value={form.taxRate} onChange={(e) => setForm({ ...form, taxRate: e.target.value })}>
-                  <option value={0}>0% (Exempt)</option>
-                  <option value={5}>5% GST</option>
-                  <option value={12}>12% GST</option>
-                  <option value={18}>18% GST</option>
-                  <option value={28}>28% GST</option>
-                </Select>
-              </Field>
-            </div>
-
-            <div className="flex justify-end gap-2 pt-3 border-t border-[color:var(--border-subtle)]">
-              <Button variant="secondary" onClick={() => setShowForm(false)}>Cancel</Button>
-              <Button icon={Save} type="submit" loading={saving} disabled={saving}>{editing ? 'Update Product' : 'Save Product'}</Button>
-            </div>
-          </form>
-        </Modal>
-      )}
+      <ProductFormModal
+        open={showForm}
+        editing={editing}
+        categories={categories}
+        units={units}
+        warehouses={warehouses}
+        products={products}
+        batchTrackingEnabled={batchTrackingEnabled}
+        storeNearExpiryDays={storeNearExpiryDays}
+        showToast={showToast}
+        onClose={() => setShowForm(false)}
+        onSaved={() => {
+          setShowForm(false);
+          onRefresh();
+        }}
+      />
 
       {/* Barcode Print Modal */}
       {labelProduct && (
         <BarcodePrinterModal product={labelProduct} onClose={() => setLabelProduct(null)} showToast={showToast} />
       )}
+
     </div>
   );
 }
@@ -2015,19 +2766,61 @@ function CategoriesTab({ categories, products, showToast, onRefresh }) {
  * Units Tab (Story 2)
  * ------------------------------------------------------------------ */
 
+const UNIT_NAME_RE = /^[a-zA-Z][a-zA-Z0-9\s-]{0,29}$/;
+
 function UnitsTab({ units, showToast, onRefresh }) {
   const [unitList, setUnitList] = useState(units || []);
   const [showModal, setShowModal] = useState(false);
   const [editingUnit, setEditingUnit] = useState(null);
   const [form, setForm] = useState({ name: '', subUnit: '', factor: '' });
+  const [saving, setSaving] = useState(false);
+  const [touched, setTouched] = useState(false);
 
   useEffect(() => {
     setUnitList(units || []);
   }, [units]);
 
+  const unitNames = useMemo(
+    () => (unitList || []).map((u) => (typeof u === 'object' ? u.name : u)).filter(Boolean),
+    [unitList]
+  );
+
+  const errors = useMemo(() => {
+    const e = {};
+    const name = form.name.trim();
+
+    if (!name) {
+      e.name = 'Unit name is required.';
+    } else if (!UNIT_NAME_RE.test(name)) {
+      e.name = 'Start with a letter — letters, numbers, spaces and hyphens only (max 30 characters).';
+    } else if (
+      unitNames.some(
+        (n) => n.toLowerCase() === name.toLowerCase() && n.toLowerCase() !== String(editingUnit || '').toLowerCase()
+      )
+    ) {
+      e.name = `A unit named "${name}" already exists.`;
+    }
+
+    if (form.subUnit) {
+      if (form.subUnit.toLowerCase() === name.toLowerCase()) {
+        e.subUnit = 'Sub-unit cannot be the same as the unit itself.';
+      }
+      if (!(Number(form.factor) > 0)) {
+        e.factor = 'Enter how many sub-units make up 1 of this unit.';
+      }
+    } else if (form.factor) {
+      e.subUnit = 'Pick a sub-unit to go with this quantity.';
+    }
+
+    return e;
+  }, [form, unitNames, editingUnit]);
+
+  const isValid = Object.keys(errors).length === 0 && !!form.name.trim();
+
   const openAdd = () => {
     setEditingUnit(null);
     setForm({ name: '', subUnit: '', factor: '' });
+    setTouched(false);
     setShowModal(true);
   };
 
@@ -2039,18 +2832,24 @@ function UnitsTab({ units, showToast, onRefresh }) {
       subUnit: unitObj.subUnit || '',
       factor: unitObj.factor || ''
     });
+    setTouched(false);
     setShowModal(true);
   };
 
   const saveUnit = async (e) => {
     e?.preventDefault();
-    if (!form.name.trim()) return showToast('Unit name is required.', 'error');
+    setTouched(true);
+    if (!isValid) {
+      showToast(Object.values(errors)[0] || 'Please fix the highlighted fields.', 'error');
+      return;
+    }
+    setSaving(true);
     try {
       const payload = {
         name: form.name.trim().toLowerCase(),
         newName: form.name.trim().toLowerCase(),
         subUnit: form.subUnit ? form.subUnit.trim().toLowerCase() : null,
-        factor: form.factor ? Number(form.factor) : null
+        factor: form.subUnit && form.factor ? Number(form.factor) : null
       };
 
       if (editingUnit) {
@@ -2064,6 +2863,8 @@ function UnitsTab({ units, showToast, onRefresh }) {
       onRefresh();
     } catch (err) {
       showToast(api.message(err, 'Failed to save unit.'), 'error');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -2139,45 +2940,70 @@ function UnitsTab({ units, showToast, onRefresh }) {
 
       {showModal && (
         <Modal open={true} title={editingUnit ? `Edit Unit (${editingUnit})` : 'Create Unit'} icon={Sliders} onClose={() => setShowModal(false)}>
-          <form onSubmit={saveUnit} className="space-y-4">
-            <Field label="Unit Name (e.g. kg, box, dozen, litre, pack)">
+          <form onSubmit={saveUnit} className="space-y-4" noValidate>
+            <Field label="Unit Name *" hint="e.g. kg, box, dozen, litre, bag">
               <Input
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder="e.g. box"
-                required
+                onBlur={() => setTouched(true)}
+                placeholder="e.g. bag"
+                autoFocus
               />
+              {touched && errors.name && (
+                <div className="mt-1 text-[11px] font-semibold text-rose-600">{errors.name}</div>
+              )}
             </Field>
 
             <div className="grid grid-cols-2 gap-3 p-3 rounded-xl bg-[color:var(--bg-subtle)] border border-[color:var(--border-subtle)]">
-              <Field label="Sub-Unit Name" hint="e.g. pcs, g, ml">
-                <Input
+              <Field label="Sub-Unit" hint="Optional — a smaller unit this breaks down into">
+                <Select
                   value={form.subUnit}
-                  onChange={(e) => setForm({ ...form, subUnit: e.target.value })}
-                  placeholder="e.g. pcs"
-                />
+                  onChange={(e) => setForm({ ...form, subUnit: e.target.value, factor: e.target.value ? form.factor : '' })}
+                >
+                  <option value="">No sub-unit (base unit)</option>
+                  {unitNames
+                    .filter((n) => n.toLowerCase() !== form.name.trim().toLowerCase())
+                    .map((n) => (
+                      <option key={n} value={n}>{n}</option>
+                    ))}
+                  {form.subUnit && !unitNames.some((n) => n.toLowerCase() === form.subUnit.toLowerCase()) && (
+                    <option value={form.subUnit}>{form.subUnit}</option>
+                  )}
+                </Select>
+                {touched && errors.subUnit && (
+                  <div className="mt-1 text-[11px] font-semibold text-rose-600">{errors.subUnit}</div>
+                )}
               </Field>
 
-              <Field label={`1 ${form.name || 'unit'} = how many ${form.subUnit || 'sub-units'}?`}>
+              <Field label="Quantity" hint={`1 ${form.name.trim() || 'unit'} = ? ${form.subUnit || 'sub-units'}`}>
                 <Input
                   type="number"
                   step="any"
+                  min="0"
                   value={form.factor}
                   onChange={(e) => setForm({ ...form, factor: e.target.value })}
-                  placeholder="e.g. 24"
+                  onBlur={() => setTouched(true)}
+                  placeholder="e.g. 25"
+                  disabled={!form.subUnit}
+                  className={!form.subUnit ? 'opacity-60 cursor-not-allowed' : ''}
                 />
+                {touched && errors.factor && (
+                  <div className="mt-1 text-[11px] font-semibold text-rose-600">{errors.factor}</div>
+                )}
               </Field>
             </div>
 
-            {form.name && form.subUnit && form.factor && (
+            {form.name.trim() && form.subUnit && Number(form.factor) > 0 && !errors.name && !errors.subUnit && (
               <div className="text-xs font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 p-2.5 rounded-xl border border-emerald-200 dark:border-emerald-800">
-                Conversion: 1 {form.name} = {form.factor} {form.subUnit}
+                Conversion: 1 {form.name.trim()} = {form.factor} {form.subUnit}
               </div>
             )}
 
             <div className="flex justify-end gap-2 pt-3 border-t border-[color:var(--border-subtle)]">
-              <Button variant="secondary" onClick={() => setShowModal(false)}>Cancel</Button>
-              <Button icon={Save} type="submit">Save Unit</Button>
+              <Button type="button" variant="secondary" onClick={() => setShowModal(false)}>Cancel</Button>
+              <Button icon={Save} type="submit" disabled={saving || (touched && !isValid)}>
+                {saving ? 'Saving…' : 'Save Unit'}
+              </Button>
             </div>
           </form>
         </Modal>
@@ -2662,6 +3488,369 @@ function HistoryTab({ products }) {
           </table>
         </div>
       </Panel>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Batch Tracking Tab — every batch across every batch-tracked product,
+ * in one place, with write-off.
+ * ------------------------------------------------------------------ */
+
+function BatchesTab({ products, showToast, onRefresh, storeNearExpiryDays }) {
+  const [view, setView] = useState('stock'); // 'stock' | 'sales'
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [writeOffTarget, setWriteOffTarget] = useState(null); // { product, batch }
+  const [writeOffForm, setWriteOffForm] = useState({ qty: '', reason: 'Expired' });
+  const [writingOff, setWritingOff] = useState(false);
+  const [returnTarget, setReturnTarget] = useState(null); // { product, batch }
+  const [returnForm, setReturnForm] = useState({ qty: '', reason: '' });
+  const [returning, setReturning] = useState(false);
+  const [salesReport, setSalesReport] = useState([]);
+  const [loadingReport, setLoadingReport] = useState(false);
+
+  useEffect(() => {
+    if (view !== 'sales') return;
+    setLoadingReport(true);
+    api.get('/inventory/batches/sales-report')
+      .then((res) => setSalesReport(Array.isArray(res) ? res : res?.data || []))
+      .catch(() => showToast('Failed to load batch sales report.', 'error'))
+      .finally(() => setLoadingReport(false));
+  }, [view]);
+
+  const rows = useMemo(() => {
+    const today = new Date();
+    const needle = query.trim().toLowerCase();
+    const list = [];
+
+    (products || []).forEach((p) => {
+      if (!p.trackBatches || !Array.isArray(p.batches)) return;
+      const windowDays = resolveNearExpiryDays(p, storeNearExpiryDays);
+      p.batches.forEach((b) => {
+        let status = 'active';
+        let days = null;
+        if (b.expiryDate) {
+          days = Math.ceil((new Date(b.expiryDate) - today) / 86400000);
+          if (days < 0) status = 'expired';
+          else if (days <= windowDays) status = 'near';
+        }
+        list.push({ product: p, batch: b, status, days });
+      });
+    });
+
+    return list
+      .filter((r) => {
+        if (statusFilter !== 'all' && r.status !== statusFilter) return false;
+        if (!needle) return true;
+        return r.batch.batchNo.toLowerCase().includes(needle) || r.product.name.toLowerCase().includes(needle);
+      })
+      .sort((a, b) => {
+        const rank = { expired: 0, near: 1, active: 2 };
+        if (rank[a.status] !== rank[b.status]) return rank[a.status] - rank[b.status];
+        if (a.batch.expiryDate && b.batch.expiryDate) return new Date(a.batch.expiryDate) - new Date(b.batch.expiryDate);
+        if (a.batch.expiryDate) return -1;
+        if (b.batch.expiryDate) return 1;
+        return new Date(b.batch.createdAt || 0) - new Date(a.batch.createdAt || 0);
+      });
+  }, [products, query, statusFilter, storeNearExpiryDays]);
+
+  const valuation = useMemo(() => {
+    return rows.reduce(
+      (acc, { product: p, batch: b }) => {
+        const qty = Number(b.qty) || 0;
+        const sellRate = b.sellPrice != null ? Number(b.sellPrice) : Number(p.price) || 0;
+        acc.costValue += qty * (Number(b.costPrice) || 0);
+        acc.retailValue += qty * sellRate;
+        return acc;
+      },
+      { costValue: 0, retailValue: 0 }
+    );
+  }, [rows]);
+
+  const submitWriteOff = async (e) => {
+    e?.preventDefault();
+    if (!writeOffTarget) return;
+    const qty = Number(writeOffForm.qty);
+    if (!(qty > 0)) {
+      showToast('Enter a quantity to write off.', 'error');
+      return;
+    }
+    setWritingOff(true);
+    try {
+      await api.post('/inventory/batches/writeoff', {
+        productId: writeOffTarget.product.id,
+        batchId: writeOffTarget.batch.id,
+        quantity: qty,
+        reason: writeOffForm.reason
+      });
+      showToast(`Wrote off ${qty} ${writeOffTarget.product.unit} from batch ${writeOffTarget.batch.batchNo}.`);
+      setWriteOffTarget(null);
+      onRefresh();
+    } catch (err) {
+      showToast(api.message(err, 'Failed to write off batch.'), 'error');
+    } finally {
+      setWritingOff(false);
+    }
+  };
+
+  const submitReturn = async (e) => {
+    e?.preventDefault();
+    if (!returnTarget) return;
+    const qty = Number(returnForm.qty);
+    if (!(qty > 0)) {
+      showToast('Enter a quantity to return.', 'error');
+      return;
+    }
+    setReturning(true);
+    try {
+      const res = await api.post('/inventory/batches/return', {
+        productId: returnTarget.product.id,
+        batchId: returnTarget.batch.id,
+        quantity: qty,
+        reason: returnForm.reason
+      });
+      showToast(res.message || `Returned ${qty} ${returnTarget.product.unit} from batch ${returnTarget.batch.batchNo}.`);
+      setReturnTarget(null);
+      onRefresh();
+    } catch (err) {
+      showToast(api.message(err, 'Failed to return batch to supplier.'), 'error');
+    } finally {
+      setReturning(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-1.5 p-1 rounded-xl bg-[color:var(--bg-subtle)] border border-[color:var(--border-subtle)] w-fit">
+        {[
+          { id: 'stock', label: 'Current Stock' },
+          { id: 'sales', label: 'Sales Report' }
+        ].map((v) => (
+          <button
+            key={v.id}
+            type="button"
+            onClick={() => setView(v.id)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+              view === v.id ? 'bg-indigo-600 text-white' : 'text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
+            }`}
+          >
+            {v.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
+        <StatTile label="Batches Shown" value={rows.length} icon={AlertTriangle} />
+        <StatTile label="Stock Value (Cost)" value={money(valuation.costValue, { decimals: false })} icon={IndianRupee} />
+        <StatTile label="Stock Value (Retail)" value={money(valuation.retailValue, { decimals: false })} tone="accent" />
+      </div>
+
+      {view === 'stock' && (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-3 bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
+            <SearchInput value={query} onChange={setQuery} placeholder="Search batch no. or product..." className="w-64" />
+            <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-44">
+              <option value="all">All Batches</option>
+              <option value="active">Active</option>
+              <option value="near">Near Expiry</option>
+              <option value="expired">Expired</option>
+            </Select>
+          </div>
+
+          <Panel title={`Batches (${rows.length})`} icon={AlertTriangle}>
+            {rows.length === 0 ? (
+              <EmptyState
+                icon={AlertTriangle}
+                title="No batches yet"
+                description="Batches appear here once you turn on batch tracking for a product and receive stock for it."
+              />
+            ) : (
+              <div className="overflow-x-auto max-h-[75vh]">
+                <table className="w-full text-xs text-left">
+                  <thead className="bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-muted)] uppercase border-b border-[color:var(--border-subtle)] sticky top-0">
+                    <tr>
+                      <th className="py-2.5 px-3">Product</th>
+                      <th className="py-2.5 px-3">Batch No.</th>
+                      <th className="py-2.5 px-3 text-right">Qty</th>
+                      <th className="py-2.5 px-3 text-right">Cost (₹)</th>
+                      <th className="py-2.5 px-3 text-right">Sell Price (₹)</th>
+                      <th className="py-2.5 px-3">Mfg Date</th>
+                      <th className="py-2.5 px-3">Expiry Date</th>
+                      <th className="py-2.5 px-3">Status</th>
+                      <th className="py-2.5 px-3 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                    {rows.map(({ product: p, batch: b, status, days }) => (
+                      <tr key={b.id}>
+                        <td className="py-2.5 px-3 font-bold text-[color:var(--text-primary)]">{p.name}</td>
+                        <td className="py-2.5 px-3 font-mono">{b.batchNo}</td>
+                        <td className="py-2.5 px-3 text-right font-mono">{b.qty} {p.unit}</td>
+                        <td className="py-2.5 px-3 text-right font-mono text-[color:var(--text-secondary)]">{money(b.costPrice)}</td>
+                        <td className="py-2.5 px-3 text-right font-mono text-[color:var(--text-secondary)]">
+                          {b.sellPrice != null ? money(b.sellPrice) : <span className="text-[color:var(--text-muted)]">Auto</span>}
+                        </td>
+                        <td className="py-2.5 px-3 text-[color:var(--text-muted)]">{b.mfgDate ? String(b.mfgDate).slice(0, 10) : '—'}</td>
+                        <td className="py-2.5 px-3 text-[color:var(--text-muted)]">{b.expiryDate ? String(b.expiryDate).slice(0, 10) : '—'}</td>
+                        <td className="py-2.5 px-3">
+                          <Badge tone={status === 'expired' ? 'danger' : status === 'near' ? 'warning' : 'success'}>
+                            {status === 'expired' ? `Expired ${Math.abs(days)}d ago` : status === 'near' ? `${days}d left` : 'Active'}
+                          </Badge>
+                        </td>
+                        <td className="py-2.5 px-3 text-right">
+                          {Number(b.qty) > 0 && (
+                            <div className="flex items-center justify-end gap-0.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setReturnForm({ qty: '', reason: '' });
+                                  setReturnTarget({ product: p, batch: b });
+                                }}
+                                className="p-1.5 rounded-lg hover:bg-indigo-50 dark:hover:bg-indigo-950/40 text-[color:var(--text-muted)] hover:text-indigo-600"
+                                title="Return to supplier"
+                              >
+                                <RefreshCw className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setWriteOffForm({ qty: '', reason: 'Expired' });
+                                  setWriteOffTarget({ product: p, batch: b });
+                                }}
+                                className="p-1.5 rounded-lg hover:bg-amber-50 dark:hover:bg-amber-950/40 text-[color:var(--text-muted)] hover:text-amber-600"
+                                title="Write off (expired/damaged)"
+                              >
+                                <AlertTriangle className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Panel>
+        </>
+      )}
+
+      {view === 'sales' && (
+        <Panel title={`Batch Sales Report (${salesReport.length})`} icon={IndianRupee}>
+          {loadingReport ? (
+            <Spinner text="Loading batch sales..." />
+          ) : salesReport.length === 0 ? (
+            <EmptyState
+              icon={IndianRupee}
+              title="No batch sales yet"
+              description="Once a sale draws from a batch-tracked product, it'll show up here with quantity sold and revenue attributed to that batch."
+            />
+          ) : (
+            <div className="overflow-x-auto max-h-[75vh]">
+              <table className="w-full text-xs text-left">
+                <thead className="bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-muted)] uppercase border-b border-[color:var(--border-subtle)] sticky top-0">
+                  <tr>
+                    <th className="py-2.5 px-3">Product</th>
+                    <th className="py-2.5 px-3">Batch No.</th>
+                    <th className="py-2.5 px-3 text-right">Qty Sold</th>
+                    <th className="py-2.5 px-3 text-right">Revenue (₹)</th>
+                    <th className="py-2.5 px-3 text-right">Order Lines</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                  {salesReport.map((r) => (
+                    <tr key={r.batchId}>
+                      <td className="py-2.5 px-3 font-bold text-[color:var(--text-primary)]">{r.productName}</td>
+                      <td className="py-2.5 px-3 font-mono">{r.batchNo}</td>
+                      <td className="py-2.5 px-3 text-right font-mono">{r.qtySold} {r.unit}</td>
+                      <td className="py-2.5 px-3 text-right font-mono font-bold text-emerald-600">{money(r.revenue)}</td>
+                      <td className="py-2.5 px-3 text-right font-mono text-[color:var(--text-muted)]">{r.orderCount}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Panel>
+      )}
+
+      {returnTarget && (
+        <Modal
+          open={true}
+          title={`Return Batch ${returnTarget.batch.batchNo} to Supplier`}
+          icon={RefreshCw}
+          onClose={() => setReturnTarget(null)}
+        >
+          <form onSubmit={submitReturn} className="space-y-4">
+            <p className="text-xs text-[color:var(--text-muted)]">
+              {returnTarget.product.name} — {returnTarget.batch.qty} {returnTarget.product.unit} available in this batch. This only
+              corrects stock; adjust the vendor's payable manually via Purchases/Payments if this return should reduce what's owed to them.
+            </p>
+            <Field label={`Quantity to Return (max ${returnTarget.batch.qty})`}>
+              <Input
+                type="number"
+                step="any"
+                min="0"
+                max={returnTarget.batch.qty}
+                value={returnForm.qty}
+                onChange={(e) => setReturnForm({ ...returnForm, qty: e.target.value })}
+                autoFocus
+              />
+            </Field>
+            <Field label="Reason (optional)">
+              <Input
+                value={returnForm.reason}
+                onChange={(e) => setReturnForm({ ...returnForm, reason: e.target.value })}
+                placeholder="e.g. Damaged on arrival"
+              />
+            </Field>
+            <div className="flex justify-end gap-2 pt-3 border-t border-[color:var(--border-subtle)]">
+              <Button type="button" variant="secondary" onClick={() => setReturnTarget(null)}>Cancel</Button>
+              <Button icon={RefreshCw} type="submit" loading={returning} disabled={returning}>Return to Supplier</Button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {writeOffTarget && (
+        <Modal
+          open={true}
+          title={`Write Off Batch ${writeOffTarget.batch.batchNo}`}
+          icon={AlertTriangle}
+          onClose={() => setWriteOffTarget(null)}
+        >
+          <form onSubmit={submitWriteOff} className="space-y-4">
+            <p className="text-xs text-[color:var(--text-muted)]">
+              {writeOffTarget.product.name} — {writeOffTarget.batch.qty} {writeOffTarget.product.unit} available in this batch
+              {writeOffTarget.batch.expiryDate ? ` (expires ${String(writeOffTarget.batch.expiryDate).slice(0, 10)})` : ''}.
+            </p>
+            <Field label={`Quantity to Write Off (max ${writeOffTarget.batch.qty})`}>
+              <Input
+                type="number"
+                step="any"
+                min="0"
+                max={writeOffTarget.batch.qty}
+                value={writeOffForm.qty}
+                onChange={(e) => setWriteOffForm({ ...writeOffForm, qty: e.target.value })}
+                autoFocus
+              />
+            </Field>
+            <Field label="Reason">
+              <Select value={writeOffForm.reason} onChange={(e) => setWriteOffForm({ ...writeOffForm, reason: e.target.value })}>
+                <option value="Expired">Expired</option>
+                <option value="Damaged">Damaged</option>
+                <option value="Quality Issue">Quality Issue</option>
+                <option value="Other">Other</option>
+              </Select>
+            </Field>
+            <div className="flex justify-end gap-2 pt-3 border-t border-[color:var(--border-subtle)]">
+              <Button type="button" variant="secondary" onClick={() => setWriteOffTarget(null)}>Cancel</Button>
+              <Button icon={AlertTriangle} type="submit" loading={writingOff} disabled={writingOff}>Write Off</Button>
+            </div>
+          </form>
+        </Modal>
+      )}
     </div>
   );
 }

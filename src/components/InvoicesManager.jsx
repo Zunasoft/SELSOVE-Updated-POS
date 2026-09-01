@@ -38,12 +38,16 @@ import {
   Store,
   Boxes,
   Truck,
-  Package
+  Package,
+  Maximize2,
+  Minimize2
 } from 'lucide-react';
 
 import api, { money, fmtDate, fmtDateTime, todayISO, monthStartISO } from '../lib/api';
-import { Panel, SectionHeader, StatTile, Badge, Button, Spinner, EmptyState, DataTable, Modal, Field, Input, Select, Textarea } from '../lib/ui';
-import { exportReport } from '../lib/exporters';
+import { Panel, SectionHeader, StatTile, Badge, Button, Spinner, EmptyState, DataTable, Modal, Field, Input, Select, Textarea, SearchInput } from '../lib/ui';
+import { ThermalReceiptView, THERMAL_THEMES, BILLING_THERMAL_THEME_IDS } from './ThermalReceiptTemplates';
+import { InvoiceDocumentView, INVOICE_THEMES, ACCENT_COLORS } from './InvoiceDocumentTemplates';
+import { exportInvoiceToWord, exportBillToWord, exportReport } from '../lib/exporters';
 
 /** Converts number to Indian words (Rupees) */
 function numberToWords(num) {
@@ -345,14 +349,27 @@ function ProductItemCell({ row, index, onOpenPicker, onUpdateName }) {
   );
 }
 
-export default function InvoicesManager({ tenant, showToast, onNavigate }) {
-  const [mainTab, setMainTab] = useState('INVOICES'); // 'INVOICES' | 'DRAFTS' | 'QUOTATIONS'
+export default function InvoicesManager({ tenant, showToast, settings: appSettings, onNavigate }) {
+  const [mainTab, setMainTab] = useState('INVOICES'); // 'INVOICES' | 'PURCHASES' | 'DRAFTS' | 'QUOTATIONS' | 'RETURNS'
   const [invoices, setInvoices] = useState([]);
+  const [purchaseInvoices, setPurchaseInvoices] = useState([]);
   const [quotations, setQuotations] = useState([]);
+  const [creditNotes, setCreditNotes] = useState([]);
   const [products, setProducts] = useState([]);
   const [customers, setCustomers] = useState([]);
-  const [settings, setSettings] = useState(null);
+  const [settings, setSettings] = useState(appSettings || null);
   const [loading, setLoading] = useState(true);
+  const [returnTarget, setReturnTarget] = useState(null);
+  const [creditNoteDetail, setCreditNoteDetail] = useState(null);
+  const [creditNoteSearch, setCreditNoteSearch] = useState('');
+  const [purchaseSearch, setPurchaseSearch] = useState('');
+  const [purchaseStatusFilter, setPurchaseStatusFilter] = useState('ALL');
+
+  useEffect(() => {
+    if (appSettings) {
+      setSettings(appSettings);
+    }
+  }, [appSettings]);
 
   // Invoices filters
   const [search, setSearch] = useState('');
@@ -377,18 +394,22 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
   const fetchAllData = async () => {
     setLoading(true);
     try {
-      const [ordersRes, quotationsRes, productsRes, customersRes, settingsRes] = await Promise.all([
+      const [ordersRes, quotationsRes, productsRes, customersRes, settingsRes, creditNotesRes, purchasesRes] = await Promise.all([
         api.get('/orders', { limit: 1000 }).catch(() => []),
         api.get('/quotations', { limit: 1000 }).catch(() => []),
         api.get('/products').catch(() => []),
         api.get('/customers').catch(() => []),
-        api.get('/settings').catch(() => ({}))
+        api.get('/settings').catch(() => ({})),
+        api.get('/credit-notes').catch(() => []),
+        api.get('/purchases').catch(() => [])
       ]);
       setInvoices(ordersRes || []);
+      setPurchaseInvoices(purchasesRes || []);
       setQuotations(quotationsRes || []);
       setProducts(productsRes || []);
       setCustomers(customersRes || []);
       setSettings(settingsRes || null);
+      setCreditNotes(creditNotesRes || []);
     } catch (err) {
       showToast(api.message(err, 'Failed to fetch sales & quotation data.'), 'error');
     } finally {
@@ -434,6 +455,7 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
                     if (statusFilter === 'PARTIAL' && !isPartiallyPaid) return false;
                     if (statusFilter === 'DUE' && !(isFullyUnpaid || isPartiallyPaid)) return false;
                     if (statusFilter === 'VOID' && !isVoid) return false;
+                    if (statusFilter === 'OVERDUE' && !inv.isOverdue) return false;
 
                     if (inv.date) {
                       const invDateStr = String(inv.date).slice(0, 10);
@@ -511,6 +533,8 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
     let totalPaid = 0;
     let totalDue = 0;
     let voidCount = 0;
+    let overdueCount = 0;
+    let overdueAmount = 0;
 
     taxInvoices.forEach((inv) => {
       if (inv.status === 'VOID') {
@@ -524,6 +548,11 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
       totalAmount += tot;
       totalPaid += paid;
       totalDue += due;
+
+      if (inv.isOverdue) {
+        overdueCount++;
+        overdueAmount += due;
+      }
     });
 
     return {
@@ -531,7 +560,9 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
       totalAmount,
       totalPaid,
       totalDue,
-      voidCount
+      voidCount,
+      overdueCount,
+      overdueAmount
     };
   }, [taxInvoices]);
 
@@ -574,6 +605,61 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
     };
   }, [quotations]);
 
+  const filteredCreditNotes = useMemo(() => {
+    const q = creditNoteSearch.trim().toLowerCase();
+    if (!q) return creditNotes;
+    return creditNotes.filter(
+      (v) => v.orderId?.toLowerCase().includes(q) || v.customerName?.toLowerCase().includes(q) || v.reason?.toLowerCase().includes(q)
+    );
+  }, [creditNotes, creditNoteSearch]);
+
+  const filteredPurchaseInvoices = useMemo(() => {
+    const q = purchaseSearch.toLowerCase().trim();
+    return (purchaseInvoices || []).filter((p) => {
+      if (purchaseStatusFilter !== 'ALL') {
+        const isVoid = p.paymentStatus === 'VOID';
+        const isPaid = p.paymentStatus === 'PAID' || Number(p.paidAmount) >= Number(p.totalAmount);
+        const isPartial = p.paymentStatus === 'PARTIAL' || (Number(p.paidAmount) > 0 && Number(p.paidAmount) < Number(p.totalAmount));
+        const isUnpaid = !isPaid && !isPartial && !isVoid;
+
+        if (purchaseStatusFilter === 'PAID' && !isPaid) return false;
+        if (purchaseStatusFilter === 'PARTIAL' && !isPartial) return false;
+        if (purchaseStatusFilter === 'UNPAID' && !isUnpaid) return false;
+        if (purchaseStatusFilter === 'VOID' && !isVoid) return false;
+      }
+      if (!q) return true;
+      return (
+        (p.invoiceNo && p.invoiceNo.toLowerCase().includes(q)) ||
+        (p.vendorName && p.vendorName.toLowerCase().includes(q)) ||
+        (p.vendorGstin && p.vendorGstin.toLowerCase().includes(q))
+      );
+    });
+  }, [purchaseInvoices, purchaseSearch, purchaseStatusFilter]);
+
+  const purchaseStats = useMemo(() => {
+    let totalPurchased = 0;
+    let totalPaid = 0;
+    let totalDue = 0;
+    let count = 0;
+
+    (purchaseInvoices || []).forEach((p) => {
+      if (p.paymentStatus === 'VOID') return;
+      count++;
+      const tot = Number(p.totalAmount || 0);
+      const paid = Number(p.paidAmount || (p.paymentStatus === 'PAID' ? tot : 0));
+      totalPurchased += tot;
+      totalPaid += paid;
+      totalDue += Math.max(0, tot - paid);
+    });
+
+    return {
+      count,
+      totalPurchased,
+      totalPaid,
+      totalDue
+    };
+  }, [purchaseInvoices]);
+
   const handleDeleteDraft = async (draft) => {
     if (!window.confirm(`Delete Draft Invoice #${draft.orderId}?`)) return;
     try {
@@ -594,6 +680,18 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
       fetchAllData();
     } catch (err) {
       showToast(api.message(err, 'Failed to void invoice.'), 'error');
+    }
+  };
+
+  const handleVoidCreditNote = async (cn) => {
+    if (!window.confirm(`Void this return for ${cn.customerName}? The returned stock will be reversed.`)) return;
+    try {
+      const res = await api.post(`/credit-notes/${cn.id}/void`);
+      showToast(res.message);
+      setCreditNoteDetail(null);
+      fetchAllData();
+    } catch (err) {
+      showToast(api.message(err, 'Could not void this credit note.'), 'error');
     }
   };
 
@@ -667,12 +765,11 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
         'Balance Due (₹)': due
       };
     });
-    exportReport({
+    exportReport(format, {
       title: 'Sales_Invoices_Register',
       filename: `Sales_Invoices_${todayISO()}`,
-      format,
       columns: ['Invoice #', 'Date', 'Customer Name', 'Phone', 'Payment Mode', 'Status', 'Subtotal (₹)', 'Tax (₹)', 'Discount (₹)', 'Total (₹)', 'Paid Amount (₹)', 'Balance Due (₹)'],
-      data: rows
+      rows
     });
     showToast(`Exported ${rows.length} invoices to ${format.toUpperCase()}.`, 'success');
   };
@@ -692,12 +789,11 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
       'Total (₹)': qt.total,
       'Converted Invoice': qt.convertedOrderId || '—'
     }));
-    exportReport({
+    exportReport(format, {
       title: 'Quotations_Register',
       filename: `Quotations_${todayISO()}`,
-      format,
       columns: ['Quotation #', 'Date', 'Valid Until', 'Customer Name', 'Phone', 'Status', 'Items Count', 'Subtotal (₹)', 'Tax (₹)', 'Discount (₹)', 'Total (₹)', 'Converted Invoice'],
-      data: rows
+      rows
     });
     showToast(`Exported ${rows.length} quotations to ${format.toUpperCase()}.`, 'success');
   };
@@ -749,68 +845,47 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
         }
       />
 
-      {/* Main Tab Bar */}
-      <div className="flex items-center gap-2 p-1 rounded-2xl bg-[color:var(--bg-subtle)] border border-[color:var(--border)] w-fit">
-        <button
-          type="button"
-          onClick={() => setMainTab('INVOICES')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
-            mainTab === 'INVOICES'
-              ? 'bg-indigo-600 text-white shadow-sm'
-              : 'text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
-          }`}
-        >
-          <Receipt className="w-4 h-4" />
-          <span>Tax Invoices</span>
-          <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
-            mainTab === 'INVOICES' ? 'bg-white/20 text-white' : 'bg-[color:var(--border)] text-[color:var(--text-secondary)]'
-          }`}>
-            {taxInvoices.length}
-          </span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setMainTab('DRAFTS')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
-            mainTab === 'DRAFTS'
-              ? 'bg-indigo-600 text-white shadow-sm'
-              : 'text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
-          }`}
-        >
-          <FileText className="w-4 h-4" />
-          <span>Draft Invoices</span>
-          <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
-            mainTab === 'DRAFTS' ? 'bg-white/20 text-white' : 'bg-[color:var(--border)] text-[color:var(--text-secondary)]'
-          }`}>
-            {draftInvoicesList.length}
-          </span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setMainTab('QUOTATIONS')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
-            mainTab === 'QUOTATIONS'
-              ? 'bg-indigo-600 text-white shadow-sm'
-              : 'text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
-          }`}
-        >
-          <FileCheck className="w-4 h-4" />
-          <span>Quotations &amp; Estimates</span>
-          <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
-            mainTab === 'QUOTATIONS' ? 'bg-white/20 text-white' : 'bg-[color:var(--border)] text-[color:var(--text-secondary)]'
-          }`}>
-            {(quotations || []).length}
-          </span>
-        </button>
+      {/* Main Tab Bar — wrapping icon+label pill strip, matching the Inventory/Purchases sections */}
+      <div className="flex flex-wrap gap-1.5 border-b border-[color:var(--border-subtle)] pb-3">
+        {[
+          { key: 'INVOICES', label: 'Sales Invoices', icon: Receipt, count: taxInvoices.length },
+          { key: 'PURCHASES', label: 'Purchase Invoices', icon: Truck, count: (purchaseInvoices || []).length },
+          { key: 'DRAFTS', label: 'Draft Invoices', icon: FileText, count: draftInvoicesList.length },
+          { key: 'QUOTATIONS', label: 'Quotations & Estimates', icon: FileCheck, count: (quotations || []).length },
+          { key: 'RETURNS', label: 'Returns / Credit Notes', icon: RefreshCw, count: (creditNotes || []).length }
+        ].map((t) => {
+          const Icon = t.icon;
+          const isActive = mainTab === t.key;
+          return (
+            <button
+              key={t.key}
+              type="button"
+              onClick={() => setMainTab(t.key)}
+              className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-[11.5px] font-bold transition-all ${
+                isActive
+                  ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/25'
+                  : 'text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-subtle)]'
+              }`}
+            >
+              <Icon className="w-3.5 h-3.5" />
+              <span>{t.label}</span>
+              <span
+                className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold leading-none ${
+                  isActive ? 'bg-white/20 text-white' : 'bg-[color:var(--border)] text-[color:var(--text-secondary)]'
+                }`}
+              >
+                {t.count}
+              </span>
+            </button>
+          );
+        })}
       </div>
 
       {/* Main Tab Content */}
       {mainTab === 'INVOICES' && (
         <>
           {/* Invoices KPI Ribbon */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <div className="surface rounded-2xl p-4 border border-[color:var(--border)]">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Issued Invoices</span>
@@ -858,6 +933,21 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
 
             <div className="surface rounded-2xl p-4 border border-[color:var(--border)]">
               <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Overdue</span>
+                <div className="p-1.5 rounded-lg bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400">
+                  <Clock className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-2 text-xl font-extrabold text-rose-600 dark:text-rose-400">
+                {money(invoiceStats.overdueAmount, { decimals: false })}
+              </div>
+              <div className="mt-1 text-[11px] text-[color:var(--text-muted)]">
+                {invoiceStats.overdueCount} invoice(s) past due
+              </div>
+            </div>
+
+            <div className="surface rounded-2xl p-4 border border-[color:var(--border)]">
+              <div className="flex items-center justify-between">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Voided Invoices</span>
                 <div className="p-1.5 rounded-lg bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400">
                   <XCircle className="w-4 h-4" />
@@ -876,19 +966,20 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
           <Panel className="space-y-3">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
               {/* Status Filter Tabs */}
-              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0">
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0 scroll-smooth snap-x snap-mandatory" style={{ scrollbarWidth: 'none' }}>
                 {[
                   { key: 'ALL', label: 'All Invoices' },
                   { key: 'PAID', label: 'Fully Paid' },
                   { key: 'PARTIAL', label: 'Partially Paid' },
                   { key: 'DUE', label: 'Unpaid / Due' },
+                  { key: 'OVERDUE', label: `Overdue${invoiceStats.overdueCount ? ` (${invoiceStats.overdueCount})` : ''}` },
                   { key: 'VOID', label: 'Void' }
                 ].map((tab) => (
                   <button
                     key={tab.key}
                     type="button"
                     onClick={() => setStatusFilter(tab.key)}
-                    className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
+                    className={`shrink-0 snap-start px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
                       statusFilter === tab.key
                         ? 'bg-indigo-600 text-white shadow-sm'
                         : 'text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-subtle)]'
@@ -1040,17 +1131,20 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
                           </td>
 
                           <td className="py-3 px-4 text-center">
-                            {isVoid ? (
-                              <Badge tone="danger">VOID</Badge>
-                            ) : isPartiallyPaid ? (
-                              <Badge tone="warning" className="bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border-amber-300">
-                                PARTIAL
-                              </Badge>
-                            ) : isFullyUnpaid ? (
-                              <Badge tone="warning">UNPAID</Badge>
-                            ) : (
-                              <Badge tone="success">PAID</Badge>
-                            )}
+                            <div className="flex flex-col items-center gap-1">
+                              {isVoid ? (
+                                <Badge tone="danger">VOID</Badge>
+                              ) : isPartiallyPaid ? (
+                                <Badge tone="warning" className="bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border-amber-300">
+                                  PARTIAL
+                                </Badge>
+                              ) : isFullyUnpaid ? (
+                                <Badge tone="warning">UNPAID</Badge>
+                              ) : (
+                                <Badge tone="success">PAID</Badge>
+                              )}
+                              {inv.isOverdue && <Badge tone="danger">OVERDUE</Badge>}
+                            </div>
                           </td>
 
                           <td className="py-3 px-4 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
@@ -1097,6 +1191,239 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
                                 title={isFullyUnpaid ? 'Delete unpaid invoice & restore stock' : 'Delete invoice'}
                               />
                             </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Panel>
+        </>
+      )}
+
+      {mainTab === 'PURCHASES' && (
+        <>
+          {/* Purchase Invoices KPI Ribbon */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="surface rounded-2xl p-4 border border-[color:var(--border)]">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Total Purchase Bills</span>
+                <div className="p-1.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400">
+                  <Truck className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-2 text-xl font-extrabold text-[color:var(--text-primary)]">
+                {purchaseStats.count}
+              </div>
+              <div className="mt-1 text-[11px] text-[color:var(--text-muted)]">
+                Total Invoiced: <span className="font-semibold font-mono text-[color:var(--text-secondary)]">{money(purchaseStats.totalPurchased, { decimals: false })}</span>
+              </div>
+            </div>
+
+            <div className="surface rounded-2xl p-4 border border-[color:var(--border)]">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Amount Settled</span>
+                <div className="p-1.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400">
+                  <CheckCircle2 className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-2 text-xl font-extrabold text-emerald-600 dark:text-emerald-400">
+                {money(purchaseStats.totalPaid, { decimals: false })}
+              </div>
+              <div className="mt-1 text-[11px] text-emerald-600/80 dark:text-emerald-400/80 font-semibold">
+                Paid to suppliers
+              </div>
+            </div>
+
+            <div className="surface rounded-2xl p-4 border border-[color:var(--border)]">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Balance Payable</span>
+                <div className="p-1.5 rounded-lg bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400">
+                  <Clock className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-2 text-xl font-extrabold text-amber-600 dark:text-amber-400">
+                {money(purchaseStats.totalDue, { decimals: false })}
+              </div>
+              <div className="mt-1 text-[11px] text-amber-600/80 dark:text-amber-400/80 font-semibold">
+                Outstanding vendor dues
+              </div>
+            </div>
+
+            <div className="surface rounded-2xl p-4 border border-[color:var(--border)] flex flex-col justify-between">
+              <div>
+                <span className="text-[11px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">Purchase Register</span>
+                <div className="text-xs text-[color:var(--text-secondary)] mt-1">
+                  Manage vendor bills, receipts &amp; payables.
+                </div>
+              </div>
+              <Button
+                variant="primary"
+                size="sm"
+                icon={Truck}
+                onClick={() => {
+                  if (onNavigate) onNavigate('purchases');
+                }}
+                className="mt-2 w-full justify-center"
+              >
+                Go to Purchases
+              </Button>
+            </div>
+          </div>
+
+          {/* Purchase Invoices Table Panel */}
+          <Panel className="space-y-3">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-bold text-[color:var(--text-secondary)]">
+                  Vendor Purchase Invoices ({filteredPurchaseInvoices.length})
+                </span>
+
+                <div className="flex items-center gap-1 border-l border-[color:var(--border)] pl-2">
+                  {['ALL', 'PAID', 'PARTIAL', 'UNPAID', 'VOID'].map((st) => (
+                    <button
+                      key={st}
+                      type="button"
+                      onClick={() => setPurchaseStatusFilter(st)}
+                      className={`text-[10.5px] font-bold px-2 py-1 rounded-lg transition-all ${
+                        purchaseStatusFilter === st
+                          ? 'bg-indigo-600 text-white shadow-xs'
+                          : 'text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-subtle)]'
+                      }`}
+                    >
+                      {st === 'ALL' ? 'All Status' : st}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="relative min-w-[240px]">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[color:var(--text-muted)]" />
+                <input
+                  type="text"
+                  placeholder="Search Invoice #, vendor, GSTIN…"
+                  value={purchaseSearch}
+                  onChange={(e) => setPurchaseSearch(e.target.value)}
+                  className="field-input text-xs"
+                  style={{ paddingLeft: '2.1rem' }}
+                />
+              </div>
+            </div>
+
+            {loading ? (
+              <Spinner label="Loading purchase invoices…" />
+            ) : filteredPurchaseInvoices.length === 0 ? (
+              <EmptyState
+                icon={Truck}
+                title="No Purchase Invoices Found"
+                hint="You have not recorded any purchase invoices matching your filter criteria."
+                action={
+                  <Button
+                    variant="primary"
+                    icon={Plus}
+                    onClick={() => {
+                      if (onNavigate) onNavigate('purchases');
+                    }}
+                  >
+                    Go to Purchase Register
+                  </Button>
+                }
+              />
+            ) : (
+              <div className="overflow-x-auto rounded-xl border border-[color:var(--border)]">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="border-b border-[color:var(--border)] bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-secondary)] uppercase tracking-wider text-[10.5px]">
+                      <th className="py-3 px-4">Bill Date</th>
+                      <th className="py-3 px-4">Invoice / Bill #</th>
+                      <th className="py-3 px-4">Vendor / Supplier</th>
+                      <th className="py-3 px-4">Payment Method</th>
+                      <th className="py-3 px-4 text-center">Items</th>
+                      <th className="py-3 px-4 text-right">Invoiced Amount</th>
+                      <th className="py-3 px-4 text-right">Paid Amount</th>
+                      <th className="py-3 px-4 text-center">Status</th>
+                      <th className="py-3 px-4 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                    {filteredPurchaseInvoices.map((pur) => {
+                      const isVoid = pur.paymentStatus === 'VOID';
+                      const tot = Number(pur.totalAmount || 0);
+                      const paid = Number(pur.paidAmount || (pur.paymentStatus === 'PAID' ? tot : 0));
+                      const due = Math.max(0, tot - paid);
+
+                      return (
+                        <tr key={pur.id} className="hover:bg-[color:var(--bg-subtle)]/70 transition-colors">
+                          <td className="py-3 px-4 whitespace-nowrap">
+                            <div className="font-semibold text-[color:var(--text-primary)]">{fmtDate(pur.date)}</div>
+                            {pur.dueDate && (
+                              <div className="text-[10.5px] text-[color:var(--text-muted)]">Due: {fmtDate(pur.dueDate)}</div>
+                            )}
+                          </td>
+
+                          <td className="py-3 px-4 whitespace-nowrap font-mono font-bold text-indigo-600 dark:text-indigo-400">
+                            {pur.invoiceNo || pur.id}
+                          </td>
+
+                          <td className="py-3 px-4">
+                            <div className="font-bold text-[color:var(--text-primary)]">{pur.vendorName}</div>
+                            {pur.vendorGstin && (
+                              <div className="text-[10.5px] text-[color:var(--text-muted)] font-mono">GST: {pur.vendorGstin}</div>
+                            )}
+                          </td>
+
+                          <td className="py-3 px-4 whitespace-nowrap text-[color:var(--text-secondary)]">
+                            {pur.paymentMode || 'Cash'}
+                          </td>
+
+                          <td className="py-3 px-4 text-center font-mono text-xs">
+                            {(pur.items || []).length}
+                          </td>
+
+                          <td className="py-3 px-4 text-right font-mono font-bold text-[color:var(--text-primary)]">
+                            {money(tot)}
+                          </td>
+
+                          <td className="py-3 px-4 text-right font-mono font-semibold text-emerald-600 dark:text-emerald-400">
+                            {money(paid)}
+                            {due > 0 && !isVoid && (
+                              <div className="text-[10px] text-amber-600 dark:text-amber-400 font-mono">Due: {money(due)}</div>
+                            )}
+                          </td>
+
+                          <td className="py-3 px-4 text-center whitespace-nowrap">
+                            {isVoid ? (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300">
+                                VOID
+                              </span>
+                            ) : due === 0 ? (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300">
+                                PAID
+                              </span>
+                            ) : paid > 0 ? (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300">
+                                PARTIAL
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400">
+                                UNPAID
+                              </span>
+                            )}
+                          </td>
+
+                          <td className="py-3 px-4 text-right whitespace-nowrap">
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              icon={Eye}
+                              onClick={() => {
+                                if (onNavigate) onNavigate('purchases');
+                              }}
+                            >
+                              View in Purchases
+                            </Button>
                           </td>
                         </tr>
                       );
@@ -1382,7 +1709,7 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
           <Panel className="space-y-3">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
               {/* Status Filter Tabs */}
-              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0">
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0 scroll-smooth snap-x snap-mandatory" style={{ scrollbarWidth: 'none' }}>
                 {[
                   { key: 'ALL', label: 'All Quotations' },
                   { key: 'PENDING', label: 'Pending / Open' },
@@ -1394,7 +1721,7 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
                     key={tab.key}
                     type="button"
                     onClick={() => setQuotationStatusFilter(tab.key)}
-                    className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
+                    className={`shrink-0 snap-start px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
                       quotationStatusFilter === tab.key
                         ? 'bg-indigo-600 text-white shadow-sm'
                         : 'text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-subtle)]'
@@ -1598,6 +1925,40 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
         </>
       )}
 
+      {mainTab === 'RETURNS' && (
+        <Panel className="space-y-3">
+          <SectionHeader
+            eyebrow="Sales Returns"
+            title="Credit Notes"
+            icon={RefreshCw}
+            subtitle="Partial returns against an issued invoice — open the invoice and use “Return Items” to credit a customer without voiding the whole bill."
+          />
+          <SearchInput value={creditNoteSearch} onChange={setCreditNoteSearch} placeholder="Search by invoice, customer, or reason…" className="max-w-sm" />
+          <DataTable
+            maxHeight="56vh"
+            columns={[
+              { key: 'date', label: 'Date', width: 100, render: (v) => fmtDate(v.date) },
+              { key: 'orderId', label: 'Against Invoice', render: (v) => v.orderId },
+              { key: 'customerName', label: 'Customer', render: (v) => v.customerName },
+              { key: 'reason', label: 'Reason', render: (v) => v.reason },
+              { key: 'items', label: 'Items', width: 70, align: 'right', render: (v) => v.items?.length || 0 },
+              { key: 'totalAmount', label: 'Credited', align: 'right', width: 120, render: (v) => <span className="font-bold font-mono">{money(v.totalAmount)}</span> },
+              { key: 'status', label: 'Status', width: 90, render: (v) => (v.status === 'VOID' ? <Badge tone="danger">VOID</Badge> : <Badge tone="success">Active</Badge>) }
+            ]}
+            rows={filteredCreditNotes}
+            onRowClick={setCreditNoteDetail}
+            rowKey={(v) => v.id}
+            empty={
+              creditNoteSearch ? (
+                <EmptyState icon={RefreshCw} title="No returns match your search" />
+              ) : (
+                <EmptyState icon={RefreshCw} title="No returns recorded yet" hint="Open an invoice and use “Return Items” to credit a customer." />
+              )
+            }
+          />
+        </Panel>
+      )}
+
       {/* Dedicated Tax Invoice & Thermal Receipt Modal */}
       {selectedInvoice && (
         <TaxInvoiceModal
@@ -1610,8 +1971,25 @@ export default function InvoicesManager({ tenant, showToast, onNavigate }) {
           onVoid={() => handleVoidInvoice(selectedInvoice)}
           onDelete={() => handleDeleteInvoice(selectedInvoice)}
           onMarkPaid={(inv) => setPaymentModalInvoice(inv)}
+          onReturn={(inv) => {
+            setSelectedInvoice(null);
+            setReturnTarget(inv);
+          }}
         />
       )}
+
+      <SalesReturnModal
+        invoice={returnTarget}
+        creditNotes={creditNotes.filter((v) => v.orderId === returnTarget?.orderId)}
+        showToast={showToast}
+        onClose={() => setReturnTarget(null)}
+        onSaved={() => {
+          setReturnTarget(null);
+          fetchAllData();
+        }}
+      />
+
+      <CreditNoteDetailModal creditNote={creditNoteDetail} onClose={() => setCreditNoteDetail(null)} onVoid={handleVoidCreditNote} />
 
       {/* Professional Quotation / Estimate Modal */}
       {selectedQuotation && (
@@ -3443,7 +3821,7 @@ function IssueDraftModal({ draft, onClose, onIssued, showToast }) {
 }
 
 /** Standard Tax Invoice & Thermal Receipt Modal */
-function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onClose, onVoid, onMarkPaid, onDelete }) {
+function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onClose, onVoid, onMarkPaid, onDelete, onReturn }) {
   const company = invoice?.company || settings?.company || { name: tenant?.name || 'Selsolve Store' };
   const billing = invoice?.billing || settings?.billing || {};
   const isVoid = invoice?.status === 'VOID';
@@ -3451,713 +3829,270 @@ function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onC
   const totalAmt = Number(invoice?.total || 0);
   const paidAmt = Number(invoice?.paidAmount !== undefined ? invoice.paidAmount : (invoice?.status === 'PAID' ? totalAmt : 0));
   const dueAmt = Number(invoice?.balanceDue !== undefined ? invoice.balanceDue : (isVoid ? 0 : Math.max(0, totalAmt - paidAmt)));
-  const isPartiallyPaid = !isVoid && (invoice?.status === 'PARTIALLY_PAID' || invoice?.paymentStatus === 'PARTIALLY_PAID' || (paidAmt > 0 && dueAmt > 0));
-  const isFullyUnpaid = !isVoid && !isPartiallyPaid && (invoice?.status === 'UNPAID' || invoice?.paymentStatus === 'UNPAID' || dueAmt >= totalAmt);
 
-  // Client-side UPI payment QR — nothing is sent anywhere, it's just encoded locally.
-  const [qrDataUrl, setQrDataUrl] = useState('');
+  const [selectedInvoiceTheme, setSelectedInvoiceTheme] = useState(
+    billing?.activeInvoiceTemplate || 'corporate_blue'
+  );
+  const [selectedAccentColor, setSelectedAccentColor] = useState(
+    billing?.invoiceAccentColor || 'blue'
+  );
+  const [selectedThermalTheme, setSelectedThermalTheme] = useState(
+    BILLING_THERMAL_THEME_IDS.includes(billing?.activeThermalTemplate) ? billing.activeThermalTemplate : 'detailed_gst'
+  );
+  const [showFullscreenView, setShowFullscreenView] = useState(false);
+
   useEffect(() => {
-    if (!billing?.upiId || !invoice) {
-      setQrDataUrl('');
-      return;
-    }
-    let cancelled = false;
-    const amountToQr = dueAmt > 0 ? dueAmt : totalAmt;
-    const upiString = `upi://pay?pa=${encodeURIComponent(billing.upiId)}&pn=${encodeURIComponent(company?.name || 'Merchant')}&am=${Number(amountToQr).toFixed(2)}&cu=INR&tn=${encodeURIComponent(`Invoice ${invoice?.orderId || ''}`)}`;
-    QRCode.toDataURL(upiString, { margin: 1, width: 160 })
-      .then((url) => { if (!cancelled) setQrDataUrl(url); })
-      .catch(() => { if (!cancelled) setQrDataUrl(''); });
-    return () => { cancelled = true; };
-  }, [billing?.upiId, company?.name, dueAmt, totalAmt, invoice?.orderId, invoice]);
+    if (billing?.activeInvoiceTemplate) setSelectedInvoiceTheme(billing.activeInvoiceTemplate);
+    if (billing?.invoiceAccentColor) setSelectedAccentColor(billing.invoiceAccentColor);
+    if (BILLING_THERMAL_THEME_IDS.includes(billing?.activeThermalTemplate)) setSelectedThermalTheme(billing.activeThermalTemplate);
+  }, [billing?.activeInvoiceTemplate, billing?.invoiceAccentColor, billing?.activeThermalTemplate]);
+
+  const customInvoiceTemplates = (billing.customTemplates || []).filter((t) => t.type === 'invoice');
+  const customThermalTemplates = (billing.customTemplates || []).filter((t) => t.type === 'thermal');
+
+  // Must never fall back to the raw `billing` object here — see the matching
+  // comment in POSTerminal.jsx's ReceiptModal for why that breaks theme
+  // switching (billing's accumulated fields silently override the newly
+  // selected theme's own defaults for almost everything).
+  const selectedCustomInvoice = customInvoiceTemplates.find((t) => t.id === selectedInvoiceTheme);
+  const activeInvoiceConfig = selectedCustomInvoice ? selectedCustomInvoice.config : {};
+
+  const selectedCustomThermal = customThermalTemplates.find((t) => t.id === selectedThermalTheme);
+  const activeThermalConfig = selectedCustomThermal ? selectedCustomThermal.config : {};
 
   if (!invoice) return null;
 
-  // GST slabs
-  const gstSlabs = {};
-  (invoice?.items || []).forEach((item) => {
-    const rate = Number(item?.taxRate) || 0;
-    if (!rate) return;
-    if (!gstSlabs[rate]) gstSlabs[rate] = { taxable: 0, cgst: 0, sgst: 0, igst: 0 };
-    const amt = Number(item?.total) || (Number(item?.qty || 1) * Number(item?.price || 0));
-    gstSlabs[rate].taxable += amt;
-    if (billing?.interState) {
-      gstSlabs[rate].igst += (amt * rate) / 100;
-    } else {
-      gstSlabs[rate].cgst += (amt * (rate / 2)) / 100;
-      gstSlabs[rate].sgst += (amt * (rate / 2)) / 100;
-    }
-  });
-
-  // HSN/SAC-wise tax summary — GST-invoice-standard breakdown, one row per HSN code
-  const hsnSummary = {};
-  (invoice?.items || []).forEach((item) => {
-    const hsn = item.hsn || item.hsnCode || '—';
-    const rate = Number(item?.taxRate) || 0;
-    const amt = Number(item?.total) || (Number(item?.qty || 1) * Number(item?.price || 0));
-    if (!hsnSummary[hsn]) hsnSummary[hsn] = { taxable: 0, rate, cgst: 0, sgst: 0, igst: 0 };
-    hsnSummary[hsn].taxable += amt;
-    if (billing?.interState) {
-      hsnSummary[hsn].igst += (amt * rate) / 100;
-    } else {
-      hsnSummary[hsn].cgst += (amt * (rate / 2)) / 100;
-      hsnSummary[hsn].sgst += (amt * (rate / 2)) / 100;
-    }
-  });
-  const hsnRows = Object.entries(hsnSummary);
-  const hsnTotals = hsnRows.reduce(
-    (acc, [, v]) => ({
-      taxable: acc.taxable + v.taxable,
-      cgst: acc.cgst + v.cgst,
-      sgst: acc.sgst + v.sgst,
-      igst: acc.igst + v.igst
-    }),
-    { taxable: 0, cgst: 0, sgst: 0, igst: 0 }
-  );
-
   return (
-    <Modal
-      open
-      onClose={onClose}
-      title={`Tax Invoice — ${invoice?.orderId || ''}`}
-      subtitle={`Generated on ${fmtDateTime(invoice?.date)}`}
-      icon={Receipt}
-      size="xl"
-      footer={
-        <div className="flex w-full items-center justify-between">
-          <div className="flex items-center gap-2">
-            {onDelete && (
-              <Button variant="danger" size="sm" icon={Trash2} onClick={onDelete}>
-                Delete Invoice
-              </Button>
-            )}
-            {!isVoid && (
-              <Button variant="outline" size="sm" onClick={onVoid}>
-                Void Invoice
-              </Button>
-            )}
-            <div className="flex items-center p-1 rounded-xl bg-[color:var(--bg-subtle)] border border-[color:var(--border)] text-xs font-bold">
-              <button
-                type="button"
-                onClick={() => setViewMode('TAX_INVOICE')}
-                className={`px-3 py-1 rounded-lg transition-all ${
-                  viewMode === 'TAX_INVOICE' ? 'bg-indigo-600 text-white shadow-xs' : 'text-[color:var(--text-secondary)]'
-                }`}
-              >
-                Standard A4
-              </button>
-              <button
-                type="button"
-                onClick={() => setViewMode('THERMAL')}
-                className={`px-3 py-1 rounded-lg transition-all ${
-                  viewMode === 'THERMAL' ? 'bg-indigo-600 text-white shadow-xs' : 'text-[color:var(--text-secondary)]'
-                }`}
-              >
-                Bill
-              </button>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            {!isVoid && (isFullyUnpaid || isPartiallyPaid) && onMarkPaid && (
-              <Button
-                variant="primary"
-                size="sm"
-                icon={CheckCircle2}
-                onClick={() => {
-                  onClose();
-                  onMarkPaid(invoice);
-                }}
-                className="bg-emerald-600 hover:bg-emerald-700 text-white"
-              >
-                {isPartiallyPaid ? 'Record Payment / Installment' : 'Record Payment'}
-              </Button>
-            )}
-            <Button onClick={onClose}>Close</Button>
-            <Button variant="primary" icon={Printer} onClick={() => window.print()}>
-              Print Invoice
-            </Button>
-          </div>
-        </div>
-      }
-    >
-      {viewMode === 'TAX_INVOICE' ? (
-        /* Standard A4 Tax Invoice */
-        <div id="printable-tax-invoice" className="bg-white text-slate-900 rounded-2xl border border-slate-200 font-sans shadow-xs overflow-hidden">
-          {/* Header row */}
-          <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 p-6 sm:p-8 pb-6">
-            <div className="flex items-start gap-3">
-              {company.logoUrl && (
-                <img src={company.logoUrl} alt={company.name} className="h-12 w-12 shrink-0 rounded-lg object-contain border border-slate-100" />
+    <>
+      <Modal
+        open
+        onClose={onClose}
+        title={`Tax Invoice — ${invoice?.orderId || ''}`}
+        subtitle={`Generated on ${fmtDateTime(invoice?.date)}`}
+        icon={Receipt}
+        size="fullscreen"
+        allowFullscreen={true}
+        footer={
+          <div className="flex w-full flex-col sm:flex-row items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              {onDelete && (
+                <Button variant="danger" size="sm" icon={Trash2} onClick={onDelete}>
+                  Delete Invoice
+                </Button>
               )}
-              <div>
-                <div className="text-xl font-black tracking-tight text-slate-900">
-                  {company.name}
-                </div>
-                {company.address && <div className="text-xs text-slate-600 mt-1 max-w-sm">{company.address}</div>}
-                <div className="text-xs text-slate-600 mt-0.5">
-                  {company.city} {company.state ? `· ${company.state}` : ''} {company.pincode ? `- ${company.pincode}` : ''}
-                </div>
-                {(company.state || company.stateCode) && (
-                  <div className="text-xs text-slate-600">
-                    State Name: {company.state || '—'}{company.stateCode ? `, Code: ${company.stateCode}` : ''}
-                  </div>
-                )}
-                <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1.5 text-[11px] text-slate-800">
-                  {company.gstin && <span className="font-semibold">GSTIN: <span className="font-mono">{company.gstin}</span></span>}
-                  {company.pan && <span className="font-semibold">PAN: <span className="font-mono">{company.pan}</span></span>}
-                  {company.cin && <span className="font-semibold">CIN No.: <span className="font-mono">{company.cin}</span></span>}
-                  {company.lutBondNo && <span className="font-semibold">LUT Bond No.: <span className="font-mono">{company.lutBondNo}</span></span>}
-                  {company.cstNo && <span className="font-semibold">CST: <span className="font-mono">{company.cstNo}</span></span>}
-                </div>
-                <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-0.5 text-[11px] text-slate-800">
-                  {company.fssaiNo && <span className="font-semibold">FSSAI No.: <span className="font-mono">{company.fssaiNo}</span></span>}
-                  {company.tan && <span className="font-semibold">TAN: <span className="font-mono">{company.tan}</span></span>}
-                  {company.dlNo && <span className="font-semibold">D.L. No.: <span className="font-mono">{company.dlNo}</span></span>}
-                </div>
-                <div className="text-[11px] text-slate-500 mt-0.5">
-                  {[company.website, company.contactName && `Contact: ${company.contactName}`].filter(Boolean).join(' · ')}
-                </div>
-                <div className="text-[11px] text-slate-500">
-                  {[company.phone, company.email].filter(Boolean).join(' · ')}
-                </div>
-              </div>
-            </div>
+              {!isVoid && !isDraft && onReturn && (
+                <Button variant="outline" size="sm" icon={RefreshCw} onClick={() => onReturn(invoice)}>
+                  Return Items
+                </Button>
+              )}
+              {!isVoid && (
+                <Button variant="outline" size="sm" onClick={onVoid}>
+                  Void Invoice
+                </Button>
+              )}
 
-            <div className="text-right sm:min-w-[200px] shrink-0">
-              <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Original for Recipient</div>
-              <div className="text-2xl font-black tracking-tight text-blue-900 mt-1">
-                {billing.invoiceTitle || 'TAX INVOICE'}
+              {/* View Mode Switcher (Standard A4 vs POS Bill) */}
+              <div className="flex items-center p-1 rounded-xl bg-[color:var(--bg-subtle)] border border-[color:var(--border)] text-xs font-bold">
+                <button
+                  type="button"
+                  onClick={() => setViewMode('TAX_INVOICE')}
+                  className={`px-3 py-1 rounded-lg transition-all ${
+                    viewMode === 'TAX_INVOICE' ? 'bg-blue-600 text-white shadow-xs' : 'text-[color:var(--text-secondary)]'
+                  }`}
+                >
+                  Standard A4 / A5
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode('THERMAL')}
+                  className={`px-3 py-1 rounded-lg transition-all ${
+                    viewMode === 'THERMAL' ? 'bg-indigo-600 text-white shadow-xs' : 'text-[color:var(--text-secondary)]'
+                  }`}
+                >
+                  POS Bill
+                </button>
               </div>
-              <div className="text-sm font-mono font-bold text-blue-700 mt-1">
-                #{invoice?.orderId}
-              </div>
-              {isVoid ? (
-                <div className="text-xs font-extrabold text-rose-600 uppercase tracking-widest mt-1">
-                  [ VOID / CANCELLED ]
-                </div>
-              ) : isDraft ? (
-                <div className="text-xs font-extrabold text-sky-600 uppercase tracking-widest mt-1">
-                  [ DRAFT INVOICE ]
-                </div>
-              ) : isPartiallyPaid ? (
-                <div className="text-xs font-extrabold text-amber-600 uppercase tracking-widest mt-1">
-                  [ PARTIALLY PAID ]
-                </div>
-              ) : isFullyUnpaid ? (
-                <div className="text-xs font-extrabold text-rose-600 uppercase tracking-widest mt-1">
-                  [ PAYMENT PENDING / UNPAID ]
+
+              {/* Quick Theme Switcher depending on view mode */}
+              {viewMode === 'TAX_INVOICE' ? (
+                <div className="flex items-center gap-1.5 pl-2 border-l border-[color:var(--border)]">
+                  <span className="text-[11px] font-semibold text-[color:var(--text-muted)]">Theme:</span>
+                  <select
+                    value={selectedInvoiceTheme}
+                    onChange={(e) => setSelectedInvoiceTheme(e.target.value)}
+                    className="text-[11px] font-bold rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-surface)] px-2 py-1 text-[color:var(--text-primary)]"
+                  >
+                    <optgroup label="Preset Themes">
+                      {INVOICE_THEMES.map((th) => (
+                        <option key={th.id} value={th.id}>
+                          {th.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                    {customInvoiceTemplates.length > 0 && (
+                      <optgroup label="My Custom Templates">
+                        {customInvoiceTemplates.map((ct) => (
+                          <option key={ct.id} value={ct.id}>
+                            ★ {ct.name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                  </select>
+
+                  <select
+                    value={selectedAccentColor}
+                    onChange={(e) => setSelectedAccentColor(e.target.value)}
+                    className="text-[11px] font-bold rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-surface)] px-2 py-1 text-[color:var(--text-primary)]"
+                  >
+                    {ACCENT_COLORS.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               ) : (
-                <div className="text-xs font-extrabold text-emerald-600 uppercase tracking-widest mt-1">
-                  [ PAID ]
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Amount banner + Bill To */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 border-t border-slate-200 text-xs">
-            <div className="p-6 sm:p-8 sm:border-r border-slate-200 space-y-1">
-              <span className="font-bold uppercase tracking-wider text-slate-500 text-[10px]">Bill To</span>
-              <div className="text-sm font-bold text-slate-900">{invoice?.customerName || 'Walk-in Customer'}</div>
-              {invoice?.customerAddress && <div className="text-slate-600 max-w-xs">{invoice.customerAddress}</div>}
-              {invoice?.customerPhone && invoice.customerPhone !== 'N/A' && (
-                <div className="text-slate-600">Phone: {invoice.customerPhone}</div>
-              )}
-              {invoice?.customerGstin && (
-                <div className="text-slate-700 font-semibold">GSTIN: {invoice.customerGstin}</div>
-              )}
-              {invoice?.customerPan && (
-                <div className="text-slate-700 font-semibold">PAN: {invoice.customerPan}</div>
-              )}
-              {(invoice?.customerState || invoice?.customerStateCode) && (
-                <div className="text-slate-600">
-                  State Name: {invoice.customerState || '—'}{invoice.customerStateCode ? `, Code: ${invoice.customerStateCode}` : ''}
-                </div>
-              )}
-            </div>
-
-            <div className="flex flex-col">
-              <div className={`px-6 sm:px-8 py-3 flex items-center justify-between text-white ${
-                isVoid ? 'bg-slate-400' : isDraft ? 'bg-sky-700' : isPartiallyPaid ? 'bg-amber-600' : isFullyUnpaid ? 'bg-rose-700' : 'bg-blue-900'
-              }`}>
-                <div>
-                  <span className="text-xs font-bold uppercase tracking-wider block">
-                    {isDraft ? 'Draft Total' : isPartiallyPaid ? 'Partially Paid' : isFullyUnpaid ? 'Amount Due (Unpaid)' : 'Amount Paid'}
-                  </span>
-                  {isPartiallyPaid && (
-                    <span className="text-[10px] opacity-90 block">
-                      Paid: {money(paidAmt)} · Due: {money(dueAmt)}
-                    </span>
-                  )}
-                </div>
-                <span className="text-lg font-black font-mono">{money(invoice?.total)}</span>
-              </div>
-              <div className="p-6 sm:p-8 space-y-1.5">
-                <div className="flex justify-between gap-3">
-                  <span className="text-slate-500">Issue Date:</span>
-                  <span className="font-bold font-mono">{fmtDate(invoice?.date)}</span>
-                </div>
-                {invoice?.dueDate && (
-                  <div className="flex justify-between gap-3">
-                    <span className="text-slate-500">Due Date:</span>
-                    <span className="font-bold font-mono">{fmtDate(invoice.dueDate)}</span>
-                  </div>
-                )}
-                {invoice?.paymentTerms && (
-                  <div className="flex justify-between gap-3">
-                    <span className="text-slate-500">Terms of Payment:</span>
-                    <span className="font-bold">{invoice.paymentTerms}</span>
-                  </div>
-                )}
-                {invoice?.buyerRef && (
-                  <div className="flex justify-between gap-3">
-                    <span className="text-slate-500">Buyer's Ref.:</span>
-                    <span className="font-bold">
-                      {invoice.buyerRef}{invoice.buyerRefDate ? ` dt. ${fmtDate(invoice.buyerRefDate)}` : ''}
-                    </span>
-                  </div>
-                )}
-                {invoice?.buyerOrderNo && (
-                  <div className="flex justify-between gap-3">
-                    <span className="text-slate-500">Buyer's Order No.:</span>
-                    <span className="font-bold">
-                      {invoice.buyerOrderNo}{invoice.buyerOrderDate ? ` dt. ${fmtDate(invoice.buyerOrderDate)}` : ''}
-                    </span>
-                  </div>
-                )}
-                {invoice?.dispatchDocNo && (
-                  <div className="flex justify-between gap-3">
-                    <span className="text-slate-500">Despatch Document No.:</span>
-                    <span className="font-bold">{invoice.dispatchDocNo}</span>
-                  </div>
-                )}
-                {invoice?.termsOfDelivery && (
-                  <div className="flex justify-between gap-3">
-                    <span className="text-slate-500">Terms of Delivery:</span>
-                    <span className="font-bold">{invoice.termsOfDelivery}</span>
-                  </div>
-                )}
-                {invoice?.dispatchFrom && (
-                  <div className="flex justify-between gap-3">
-                    <span className="text-slate-500">Dispatch From:</span>
-                    <span className="font-bold">{invoice.dispatchFrom}</span>
-                  </div>
-                )}
-                {invoice?.dispatchDate && (
-                  <div className="flex justify-between gap-3">
-                    <span className="text-slate-500">Dispatch Date:</span>
-                    <span className="font-bold font-mono">{fmtDate(invoice.dispatchDate)}</span>
-                  </div>
-                )}
-                {invoice?.placeOfSupply && (
-                  <div className="flex justify-between gap-3">
-                    <span className="text-slate-500">Place of Supply:</span>
-                    <span className="font-bold">{invoice.placeOfSupply}</span>
-                  </div>
-                )}
-                {invoice?.vendorCode && (
-                  <div className="flex justify-between gap-3">
-                    <span className="text-slate-500">Vendor Code:</span>
-                    <span className="font-bold font-mono">{invoice.vendorCode}</span>
-                  </div>
-                )}
-                <div className="flex justify-between gap-3">
-                  <span className="text-slate-500">Payment Mode:</span>
-                  <span className="font-bold">{invoice?.paymentMethod || 'Cash'}</span>
-                </div>
-                {billing?.showCashier !== false && invoice?.cashier && (
-                  <div className="flex justify-between gap-3">
-                    <span className="text-slate-500">Cashier:</span>
-                    <span className="font-semibold">{invoice.cashier}</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {(invoice?.shipToName || invoice?.shipToAddress || invoice?.vehicleNo || invoice?.shipBy || invoice?.transporterName) && (
-            <div className="px-6 sm:px-8 py-4 border-t border-slate-200 text-xs space-y-1.5">
-              <span className="font-bold uppercase tracking-wider text-slate-500 text-[10px]">Ship To</span>
-              {(invoice?.shipToName || invoice?.customerName) && (
-                <div className="text-sm font-bold text-slate-900">{invoice.shipToName || invoice.customerName}</div>
-              )}
-              {invoice?.shipToAddress && <div className="text-slate-600 max-w-md">{invoice.shipToAddress}</div>}
-              <div className="flex flex-wrap gap-x-4 gap-y-1 text-blue-800 font-semibold">
-                {invoice?.vehicleNo && <span>Vehicle No.: {invoice.vehicleNo}</span>}
-                {invoice?.shipBy && <span>Ship by: {invoice.shipBy}</span>}
-                {invoice?.transporterName && <span>Transporter: {invoice.transporterName}</span>}
-              </div>
-            </div>
-          )}
-
-          <div className="px-6 sm:px-8 pb-6 sm:pb-8 space-y-6 border-t border-slate-200 pt-6">
-            {/* Line items table */}
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs border-collapse">
-                <thead>
-                  <tr className="border-b-2 border-slate-300 text-[11px] font-bold text-slate-700 uppercase tracking-wider bg-slate-50">
-                    <th className="py-2.5 px-3">#</th>
-                    <th className="py-2.5 px-3">Item Description</th>
-                    <th className="py-2.5 px-3">HSN/SAC</th>
-                    <th className="py-2.5 px-3 text-right">Qty</th>
-                    <th className="py-2.5 px-3 text-right">Price (₹)</th>
-                    <th className="py-2.5 px-3 text-right">Taxable Value (₹)</th>
-                    <th className="py-2.5 px-3 text-right">Tax (₹)</th>
-                    <th className="py-2.5 px-3 text-right">Amount (₹)</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200">
-                  {(invoice?.items || []).map((item, idx) => {
-                    const qty = Number(item.qty) || 1;
-                    const price = Number(item.price) || 0;
-                    const taxRate = Number(item.taxRate) || 0;
-                    const taxable = Math.round(qty * price * 100) / 100;
-                    const tax = Math.round(((taxable * taxRate) / 100) * 100) / 100;
-                    const total = Number(item.total) || Math.round((taxable + tax) * 100) / 100;
-
-                    return (
-                      <tr key={idx} className="hover:bg-slate-50/70">
-                        <td className="py-2.5 px-3 text-slate-500 font-mono">{idx + 1}</td>
-                        <td className="py-2.5 px-3 font-semibold text-slate-900">{item.name}</td>
-                        <td className="py-2.5 px-3 text-slate-600 font-mono">{item.hsn || item.hsnCode || '—'}</td>
-                        <td className="py-2.5 px-3 text-right font-mono">{qty} {item.unit || 'pcs'}</td>
-                        <td className="py-2.5 px-3 text-right font-mono">{price.toFixed(2)}</td>
-                        <td className="py-2.5 px-3 text-right font-mono">{taxable.toFixed(2)}</td>
-                        <td className="py-2.5 px-3 text-right font-mono">
-                          {tax.toFixed(2)} {taxRate ? `(${taxRate}%)` : ''}
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-mono font-bold text-slate-900">{total.toFixed(2)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-                {billing?.showGstBreakup !== false && Object.keys(gstSlabs).length > 0 && (
-                  <tfoot>
-                    {Object.entries(gstSlabs).map(([rate, vals]) => {
-                      const taxAmt = vals.igst || (vals.cgst + vals.sgst);
-                      return (
-                        <tr key={rate} className="border-t border-slate-200 bg-slate-50/50 font-bold text-slate-700">
-                          <td colSpan={5} className="py-2 px-3 text-right text-[11px] uppercase tracking-wider">Total @ {rate}%</td>
-                          <td className="py-2 px-3 text-right font-mono">{Number(vals.taxable).toFixed(2)}</td>
-                          <td className="py-2 px-3 text-right font-mono">{Number(taxAmt).toFixed(2)}</td>
-                          <td className="py-2 px-3 text-right font-mono">{Number(vals.taxable + taxAmt).toFixed(2)}</td>
-                        </tr>
-                      );
-                    })}
-                  </tfoot>
-                )}
-              </table>
-            </div>
-
-            {/* Payment details & Totals */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-              <div className="space-y-3">
-                {(billing?.bankAccountHolder || billing?.bankName || billing?.bankAccountNumber) && (
-                  <div className="rounded-xl bg-slate-50 p-3 border border-slate-200 text-[11px] space-y-1">
-                    <div className="font-bold text-slate-700 uppercase tracking-wider text-[10px] mb-1">Payment Details</div>
-                    {billing.bankAccountHolder && (
-                      <div><span className="text-slate-500">Account Holder Name:</span> <span className="font-semibold">{billing.bankAccountHolder}</span></div>
-                    )}
-                    {billing.bankName && (
-                      <div><span className="text-slate-500">Bank Name:</span> <span className="font-semibold">{billing.bankName}</span></div>
-                    )}
-                    {billing.bankAccountNumber && (
-                      <div><span className="text-slate-500">Account Number:</span> <span className="font-mono font-semibold">{billing.bankAccountNumber}</span></div>
-                    )}
-                    {billing.bankBranch && (
-                      <div><span className="text-slate-500">Branch Name:</span> <span className="font-semibold">{billing.bankBranch}</span></div>
-                    )}
-                    {billing.bankIfsc && (
-                      <div><span className="text-slate-500">IFSC Code:</span> <span className="font-mono font-semibold">{billing.bankIfsc}</span></div>
-                    )}
-                  </div>
-                )}
-
-                {billing?.upiId && (
-                  <div className="flex items-center gap-3">
-                    {qrDataUrl ? (
-                      <img src={qrDataUrl} alt="Payment QR" className="h-24 w-24 rounded-lg border border-slate-200" />
-                    ) : (
-                      <div className="h-24 w-24 rounded-lg border border-slate-200 flex items-center justify-center text-slate-300">
-                        <QrCode className="h-8 w-8" />
-                      </div>
-                    )}
-                    <div className="text-[11px]">
-                      <div className="font-bold text-slate-700 uppercase tracking-wider text-[10px]">Payment QR Code</div>
-                      <div className="text-slate-600 mt-0.5">UPI ID: <span className="font-mono font-semibold">{billing.upiId}</span></div>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className="space-y-2 text-xs">
-                <div className="flex justify-between py-1 border-b border-slate-100">
-                  <span className="text-slate-600">Total Taxable Value:</span>
-                  <span className="font-mono font-semibold">{money(invoice?.subtotal || invoice?.total)}</span>
-                </div>
-                {invoice?.discount > 0 && (
-                  <div className="flex justify-between py-1 border-b border-slate-100 text-emerald-600 font-semibold">
-                    <span>Discount:</span>
-                    <span className="font-mono">-{money(invoice.discount)}</span>
-                  </div>
-                )}
-                {invoice?.tax > 0 && (
-                  <div className="flex justify-between py-1 border-b border-slate-100">
-                    <span className="text-slate-600">Total Tax Amount:</span>
-                    <span className="font-mono font-semibold">{money(invoice.tax)}</span>
-                  </div>
-                )}
-                {invoice?.roundOff !== 0 && invoice?.roundOff && (
-                  <div className="flex justify-between py-1 border-b border-slate-100 text-slate-500">
-                    <span>Round Off:</span>
-                    <span className="font-mono">{money(invoice.roundOff)}</span>
-                  </div>
-                )}
-                <div className="flex justify-between py-2 border-t-2 border-slate-900 text-sm font-extrabold text-slate-900">
-                  <span>Total Invoice Value:</span>
-                  <span className="text-base text-blue-800 font-mono">{money(invoice?.total)}</span>
-                </div>
-                {(paidAmt > 0 || dueAmt > 0) && !isDraft && (
-                  <div className="space-y-1 pt-1 border-t border-slate-100 font-mono text-xs">
-                    <div className="flex justify-between text-emerald-700 font-bold">
-                      <span>Total Amount Paid:</span>
-                      <span>{money(paidAmt)}</span>
-                    </div>
-                    {dueAmt > 0 && (
-                      <div className="flex justify-between text-rose-700 font-bold">
-                        <span>Balance Due:</span>
-                        <span>{money(dueAmt)}</span>
-                      </div>
-                    )}
-                  </div>
-                )}
-                {billing?.showWordsTotal !== false && (
-                  <div className="pt-1.5 border-t border-slate-100">
-                    <div className="flex items-baseline justify-between gap-2">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Amount Chargeable (in words):</span>
-                      <span className="text-[10px] italic text-slate-400 shrink-0">E. &amp; O.E</span>
-                    </div>
-                    <div className="text-[11px] font-semibold text-slate-800 italic mt-0.5">
-                      {numberToWords(invoice?.total || 0)}
-                    </div>
-                    {invoice?.tax > 0 && (
-                      <>
-                        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mt-1.5 block">Tax Amount (in words):</span>
-                        <div className="text-[11px] font-semibold text-slate-800 italic mt-0.5">
-                          {numberToWords(invoice.tax)}
-                        </div>
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Payment Receipts / Installments History */}
-            {invoice?.payments && invoice.payments.length > 0 && (
-              <div className="space-y-1.5 pt-4 border-t border-slate-200">
-                <div className="text-[11px] font-bold text-slate-700 uppercase tracking-wider flex items-center justify-between">
-                  <span>Payment Receipts &amp; Installments History</span>
-                  <span className="text-[10px] text-slate-500 font-normal">
-                    Total Paid: <strong className="font-mono text-slate-800">{money(paidAmt)}</strong>
-                  </span>
-                </div>
-                <div className="overflow-x-auto rounded-xl border border-slate-200">
-                  <table className="w-full text-left text-[11px] border-collapse">
-                    <thead>
-                      <tr className="bg-slate-50 border-b border-slate-200 font-bold text-slate-600 text-[10px] uppercase">
-                        <th className="py-1.5 px-3">Date &amp; Time</th>
-                        <th className="py-1.5 px-3">Payment Mode</th>
-                        <th className="py-1.5 px-3">Reference / UTR</th>
-                        <th className="py-1.5 px-3">Remarks / Cashier</th>
-                        <th className="py-1.5 px-3 text-right">Amount Paid (₹)</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {invoice.payments.map((p, idx) => (
-                        <tr key={p.id || idx}>
-                          <td className="py-1.5 px-3 whitespace-nowrap text-slate-600">{fmtDateTime(p.paidAt)}</td>
-                          <td className="py-1.5 px-3 font-semibold text-slate-800">{p.paymentMethod || 'Cash'}</td>
-                          <td className="py-1.5 px-3 font-mono text-slate-600">{p.paymentRef || '—'}</td>
-                          <td className="py-1.5 px-3 text-slate-500">{p.notes || p.receivedBy || '—'}</td>
-                          <td className="py-1.5 px-3 text-right font-mono font-bold text-emerald-700">{money(p.amount)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-
-            {/* HSN/SAC-wise Tax Summary — GST-invoice-standard breakdown table */}
-            {billing?.showGstBreakup !== false && hsnRows.length > 0 && (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs border-collapse border border-slate-200">
-                  <thead>
-                    <tr className="border-b-2 border-slate-300 text-[11px] font-bold text-slate-700 uppercase tracking-wider bg-slate-50">
-                      <th rowSpan={2} className="py-2 px-3 border-r border-slate-200 align-bottom">HSN/SAC</th>
-                      <th rowSpan={2} className="py-2 px-3 border-r border-slate-200 text-right align-bottom">Taxable Value (₹)</th>
-                      {billing?.interState ? (
-                        <th colSpan={2} className="py-2 px-3 border-r border-slate-200 text-center">Integrated Tax</th>
-                      ) : (
-                        <>
-                          <th colSpan={2} className="py-2 px-3 border-r border-slate-200 text-center">Central Tax</th>
-                          <th colSpan={2} className="py-2 px-3 border-r border-slate-200 text-center">State Tax</th>
-                        </>
-                      )}
-                      <th rowSpan={2} className="py-2 px-3 text-right align-bottom">Total Tax Amount (₹)</th>
-                    </tr>
-                    <tr className="border-b-2 border-slate-300 text-[10px] font-bold text-slate-600 uppercase bg-slate-50">
-                      {billing?.interState ? (
-                        <>
-                          <th className="py-1.5 px-3 border-r border-slate-200 text-right">Rate</th>
-                          <th className="py-1.5 px-3 border-r border-slate-200 text-right">Amount (₹)</th>
-                        </>
-                      ) : (
-                        <>
-                          <th className="py-1.5 px-3 border-r border-slate-200 text-right">Rate</th>
-                          <th className="py-1.5 px-3 border-r border-slate-200 text-right">Amount (₹)</th>
-                          <th className="py-1.5 px-3 border-r border-slate-200 text-right">Rate</th>
-                          <th className="py-1.5 px-3 border-r border-slate-200 text-right">Amount (₹)</th>
-                        </>
-                      )}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200">
-                    {hsnRows.map(([hsn, v]) => (
-                      <tr key={hsn}>
-                        <td className="py-2 px-3 border-r border-slate-100 font-mono">{hsn}</td>
-                        <td className="py-2 px-3 border-r border-slate-100 text-right font-mono">{v.taxable.toFixed(2)}</td>
-                        {billing?.interState ? (
-                          <>
-                            <td className="py-2 px-3 border-r border-slate-100 text-right font-mono">{v.rate}%</td>
-                            <td className="py-2 px-3 border-r border-slate-100 text-right font-mono">{v.igst.toFixed(2)}</td>
-                          </>
-                        ) : (
-                          <>
-                            <td className="py-2 px-3 border-r border-slate-100 text-right font-mono">{(v.rate / 2)}%</td>
-                            <td className="py-2 px-3 border-r border-slate-100 text-right font-mono">{v.cgst.toFixed(2)}</td>
-                            <td className="py-2 px-3 border-r border-slate-100 text-right font-mono">{(v.rate / 2)}%</td>
-                            <td className="py-2 px-3 border-r border-slate-100 text-right font-mono">{v.sgst.toFixed(2)}</td>
-                          </>
-                        )}
-                        <td className="py-2 px-3 text-right font-mono font-semibold">
-                          {(v.igst || v.cgst + v.sgst).toFixed(2)}
-                        </td>
-                      </tr>
+                <div className="flex items-center gap-1.5 pl-2 border-l border-[color:var(--border)]">
+                  <span className="text-[11px] font-semibold text-[color:var(--text-muted)]">Bill Theme:</span>
+                  <select
+                    value={selectedThermalTheme}
+                    onChange={(e) => setSelectedThermalTheme(e.target.value)}
+                    className="text-[11px] font-bold rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-surface)] px-2 py-1 text-[color:var(--text-primary)]"
+                  >
+                    {THERMAL_THEMES.filter((th) => BILLING_THERMAL_THEME_IDS.includes(th.id)).map((th) => (
+                      <option key={th.id} value={th.id}>
+                        {th.name}
+                      </option>
                     ))}
-                  </tbody>
-                  <tfoot>
-                    <tr className="border-t-2 border-slate-300 font-bold text-slate-900 bg-slate-50">
-                      <td className="py-2 px-3 border-r border-slate-200">Total</td>
-                      <td className="py-2 px-3 border-r border-slate-200 text-right font-mono">{hsnTotals.taxable.toFixed(2)}</td>
-                      {billing?.interState ? (
-                        <td colSpan={2} className="py-2 px-3 border-r border-slate-200 text-right font-mono">{hsnTotals.igst.toFixed(2)}</td>
-                      ) : (
-                        <>
-                          <td colSpan={2} className="py-2 px-3 border-r border-slate-200 text-right font-mono">{hsnTotals.cgst.toFixed(2)}</td>
-                          <td colSpan={2} className="py-2 px-3 border-r border-slate-200 text-right font-mono">{hsnTotals.sgst.toFixed(2)}</td>
-                        </>
-                      )}
-                      <td className="py-2 px-3 text-right font-mono">
-                        {(hsnTotals.igst || hsnTotals.cgst + hsnTotals.sgst).toFixed(2)}
-                      </td>
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
-            )}
-
-            {/* Footer & Signature */}
-            <div className="flex flex-col sm:flex-row items-end justify-between gap-6 pt-6 border-t border-slate-200">
-              <div className="text-slate-600 text-[11px] max-w-md space-y-1.5">
-                <div className="font-bold text-slate-700 uppercase tracking-wider text-[10px]">Terms & Conditions</div>
-                {billing?.termsText ? (
-                  <div className="whitespace-pre-line">{billing.termsText}</div>
-                ) : (
-                  <div className="text-slate-400">—</div>
-                )}
-                {billing?.footerText && <div className="mt-2 italic text-slate-500">{billing.footerText}</div>}
-              </div>
-              {billing?.showSignature !== false && (
-                <div className="text-center sm:text-right space-y-1 shrink-0">
-                  {company.name && (
-                    <div className="text-[11px] font-semibold text-slate-700">for {company.name}</div>
-                  )}
-                  <div className="h-10"></div>
-                  <div className="border-t border-slate-400 pt-1 font-bold text-slate-800 text-[11px]">
-                    Authorised Signatory
-                  </div>
+                  </select>
                 </div>
               )}
             </div>
 
-            <div className="text-center text-[10px] text-slate-400 pt-4">
-              This is a Computer Generated Document
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                icon={FileText}
+                onClick={() => {
+                  if (viewMode === 'TAX_INVOICE') {
+                    exportInvoiceToWord({
+                      invoice,
+                      settings: { company, billing },
+                      customConfig: activeInvoiceConfig,
+                      activeTheme: selectedInvoiceTheme
+                    });
+                  } else {
+                    exportBillToWord({
+                      receipt: invoice,
+                      settings: { company, billing },
+                      customConfig: activeThermalConfig,
+                      activeTheme: selectedThermalTheme
+                    });
+                  }
+                }}
+                title="Download editable Microsoft Word document (.doc) with complete table structures and tax headers"
+              >
+                Word (.doc)
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={Download}
+                onClick={() => window.print()}
+                title="Download / Print as PDF document"
+              >
+                PDF / Print
+              </Button>
+              <Button size="sm" variant="secondary" icon={Maximize2} onClick={() => setShowFullscreenView(true)}>
+                Full Screen
+              </Button>
+              <Button onClick={onClose}>Close</Button>
             </div>
           </div>
-        </div>
-      ) : (
-        /* Thermal 3-inch slip */
-        <div id="printable-thermal-receipt" className="bg-white text-black p-4 rounded-xl border border-slate-300 font-mono text-[11.5px] max-w-sm mx-auto shadow-sm">
-          <div className="border-b border-dashed border-black pb-2 text-center">
-            <div className="text-[13px] font-bold uppercase">{company.name}</div>
-            {company.address && <div className="text-[10px]">{company.address}</div>}
-            {company.gstin && <div className="text-[10px]">GSTIN: {company.gstin}</div>}
+        }
+      >
+        {viewMode === 'TAX_INVOICE' ? (
+          /* Full A4 / A5 Tax Invoice View */
+          <div className="flex justify-center p-2 bg-slate-100 dark:bg-slate-900 rounded-xl border border-slate-300 dark:border-slate-800 overflow-y-auto max-h-[calc(98vh-180px)]">
+            <InvoiceDocumentView
+              invoice={invoice}
+              settings={{ company, billing }}
+              tenant={tenant}
+              customConfig={{
+                ...activeInvoiceConfig,
+                activeInvoiceTemplate: selectedInvoiceTheme,
+                invoiceAccentColor: selectedAccentColor,
+                accentColor: selectedAccentColor
+              }}
+              activeTheme={selectedInvoiceTheme}
+            />
           </div>
-          <div className="flex justify-between border-b border-dashed border-black py-1.5 text-[10px]">
-            <div>
-              <div>Bill: {invoice?.orderId}</div>
-              <div>{fmtDateTime(invoice?.date)}</div>
-            </div>
-            <div className="text-right">
-              <div>{invoice?.customerName || 'Walk-in'}</div>
-              <div>Cashier: {invoice?.cashier || 'Admin'}</div>
-            </div>
+        ) : (
+          /* POS Bill slip */
+          <div className="flex justify-center p-2 bg-slate-100 dark:bg-slate-900 rounded-xl border border-slate-300 dark:border-slate-800 overflow-y-auto max-h-[calc(98vh-180px)]">
+            <ThermalReceiptView
+              receipt={invoice}
+              settings={{ company, billing }}
+              tenant={tenant}
+              customConfig={activeThermalConfig}
+              activeTheme={selectedThermalTheme}
+            />
           </div>
-          <table className="w-full py-1 text-[10.5px]">
-            <thead>
-              <tr className="border-b border-dashed border-black uppercase text-[9.5px]">
-                <th className="py-1 text-left">Item</th>
-                <th className="py-1 text-right">Qty</th>
-                <th className="py-1 text-right">Rate</th>
-                <th className="py-1 text-right">Amt</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(invoice?.items || []).map((it, i) => (
-                <tr key={i}>
-                  <td className="py-0.5">{it.name}</td>
-                  <td className="py-0.5 text-right">{it.qty}</td>
-                  <td className="py-0.5 text-right">{Number(it.price || 0).toFixed(2)}</td>
-                  <td className="py-0.5 text-right">{Number(it.total || 0).toFixed(2)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div className="border-t border-dashed border-black pt-1.5 space-y-0.5 text-right">
-            <div>Subtotal: {money(invoice?.subtotal || invoice?.total)}</div>
-            {invoice?.discount > 0 && <div>Discount: -{money(invoice.discount)}</div>}
-            {invoice?.tax > 0 && <div>GST: {money(invoice.tax)}</div>}
-            <div className="text-[13px] font-bold border-t border-dashed border-black pt-1">
-              TOTAL: {money(invoice?.total)}
-            </div>
-            {paidAmt > 0 && (
-              <div className="text-[11px] text-black">PAID: {money(paidAmt)}</div>
-            )}
-            {dueAmt > 0 && (
-              <div className="text-[11.5px] font-bold text-black border-t border-dashed border-black pt-0.5">
-                BALANCE DUE: {money(dueAmt)}
+        )}
+      </Modal>
+
+      {/* Immersive High-Res Full Screen View Modal */}
+      {showFullscreenView && (
+        <Modal
+          open={showFullscreenView}
+          onClose={() => setShowFullscreenView(false)}
+          title={viewMode === 'TAX_INVOICE' ? `Tax Invoice — ${invoice?.orderId || ''} (Full Screen View)` : `POS Bill — ${invoice?.orderId || ''} (Full Screen View)`}
+          subtitle={`Generated on ${fmtDateTime(invoice?.date)}`}
+          size="fullscreen"
+          allowFullscreen={true}
+          footer={
+            <div className="flex items-center justify-between w-full">
+              <span className="text-xs text-[color:var(--text-muted)] font-mono">
+                Order: #{invoice?.orderId} · {viewMode === 'TAX_INVOICE' ? 'A4 / A5 Tax Document' : 'POS Bill'}
+              </span>
+              <div className="flex items-center gap-2">
+                <Button onClick={() => setShowFullscreenView(false)}>Close View</Button>
+                <Button variant="primary" icon={Printer} onClick={() => window.print()}>
+                  Print Document
+                </Button>
               </div>
+            </div>
+          }
+        >
+          <div className="flex-1 flex justify-center items-start p-4 sm:p-8 bg-slate-900/90 rounded-2xl overflow-y-auto min-h-full">
+            {viewMode === 'TAX_INVOICE' ? (
+              <InvoiceDocumentView
+                invoice={invoice}
+                settings={{ company, billing }}
+                tenant={tenant}
+                customConfig={{
+                  ...activeInvoiceConfig,
+                  activeInvoiceTemplate: selectedInvoiceTheme,
+                  invoiceAccentColor: selectedAccentColor,
+                  accentColor: selectedAccentColor
+                }}
+                activeTheme={selectedInvoiceTheme}
+              />
+            ) : (
+              <ThermalReceiptView
+                receipt={invoice}
+                settings={{ company, billing }}
+                tenant={tenant}
+                customConfig={activeThermalConfig}
+                activeTheme={selectedThermalTheme}
+              />
             )}
           </div>
-          <div className="text-center text-[10px] mt-3 border-t border-dashed border-black pt-2">
-            {billing?.footerText || 'Thank you, visit again!'}
-          </div>
-        </div>
+        </Modal>
       )}
-    </Modal>
+    </>
   );
 }
 
@@ -4191,7 +4126,8 @@ function QuotationDocumentModal({ quotation, settings, tenant, onClose, onConver
       title={`Price Quotation — ${quotation?.quotationNo || ''}`}
       subtitle={`Created on ${fmtDateTime(quotation?.date)} · Valid Until ${fmtDate(quotation?.validUntil)}`}
       icon={FileCheck}
-      size="xl"
+      size="fullscreen"
+      allowFullscreen={true}
       footer={
         <div className="flex w-full items-center justify-between">
           <div className="flex items-center gap-2">
@@ -4394,6 +4330,232 @@ function QuotationDocumentModal({ quotation, settings, tenant, onClose, onConver
           </div>
         </div>
       </div>
+    </Modal>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Sales Returns (Credit Notes)
+ * ------------------------------------------------------------------ */
+
+const r2Local = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const CREDIT_NOTE_REASONS = ['Damaged', 'Wrong Item', 'Customer Changed Mind', 'Quality Issue', 'Size / Fit Issue', 'Other'];
+
+function SalesReturnModal({ invoice, creditNotes = [], showToast, onClose, onSaved }) {
+  const [qtys, setQtys] = useState({});
+  const [reason, setReason] = useState('Damaged');
+  const [customReason, setCustomReason] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (invoice) {
+      setQtys({});
+      setReason('Damaged');
+      setCustomReason('');
+    }
+  }, [invoice]);
+
+  const alreadyCredited = (productId) =>
+    creditNotes
+      .filter((cn) => cn.status !== 'VOID')
+      .reduce(
+        (sum, cn) => sum + (cn.items || []).filter((it) => it.productId === productId).reduce((s, it) => s + Number(it.qty || 0), 0),
+        0
+      );
+
+  const lines = (invoice?.items || [])
+    .map((line) => {
+      const credited = alreadyCredited(line.id);
+      const max = r2Local(Number(line.qty) - credited);
+      return { ...line, max };
+    })
+    .filter((l) => l.max > 0.009);
+
+  const setQty = (id, v) => setQtys((q) => ({ ...q, [id]: v }));
+
+  const selected = lines.filter((l) => Number(qtys[l.id]) > 0);
+  const canSubmit = selected.length > 0 && selected.every((l) => Number(qtys[l.id]) <= l.max + 0.009);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (saving || !canSubmit || !invoice) return;
+    setSaving(true);
+    try {
+      const res = await api.post(`/orders/${invoice.orderId}/return`, {
+        items: selected.map((l) => ({ productId: l.id, qty: Number(qtys[l.id]) })),
+        reason: reason === 'Other' ? customReason || 'Other' : reason
+      });
+      showToast(res.message);
+      onSaved();
+    } catch (err) {
+      showToast(api.message(err, 'Could not record the return.'), 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={Boolean(invoice)}
+      onClose={onClose}
+      title="Return Items from Customer"
+      subtitle={invoice ? `Against invoice #${invoice.orderId} · ${invoice.customerName || 'Walk-in Customer'}` : ''}
+      icon={RefreshCw}
+      size="lg"
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={submit} loading={saving} disabled={!canSubmit}>
+            Record Return
+          </Button>
+        </>
+      }
+    >
+      {invoice && (
+        <form onSubmit={submit} className="space-y-4">
+          {lines.length === 0 ? (
+            <EmptyState icon={RefreshCw} title="Nothing left to return" hint="Every item on this invoice has already been fully returned." />
+          ) : (
+            <div className="surface overflow-hidden rounded-2xl border border-[color:var(--border)]">
+              <table className="w-full text-xs border-collapse">
+                <thead>
+                  <tr className="border-b border-[color:var(--border)]">
+                    <th className="py-2 px-3 text-left">Product</th>
+                    <th className="py-2 px-3 text-right" style={{ width: 90 }}>Sold</th>
+                    <th className="py-2 px-3 text-right" style={{ width: 90 }}>Returnable</th>
+                    <th className="py-2 px-3 text-right" style={{ width: 120 }}>Return Qty</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                  {lines.map((l) => (
+                    <tr key={l.id}>
+                      <td className="py-2 px-3 font-semibold">{l.name}</td>
+                      <td className="py-2 px-3 tabular text-right">
+                        {l.qty} {l.unit}
+                      </td>
+                      <td className="py-2 px-3 tabular text-right font-bold">
+                        {l.max} {l.unit}
+                      </td>
+                      <td className="py-2 px-3">
+                        <Input
+                          type="number"
+                          min="0"
+                          max={l.max}
+                          step="any"
+                          value={qtys[l.id] || ''}
+                          onChange={(e) => setQty(l.id, e.target.value)}
+                          className="text-right"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Reason">
+              <Select value={reason} onChange={(e) => setReason(e.target.value)}>
+                {CREDIT_NOTE_REASONS.map((r) => (
+                  <option key={r} value={r}>
+                    {r}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            {reason === 'Other' && (
+              <Field label="Specify reason">
+                <Input value={customReason} onChange={(e) => setCustomReason(e.target.value)} />
+              </Field>
+            )}
+          </div>
+        </form>
+      )}
+    </Modal>
+  );
+}
+
+function CreditNoteDetailModal({ creditNote, onClose, onVoid }) {
+  const isVoid = creditNote?.status === 'VOID';
+  return (
+    <Modal
+      open={Boolean(creditNote)}
+      onClose={onClose}
+      title={creditNote ? `Return — ${creditNote.customerName}` : ''}
+      subtitle={creditNote ? `Against invoice #${creditNote.orderId} · ${fmtDate(creditNote.date)}` : ''}
+      icon={RefreshCw}
+      size="lg"
+      footer={
+        <>
+          {creditNote && !isVoid && (
+            <Button variant="danger" onClick={() => onVoid(creditNote)}>
+              Void Return
+            </Button>
+          )}
+          <Button onClick={onClose}>Close</Button>
+        </>
+      }
+    >
+      {creditNote && (
+        <div className="space-y-3">
+          {isVoid && (
+            <div className="rounded-xl px-3 py-2 text-[11.5px] font-semibold text-rose-600 dark:text-rose-400" style={{ background: 'var(--bg-subtle)' }}>
+              This return was voided{creditNote.voidedBy ? ` by ${creditNote.voidedBy}` : ''}{creditNote.voidedAt ? ` on ${fmtDate(creditNote.voidedAt)}` : ''}. Stock was reversed.
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-3 text-xs">
+            <div>
+              <div className="label-eyebrow">Reason</div>
+              <div className="mt-0.5 font-semibold">{creditNote.reason}</div>
+            </div>
+            <div>
+              <div className="label-eyebrow">Voucher</div>
+              <div className="mt-0.5 font-semibold">{creditNote.voucherNo || '—'}</div>
+            </div>
+          </div>
+
+          <div className="surface overflow-hidden rounded-2xl border border-[color:var(--border)]">
+            <table className="w-full text-xs border-collapse">
+              <thead>
+                <tr className="border-b border-[color:var(--border)]">
+                  <th className="py-2 px-3 text-left">Product</th>
+                  <th className="py-2 px-3 text-right" style={{ width: 90 }}>Qty</th>
+                  <th className="py-2 px-3 text-right" style={{ width: 100 }}>Rate</th>
+                  <th className="py-2 px-3 text-right" style={{ width: 120 }}>Amount</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                {(creditNote.items || []).map((i, idx) => (
+                  <tr key={`${i.productId}_${idx}`}>
+                    <td className="py-2 px-3 font-semibold">{i.name}</td>
+                    <td className="py-2 px-3 tabular text-right">
+                      {i.qty} {i.unit}
+                    </td>
+                    <td className="py-2 px-3 tabular text-right">{money(i.rate)}</td>
+                    <td className="py-2 px-3 tabular text-right font-bold">{money(i.lineTotal)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex justify-end gap-6 rounded-xl px-4 py-2.5" style={{ background: 'var(--bg-subtle)' }}>
+            <div>
+              <div className="label-eyebrow">Taxable Value</div>
+              <div className="mt-0.5 text-[13px] font-semibold">{money(creditNote.subtotal)}</div>
+            </div>
+            <div>
+              <div className="label-eyebrow">GST</div>
+              <div className="mt-0.5 text-[13px] font-semibold">{money(creditNote.tax)}</div>
+            </div>
+            <div>
+              <div className="label-eyebrow">Total Credited</div>
+              <div className="mt-0.5 text-[13px] font-bold">{money(creditNote.totalAmount)}</div>
+            </div>
+          </div>
+        </div>
+      )}
     </Modal>
   );
 }
