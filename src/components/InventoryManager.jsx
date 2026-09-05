@@ -177,7 +177,7 @@ export default function InventoryManager({ products, categories, onRefresh, show
       )}
 
       {tab === 'pricesheet' && (
-        <PricesheetTab products={products} showToast={showToast} onRefresh={refreshAll} />
+        <PricesheetTab products={products} categories={categories} showToast={showToast} onRefresh={refreshAll} />
       )}
 
       {tab === 'importexport' && (
@@ -519,6 +519,7 @@ function recomputeAutoUnitPricing(f) {
 // list — an index-based key would reuse the wrong row's state after a shift.
 let rowKeySeq = 0;
 const genRowKey = () => `row_${Date.now()}_${rowKeySeq++}`;
+const randomBarcode = () => Math.floor(1000000000 + Math.random() * 9000000000).toString();
 
 const blankProduct = (categories) => ({
   name: '',
@@ -531,6 +532,8 @@ const blankProduct = (categories) => ({
   productTypes: ['standard'],
   barcode: '',
   barcodes: '',
+  barcodeList: [{ _key: genRowKey(), code: '', type: 'primary' }],
+  sku: '',
   hsn: '',
   unit: 'pcs',
   price: '',
@@ -620,6 +623,18 @@ export function ProductFormModal({
   const [writeOffForm, setWriteOffForm] = useState({ qty: '', reason: 'Expired' });
   const [writingOff, setWritingOff] = useState(false);
 
+  // Once a product carries real batch stock, "unbatching" it would strand
+  // that stock outside the batch system it's tracked in — so the toggle
+  // stays locked on until every batch for this product is sold down (or
+  // written off) to zero. Measured against `editing` (the persisted
+  // product), not `form`, so it can't be gamed by editing batch qty in the
+  // same session before saving.
+  const lockedBatchRemainingQty = useMemo(() => {
+    if (!editing?.trackBatches) return 0;
+    return (editing.batches || []).reduce((sum, b) => sum + (Number(b.qty) || 0), 0);
+  }, [editing]);
+  const lockTrackBatchesOff = lockedBatchRemainingQty > 0;
+
   const unitNameList = useMemo(
     () => (units || []).map((u) => (typeof u === 'object' ? u.name : u)).filter(Boolean),
     [units]
@@ -659,6 +674,7 @@ export function ProductFormModal({
       productType: primaryType,
       productTypes: resolvedTypes,
       regionalName: product.regionalName || product.printName || '',
+      sku: product.sku || '',
       barcodes: Array.isArray(product.barcodes) ? product.barcodes.join(', ') : product.barcode || '',
       warehouses: product.warehouses || {},
       dozenQuantity: product.dozenQuantity || 12,
@@ -976,6 +992,7 @@ export function ProductFormModal({
 
     const payload = {
       ...form,
+      sku: form.sku ? String(form.sku).trim().toUpperCase() : '',
       printName: form.regionalName || form.printName,
       barcodes: String(form.barcodes || '')
         .split(',')
@@ -1145,15 +1162,8 @@ export function ProductFormModal({
                   >
                     {units.map((u) => {
                       const name = typeof u === 'object' ? u.name : u;
-                      const sub = typeof u === 'object' && u.subUnit ? u.subUnit : null;
-                      const factor = typeof u === 'object' && u.factor ? u.factor : null;
-                      const label = sub && factor
-                        ? `${name} (1 ${name} = ${factor} ${sub})`
-                        : sub
-                        ? `${name} (→ ${sub})`
-                        : name;
                       return (
-                        <option key={name} value={name}>{label}</option>
+                        <option key={name} value={name}>{name}</option>
                       );
                     })}
                   </Select>
@@ -1401,14 +1411,55 @@ export function ProductFormModal({
               </div>
             )}
 
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Primary Barcode">
-                <Input value={form.barcode} onChange={(e) => setForm({ ...form, barcode: e.target.value })} placeholder="Leave blank to auto-generate" />
-              </Field>
+            {/* Dedicated Product Identifiers (SKU & Barcodes) Section */}
+            <div className="p-3.5 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider flex items-center gap-1.5">
+                  <Barcode className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+                  Product Identifiers (SKU & Barcodes)
+                </h4>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!form.name) {
+                      showToast('Enter product name first to generate an SKU.', 'error');
+                      return;
+                    }
+                    const cleanName = String(form.name).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4).padEnd(3, 'X');
+                    const randCode = Math.floor(1000 + Math.random() * 9000);
+                    setForm((f) => ({ ...f, sku: `SKU-${cleanName}-${randCode}` }));
+                  }}
+                  className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
+                >
+                  Auto-Generate SKU
+                </button>
+              </div>
 
-              <Field label="Multiple Barcodes (Comma Separated)">
-                <Input value={form.barcodes} onChange={(e) => setForm({ ...form, barcodes: e.target.value })} placeholder="e.g. 89012345001, 89012345002" />
-              </Field>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <Field label="SKU Code" hint="Stock Keeping Unit / internal item code">
+                  <Input
+                    value={form.sku || ''}
+                    onChange={(e) => setForm({ ...form, sku: e.target.value.toUpperCase() })}
+                    placeholder="e.g. SKU-APP-101"
+                  />
+                </Field>
+
+                <Field label="Primary Barcode" hint="Leave blank to auto-generate">
+                  <Input
+                    value={form.barcode}
+                    onChange={(e) => setForm({ ...form, barcode: e.target.value })}
+                    placeholder="Scannable barcode"
+                  />
+                </Field>
+
+                <Field label="Multiple Barcodes" hint="Comma separated alternates">
+                  <Input
+                    value={form.barcodes}
+                    onChange={(e) => setForm({ ...form, barcodes: e.target.value })}
+                    placeholder="e.g. 89012345001, 89012345002"
+                  />
+                </Field>
+              </div>
             </div>
 
             {form.productType === 'service' ? (
@@ -1536,15 +1587,28 @@ export function ProductFormModal({
                 </div>
 
                 {(batchTrackingEnabled || form.trackBatches) ? (
-                  <label className="flex items-center gap-2 cursor-pointer text-xs font-bold text-indigo-600 dark:text-indigo-400 pt-2 border-t border-[color:var(--border-subtle)]">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(form.trackBatches)}
-                      onChange={(e) => setForm({ ...form, trackBatches: e.target.checked })}
-                      className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
-                    />
-                    Track by Batch (lot number, expiry date, batch-wise cost)
-                  </label>
+                  <div className="pt-2 border-t border-[color:var(--border-subtle)]">
+                    <label
+                      className={`flex items-center gap-2 text-xs font-bold ${
+                        lockTrackBatchesOff ? 'cursor-not-allowed text-[color:var(--text-muted)]' : 'cursor-pointer text-indigo-600 dark:text-indigo-400'
+                      }`}
+                      title={lockTrackBatchesOff ? `Sell, transfer, or write off all ${lockedBatchRemainingQty} remaining batched unit(s) before turning this off.` : undefined}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={Boolean(form.trackBatches)}
+                        disabled={lockTrackBatchesOff}
+                        onChange={(e) => setForm({ ...form, trackBatches: e.target.checked })}
+                        className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4 disabled:opacity-50"
+                      />
+                      Track by Batch (lot number, expiry date, batch-wise cost)
+                    </label>
+                    {lockTrackBatchesOff && (
+                      <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-1 pl-6">
+                        {lockedBatchRemainingQty} {form.unit || 'unit'}(s) still sitting in batches — sell, transfer, or write them off first, then batch tracking can be turned off.
+                      </p>
+                    )}
+                  </div>
                 ) : (
                   <div className="text-[10px] text-[color:var(--text-muted)] pt-2 border-t border-[color:var(--border-subtle)]">
                     Batch tracking is off for this store. Enable it under Settings → Billing & Tax → Inventory to use it here.
@@ -2043,6 +2107,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
         p.name.toLowerCase().includes(needle) ||
         (p.regionalName || '').toLowerCase().includes(needle) ||
         (p.printName || '').toLowerCase().includes(needle) ||
+        (p.sku || '').toLowerCase().includes(needle) ||
         (p.barcodes || [p.barcode]).some((b) => String(b).includes(needle))
       );
     });
@@ -2086,7 +2151,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       {/* Search & Action Bar */}
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
         <div className="flex flex-1 flex-wrap gap-2 items-center">
-          <SearchInput value={query} onChange={setQuery} placeholder="Search by name, regional name, barcode..." className="w-64" />
+          <SearchInput value={query} onChange={setQuery} placeholder="Search by name, SKU, barcode..." className="w-64" />
           
           <Select value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className="w-44">
             <option value="all">All Categories</option>
@@ -2151,7 +2216,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                 <tr>
                   <th className="py-3 px-3">Product Info</th>
                   <th className="py-3 px-3">Category / Type</th>
-                  <th className="py-3 px-3">Barcodes</th>
+                  <th className="py-3 px-3">SKU / Barcodes</th>
                   <th className="py-3 px-3 text-right">Purchase Price</th>
                   <th className="py-3 px-3 text-right">Selling Price</th>
                   <th className="py-3 px-3 text-right">Wholesale / Special</th>
@@ -2248,7 +2313,14 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                             {(p.regionalName || p.printName) && (
                               <div className="text-xs text-indigo-600 font-medium">{p.regionalName || p.printName}</div>
                             )}
-                            <div className="text-[11px] text-[color:var(--text-muted)] font-mono">HSN: {p.hsn || '—'}</div>
+                            <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+                              {p.sku && (
+                                <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[10px] font-mono font-bold bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
+                                  SKU: {p.sku}
+                                </span>
+                              )}
+                              <span className="text-[11px] text-[color:var(--text-muted)] font-mono">HSN: {p.hsn || '—'}</span>
+                            </div>
                             {p.trackBatches && Array.isArray(p.batches) && p.batches.some((b) => Number(b.qty) > 0) && (() => {
                               const activeBatches = p.batches.filter((b) => Number(b.qty) > 0);
                               const windowDays = resolveNearExpiryDays(p, storeNearExpiryDays);
@@ -2323,7 +2395,12 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                       </td>
 
                       <td className="py-3 px-3 font-mono">
-                        <div className="font-bold text-[color:var(--text-primary)]">{p.barcode}</div>
+                        {p.sku && (
+                          <div className="font-bold text-[11px] text-indigo-600 dark:text-indigo-400 mb-0.5">
+                            SKU: {p.sku}
+                          </div>
+                        )}
+                        <div className="font-bold text-[color:var(--text-primary)]">{p.barcode || '—'}</div>
                         {Array.isArray(p.barcodes) && p.barcodes.length > 1 && (
                           <div className="text-[10px] text-[color:var(--text-muted)]">+{p.barcodes.length - 1} secondary barcode(s)</div>
                         )}
@@ -3885,10 +3962,16 @@ function BatchesTab({ products, showToast, onRefresh, storeNearExpiryDays }) {
  * Price Sheets Tab (Story 18 & Story 13)
  * ------------------------------------------------------------------ */
 
-function PricesheetTab({ products, showToast, onRefresh }) {
+function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
   const [subTab, setSubTab] = useState('matrix');
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
+
+  // Search & Filter State
+  const [matrixQuery, setMatrixQuery] = useState('');
+  const [matrixCategory, setMatrixCategory] = useState('all');
+  const [sheetQuery, setSheetQuery] = useState('');
+  const [manageQuery, setManageQuery] = useState('');
 
   // Price Sheets State
   const [priceSheets, setPriceSheets] = useState([]);
@@ -3928,6 +4011,57 @@ function PricesheetTab({ products, showToast, onRefresh }) {
       setLoading(false);
     }
   };
+
+  // Filtered rows for Global Matrix
+  const filteredMatrixRows = useMemo(() => {
+    let list = rows;
+    if (matrixCategory !== 'all') {
+      const selectedCat = (categories || []).find((c) => String(c.id) === String(matrixCategory));
+      list = list.filter((r) => {
+        const catName = String(r.category || '').toLowerCase();
+        if (selectedCat) {
+          return catName.includes(selectedCat.name.toLowerCase());
+        }
+        return catName === String(matrixCategory).toLowerCase();
+      });
+    }
+    if (!matrixQuery.trim()) return list;
+    const q = matrixQuery.toLowerCase().trim();
+    return list.filter((r) =>
+      String(r.name || '').toLowerCase().includes(q) ||
+      String(r.regionalName || '').toLowerCase().includes(q) ||
+      String(r.printName || '').toLowerCase().includes(q) ||
+      String(r.category || '').toLowerCase().includes(q) ||
+      String(r.sku || '').toLowerCase().includes(q) ||
+      String(r.barcode || '').toLowerCase().includes(q) ||
+      String(r.hsn || '').toLowerCase().includes(q)
+    );
+  }, [rows, matrixQuery, matrixCategory, categories]);
+
+  // Filtered price sheets
+  const filteredPriceSheets = useMemo(() => {
+    if (!sheetQuery.trim()) return priceSheets;
+    const q = sheetQuery.toLowerCase().trim();
+    return priceSheets.filter((s) =>
+      String(s.name || '').toLowerCase().includes(q) ||
+      String(s.code || '').toLowerCase().includes(q) ||
+      String(s.customerType || '').toLowerCase().includes(q)
+    );
+  }, [priceSheets, sheetQuery]);
+
+  // Filtered rows for Custom Pricing modal
+  const filteredManageRows = useMemo(() => {
+    if (!manageQuery.trim()) return rows;
+    const q = manageQuery.toLowerCase().trim();
+    return rows.filter((p) =>
+      String(p.name || '').toLowerCase().includes(q) ||
+      String(p.regionalName || '').toLowerCase().includes(q) ||
+      String(p.printName || '').toLowerCase().includes(q) ||
+      String(p.category || '').toLowerCase().includes(q) ||
+      String(p.sku || '').toLowerCase().includes(q) ||
+      String(p.barcode || '').toLowerCase().includes(q)
+    );
+  }, [rows, manageQuery]);
 
   // Price Sheet CRUD Methods
   const openAddSheet = () => {
@@ -3996,6 +4130,7 @@ function PricesheetTab({ products, showToast, onRefresh }) {
     setSheetDiscount(s.defaultDiscountPercent || 0);
     setPricingMap({ ...(s.pricingMap || {}) });
     setDiscountMap({ ...(s.discountMap || {}) });
+    setManageQuery('');
   };
 
   const saveCustomPricing = async () => {
@@ -4036,79 +4171,122 @@ function PricesheetTab({ products, showToast, onRefresh }) {
 
       {subTab === 'matrix' && (
         <>
-          <div className="flex items-center justify-between bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
             <div>
               <h3 className="font-bold text-sm text-[color:var(--text-primary)]">Global Pricing Grid</h3>
               <p className="text-xs text-[color:var(--text-secondary)] font-medium">Quickly update standard retail, purchase, MRP, and wholesale pricing across all items.</p>
             </div>
-            <Button icon={Save} onClick={saveGlobalPrices} disabled={loading}>{loading ? 'Saving...' : 'Save All Price Changes'}</Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <SearchInput
+                value={matrixQuery}
+                onChange={setMatrixQuery}
+                placeholder="Search products, barcode, category..."
+                className="w-56 sm:w-64"
+              />
+              {categories && categories.length > 0 && (
+                <Select value={matrixCategory} onChange={(e) => setMatrixCategory(e.target.value)} className="w-40">
+                  <option value="all">All Categories</option>
+                  {categories.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </Select>
+              )}
+              <Button icon={Save} onClick={saveGlobalPrices} disabled={loading}>{loading ? 'Saving...' : 'Save All Price Changes'}</Button>
+            </div>
           </div>
 
-          <Panel title="Product Price Matrix" icon={IndianRupee}>
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs text-left">
-                <thead className="bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-primary)] uppercase border-b border-[color:var(--border-subtle)]">
-                  <tr>
-                    <th className="py-2.5 px-3">Product Name</th>
-                    <th className="py-2.5 px-3">Category</th>
-                    <th className="py-2.5 px-3 text-right">Purchase Price (₹)</th>
-                    <th className="py-2.5 px-3 text-right">Selling Price (₹)</th>
-                    <th className="py-2.5 px-3 text-right">MRP (₹)</th>
-                    <th className="py-2.5 px-3 text-right">Wholesale (₹)</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[color:var(--border-subtle)]">
-                  {rows.map((r) => {
-                    const isService = String(r.productType).toLowerCase() === 'service';
-                    return (
-                      <tr key={r.id}>
-                        <td className="py-2 px-3 font-bold text-[color:var(--text-primary)]">{r.name}</td>
-                        <td className="py-2 px-3 font-medium text-[color:var(--text-primary)]">{r.category} {isService && <Badge tone="info" className="ml-1">Service</Badge>}</td>
-                        {isService ? (
-                          <td colSpan={4} className="py-2 px-3">
-                            <div className="flex items-center justify-end gap-3 bg-[color:var(--bg-subtle)]/30 rounded-lg p-1.5 border border-[color:var(--border-subtle)] mr-2">
-                              <span className="text-sm uppercase font-bold text-[color:var(--text-primary)] tracking-wider">Service Price:</span>
-                              <Input type="number" step="0.01" value={r.price} onChange={(e) => updatePrice(r.id, 'price', e.target.value)} className="w-32 text-right font-bold bg-white dark:bg-black" />
+          <Panel
+            title={`Product Price Matrix (${filteredMatrixRows.length}${filteredMatrixRows.length !== rows.length ? ` of ${rows.length}` : ''})`}
+            icon={IndianRupee}
+          >
+            {filteredMatrixRows.length === 0 ? (
+              <div className="py-8">
+                <EmptyState
+                  icon={Search}
+                  title={rows.length === 0 ? 'No Products in Catalog' : 'No Products Found'}
+                  description={rows.length === 0 ? 'Add products in the catalog to configure pricing.' : `No items match "${matrixQuery}". Try searching by another name, barcode, or category.`}
+                />
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs text-left">
+                  <thead className="bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-primary)] uppercase border-b border-[color:var(--border-subtle)]">
+                    <tr>
+                      <th className="py-2.5 px-3">Product Name</th>
+                      <th className="py-2.5 px-3">Category</th>
+                      <th className="py-2.5 px-3 text-right">Purchase Price (₹)</th>
+                      <th className="py-2.5 px-3 text-right">Selling Price (₹)</th>
+                      <th className="py-2.5 px-3 text-right">MRP (₹)</th>
+                      <th className="py-2.5 px-3 text-right">Wholesale (₹)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                    {filteredMatrixRows.map((r) => {
+                      const isService = String(r.productType).toLowerCase() === 'service';
+                      return (
+                        <tr key={r.id}>
+                          <td className="py-2 px-3">
+                            <div className="font-bold text-[color:var(--text-primary)]">{r.name}</div>
+                            <div className="flex items-center gap-1.5 font-normal text-[10.5px] text-[color:var(--text-muted)]">
+                              {r.sku && <span className="font-mono font-semibold text-indigo-600 dark:text-indigo-400">SKU: {r.sku}</span>}
+                              {r.barcode && <span className="font-mono">· {r.barcode}</span>}
                             </div>
                           </td>
-                        ) : (
-                          <>
-                            <td className="py-2 px-3 text-right">
-                              <Input type="number" step="0.01" value={r.purchasePrice} onChange={(e) => updatePrice(r.id, 'purchasePrice', e.target.value)} className="w-24 text-right ml-auto" />
+                          <td className="py-2 px-3 font-medium text-[color:var(--text-primary)]">{r.category} {isService && <Badge tone="info" className="ml-1">Service</Badge>}</td>
+                          {isService ? (
+                            <td colSpan={4} className="py-2 px-3">
+                              <div className="flex items-center justify-end gap-3 bg-[color:var(--bg-subtle)]/30 rounded-lg p-1.5 border border-[color:var(--border-subtle)] mr-2">
+                                <span className="text-sm uppercase font-bold text-[color:var(--text-primary)] tracking-wider">Service Price:</span>
+                                <Input type="number" step="0.01" value={r.price} onChange={(e) => updatePrice(r.id, 'price', e.target.value)} className="w-32 text-right font-bold bg-white dark:bg-black" />
+                              </div>
                             </td>
-                            <td className="py-2 px-3 text-right">
-                              <Input type="number" step="0.01" value={r.price} onChange={(e) => updatePrice(r.id, 'price', e.target.value)} className="w-24 text-right font-bold ml-auto" />
-                            </td>
-                            <td className="py-2 px-3 text-right">
-                              <Input type="number" step="0.01" value={r.mrp} onChange={(e) => updatePrice(r.id, 'mrp', e.target.value)} className="w-24 text-right ml-auto" />
-                            </td>
-                            <td className="py-2 px-3 text-right">
-                              <Input type="number" step="0.01" value={r.wholesalePrice} onChange={(e) => updatePrice(r.id, 'wholesalePrice', e.target.value)} className="w-24 text-right ml-auto" />
-                            </td>
-                          </>
-                        )}
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                          ) : (
+                            <>
+                              <td className="py-2 px-3 text-right">
+                                <Input type="number" step="0.01" value={r.purchasePrice} onChange={(e) => updatePrice(r.id, 'purchasePrice', e.target.value)} className="w-24 text-right ml-auto" />
+                              </td>
+                              <td className="py-2 px-3 text-right">
+                                <Input type="number" step="0.01" value={r.price} onChange={(e) => updatePrice(r.id, 'price', e.target.value)} className="w-24 text-right font-bold ml-auto" />
+                              </td>
+                              <td className="py-2 px-3 text-right">
+                                <Input type="number" step="0.01" value={r.mrp} onChange={(e) => updatePrice(r.id, 'mrp', e.target.value)} className="w-24 text-right ml-auto" />
+                              </td>
+                              <td className="py-2 px-3 text-right">
+                                <Input type="number" step="0.01" value={r.wholesalePrice} onChange={(e) => updatePrice(r.id, 'wholesalePrice', e.target.value)} className="w-24 text-right ml-auto" />
+                              </td>
+                            </>
+                          )}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </Panel>
         </>
       )}
 
       {subTab === 'sheets' && (
         <>
-          <div className="flex items-center justify-between bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
             <div>
               <h3 className="font-bold text-sm text-[color:var(--text-primary)]">Custom Price Sheets</h3>
               <p className="text-xs text-[color:var(--text-secondary)] font-medium">Create tailored price lists with global and per-item discounts for customer groups.</p>
             </div>
-            <Button icon={Plus} onClick={openAddSheet}>Create Price Sheet</Button>
+            <div className="flex items-center gap-2">
+              <SearchInput
+                value={sheetQuery}
+                onChange={setSheetQuery}
+                placeholder="Search price sheets..."
+                className="w-56"
+              />
+              <Button icon={Plus} onClick={openAddSheet}>Create Price Sheet</Button>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {priceSheets.map((s) => (
+            {filteredPriceSheets.map((s) => (
               <div key={s.id} className="p-4 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] flex flex-col gap-3">
                 <div className="flex items-start justify-between">
                   <div>
@@ -4141,9 +4319,13 @@ function PricesheetTab({ products, showToast, onRefresh }) {
                 </div>
               </div>
             ))}
-            {priceSheets.length === 0 && (
+            {filteredPriceSheets.length === 0 && (
               <div className="col-span-full">
-                <EmptyState icon={FileSpreadsheet} title="No Price Sheets" description="Create a price sheet to assign custom prices and discounts to your products." />
+                <EmptyState
+                  icon={FileSpreadsheet}
+                  title={priceSheets.length === 0 ? 'No Price Sheets' : 'No Matching Price Sheets'}
+                  description={priceSheets.length === 0 ? 'Create a price sheet to assign custom prices and discounts to your products.' : `No price sheets found matching "${sheetQuery}".`}
+                />
               </div>
             )}
           </div>
@@ -4220,97 +4402,120 @@ function PricesheetTab({ products, showToast, onRefresh }) {
               </div>
             </div>
 
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 shrink-0">
+              <SearchInput
+                value={manageQuery}
+                onChange={setManageQuery}
+                placeholder="Search products by name, barcode, category..."
+                className="w-full sm:w-80"
+              />
+              <span className="text-xs text-[color:var(--text-secondary)] font-semibold shrink-0">
+                Showing {filteredManageRows.length} of {rows.length} products
+              </span>
+            </div>
+
             <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--surface,#ffffff)]">
-              <table className="w-full text-xs text-left">
-                <thead className="bg-slate-100 dark:bg-slate-800 text-[color:var(--text-primary)] font-bold uppercase sticky top-0 z-10 border-b border-[color:var(--border-subtle)] shadow-sm">
-                  <tr>
-                    <th className="py-2.5 px-3 bg-slate-100 dark:bg-slate-800">Product Name</th>
-                    <th className="py-2.5 px-3 text-right bg-slate-100 dark:bg-slate-800">Standard Price</th>
-                    <th className="py-2.5 px-3 text-right bg-slate-100 dark:bg-slate-800">Custom Discount (%)</th>
-                    <th className="py-2.5 px-3 text-right bg-slate-100 dark:bg-slate-800">Custom Price (₹)</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[color:var(--border-subtle)] bg-[color:var(--surface,#ffffff)]">
-                  {rows.map(p => {
-                    const isService = String(p.productType).toLowerCase() === 'service';
-                    const stdPrice = Number(p.price) || 0;
-                    const sheetPct = Number(sheetDiscount) || 0;
-                    const calcDefaultPrice = stdPrice > 0 ? (stdPrice * (1 - sheetPct / 100)) : 0;
-                    
-                    const hasCustomDiscount = discountMap[p.id] !== undefined && discountMap[p.id] !== '';
-                    const hasCustomPrice = pricingMap[p.id] !== undefined && pricingMap[p.id] !== '';
-                    const isOverridden = hasCustomDiscount || hasCustomPrice;
+              {filteredManageRows.length === 0 ? (
+                <div className="p-8">
+                  <EmptyState
+                    icon={Search}
+                    title="No Products Found"
+                    description={`No items match "${manageQuery}". Try searching with another term.`}
+                  />
+                </div>
+              ) : (
+                <table className="w-full text-xs text-left">
+                  <thead className="bg-slate-100 dark:bg-slate-800 text-[color:var(--text-primary)] font-bold uppercase sticky top-0 z-10 border-b border-[color:var(--border-subtle)] shadow-sm">
+                    <tr>
+                      <th className="py-2.5 px-3 bg-slate-100 dark:bg-slate-800">Product Name</th>
+                      <th className="py-2.5 px-3 text-right bg-slate-100 dark:bg-slate-800">Standard Price</th>
+                      <th className="py-2.5 px-3 text-right bg-slate-100 dark:bg-slate-800">Custom Discount (%)</th>
+                      <th className="py-2.5 px-3 text-right bg-slate-100 dark:bg-slate-800">Custom Price (₹)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[color:var(--border-subtle)] bg-[color:var(--surface,#ffffff)]">
+                    {filteredManageRows.map(p => {
+                      const isService = String(p.productType).toLowerCase() === 'service';
+                      const stdPrice = Number(p.price) || 0;
+                      const sheetPct = Number(sheetDiscount) || 0;
+                      const calcDefaultPrice = stdPrice > 0 ? (stdPrice * (1 - sheetPct / 100)) : 0;
+                      
+                      const hasCustomDiscount = discountMap[p.id] !== undefined && discountMap[p.id] !== '';
+                      const hasCustomPrice = pricingMap[p.id] !== undefined && pricingMap[p.id] !== '';
+                      const isOverridden = hasCustomDiscount || hasCustomPrice;
 
-                    return (
-                      <tr key={p.id} className={isOverridden ? 'bg-indigo-50/40 dark:bg-indigo-950/30' : ''}>
-                        <td className="py-2 px-3">
-                          <div className="font-bold text-[color:var(--text-primary)]">
-                            {p.name} {isService && <Badge tone="info" className="ml-1">Service</Badge>}
-                          </div>
-                          <div className="text-[10px] text-[color:var(--text-secondary)] font-semibold flex items-center gap-1.5 mt-0.5">
-                            <span>{p.category}</span>
-                            {isOverridden ? (
-                              <Badge tone="success">Custom Override</Badge>
-                            ) : sheetPct > 0 ? (
-                              <Badge tone="accent">{sheetPct}% Sheet Discount Applied</Badge>
-                            ) : (
-                              <Badge tone="neutral">Standard Price</Badge>
-                            )}
-                          </div>
-                        </td>
+                      return (
+                        <tr key={p.id} className={isOverridden ? 'bg-indigo-50/40 dark:bg-indigo-950/30' : ''}>
+                          <td className="py-2 px-3">
+                            <div className="font-bold text-[color:var(--text-primary)]">
+                              {p.name} {isService && <Badge tone="info" className="ml-1">Service</Badge>}
+                            </div>
+                            <div className="text-[10px] text-[color:var(--text-secondary)] font-semibold flex items-center gap-1.5 mt-0.5">
+                              {p.sku && <span className="font-mono text-indigo-600 dark:text-indigo-400 font-bold">SKU: {p.sku}</span>}
+                              <span>{p.category}</span>
+                              {isOverridden ? (
+                                <Badge tone="success">Custom Override</Badge>
+                              ) : sheetPct > 0 ? (
+                                <Badge tone="accent">{sheetPct}% Sheet Discount Applied</Badge>
+                              ) : (
+                                <Badge tone="neutral">Standard Price</Badge>
+                              )}
+                            </div>
+                          </td>
 
-                        <td className="py-2 px-3 text-right text-[color:var(--text-primary)] font-bold font-mono">
-                          {money(stdPrice)}
-                        </td>
+                          <td className="py-2 px-3 text-right text-[color:var(--text-primary)] font-bold font-mono">
+                            {money(stdPrice)}
+                          </td>
 
-                        <td className="py-2 px-3 text-right">
-                          <Input
-                            type="number"
-                            step="0.1"
-                            placeholder={sheetPct > 0 ? `${sheetPct}% (Default)` : '0%'}
-                            value={discountMap[p.id] !== undefined ? discountMap[p.id] : ''}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              if (val === '' || val === null) {
-                                setDiscountMap(prev => { const n = { ...prev }; delete n[p.id]; return n; });
-                                setPricingMap(prev => { const n = { ...prev }; delete n[p.id]; return n; });
-                              } else {
-                                const pct = Number(val) || 0;
-                                const calcPrice = stdPrice > 0 ? Number((stdPrice * (1 - pct / 100)).toFixed(2)) : 0;
-                                setDiscountMap(prev => ({ ...prev, [p.id]: val }));
-                                setPricingMap(prev => ({ ...prev, [p.id]: calcPrice }));
-                              }
-                            }}
-                            className="w-24 text-right ml-auto"
-                          />
-                        </td>
+                          <td className="py-2 px-3 text-right">
+                            <Input
+                              type="number"
+                              step="0.1"
+                              placeholder={sheetPct > 0 ? `${sheetPct}% (Default)` : '0%'}
+                              value={discountMap[p.id] !== undefined ? discountMap[p.id] : ''}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                if (val === '' || val === null) {
+                                  setDiscountMap(prev => { const n = { ...prev }; delete n[p.id]; return n; });
+                                  setPricingMap(prev => { const n = { ...prev }; delete n[p.id]; return n; });
+                                } else {
+                                  const pct = Number(val) || 0;
+                                  const calcPrice = stdPrice > 0 ? Number((stdPrice * (1 - pct / 100)).toFixed(2)) : 0;
+                                  setDiscountMap(prev => ({ ...prev, [p.id]: val }));
+                                  setPricingMap(prev => ({ ...prev, [p.id]: calcPrice }));
+                                }
+                              }}
+                              className="w-24 text-right ml-auto"
+                            />
+                          </td>
 
-                        <td className="py-2 px-3 text-right">
-                          <Input
-                            type="number"
-                            step="0.01"
-                            placeholder={calcDefaultPrice > 0 ? calcDefaultPrice.toFixed(2) : 'Standard'}
-                            value={pricingMap[p.id] !== undefined ? pricingMap[p.id] : ''}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              if (val === '' || val === null) {
-                                setPricingMap(prev => { const n = { ...prev }; delete n[p.id]; return n; });
-                                setDiscountMap(prev => { const n = { ...prev }; delete n[p.id]; return n; });
-                              } else {
-                                const priceVal = Number(val) || 0;
-                                const calcPct = stdPrice > 0 ? Number((((stdPrice - priceVal) / stdPrice) * 100).toFixed(2)) : 0;
-                                setPricingMap(prev => ({ ...prev, [p.id]: val }));
-                                setDiscountMap(prev => ({ ...prev, [p.id]: calcPct }));
-                              }
-                            }}
-                            className="w-28 text-right font-bold ml-auto"
-                          />
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                          <td className="py-2 px-3 text-right">
+                            <Input
+                              type="number"
+                              step="0.01"
+                              placeholder={calcDefaultPrice > 0 ? calcDefaultPrice.toFixed(2) : 'Standard'}
+                              value={pricingMap[p.id] !== undefined ? pricingMap[p.id] : ''}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                if (val === '' || val === null) {
+                                  setPricingMap(prev => { const n = { ...prev }; delete n[p.id]; return n; });
+                                  setDiscountMap(prev => { const n = { ...prev }; delete n[p.id]; return n; });
+                                } else {
+                                  const priceVal = Number(val) || 0;
+                                  const calcPct = stdPrice > 0 ? Number((((stdPrice - priceVal) / stdPrice) * 100).toFixed(2)) : 0;
+                                  setPricingMap(prev => ({ ...prev, [p.id]: val }));
+                                  setDiscountMap(prev => ({ ...prev, [p.id]: calcPct }));
+                                }
+                              }}
+                              className="w-28 text-right font-bold ml-auto"
+                            />
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
             </div>
 
             <div className="flex justify-end gap-2 pt-3 border-t border-[color:var(--border-subtle)] shrink-0 mt-auto">
@@ -4398,11 +4603,11 @@ function ImportExportTab({ products, categories, showToast, onRefresh }) {
 
   const downloadSampleCSV = () => {
     const csvContent =
-      "Product Name,Regional Name,Category,Product Type,Unit,Barcode,Purchase Price,Selling Price,MRP,Wholesale Price,Current Stock,Min Stock,HSN,Tax Rate\n" +
-      "Organic Apples,ஆப்பிள்,Fruits,standard,kg,89012345999,100,150,160,130,50,10,0808,5\n" +
-      "Raw Sugar (RM),சர்க்கரை,Raw Materials,raw,kg,89012345777,35,40,42,38,200,50,1701,5\n" +
-      "Amul Milk 1L,பால்,Dairy,standard,ltr,89012345888,50,60,62,55,100,20,0401,0\n" +
-      "Hair Trim Service,ஹேர் கட்,Services,service,pcs,SERV001,0,100,100,100,0,0,,0\n";
+      "Product Name,Regional Name,Category,Product Type,SKU Code,Unit,Barcode,Purchase Price,Selling Price,MRP,Wholesale Price,Current Stock,Min Stock,HSN,Tax Rate\n" +
+      "Organic Apples,ஆப்பிள்,Fruits,standard,SKU-APPL-1001,kg,89012345999,100,150,160,130,50,10,0808,5\n" +
+      "Raw Sugar (RM),சர்க்கரை,Raw Materials,raw,SKU-SUGA-1002,kg,89012345777,35,40,42,38,200,50,1701,5\n" +
+      "Amul Milk 1L,பால்,Dairy,standard,SKU-MILK-1003,ltr,89012345888,50,60,62,55,100,20,0401,0\n" +
+      "Hair Trim Service,ஹேர் கட்,Services,service,SKU-HAIR-1004,pcs,SERV001,0,100,100,100,0,0,,0\n";
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -4459,6 +4664,7 @@ function ImportExportTab({ products, categories, showToast, onRefresh }) {
       { key: 'regionalName', label: 'Regional Name' },
       { key: 'productType', label: 'Product Type' },
       { key: 'category', label: 'Category' },
+      { key: 'sku', label: 'SKU Code' },
       { key: 'barcode', label: 'Barcode' },
       { key: 'unit', label: 'Unit' },
       { key: 'purchasePrice', label: 'Purchase Price' },
@@ -4486,6 +4692,7 @@ function ImportExportTab({ products, categories, showToast, onRefresh }) {
     const cols = [
       { key: 'name', label: 'Product Name' },
       { key: 'regionalName', label: 'Regional Name' },
+      { key: 'sku', label: 'SKU' },
       { key: 'barcode', label: 'Barcode' },
       { key: 'unit', label: 'Unit' },
       { key: 'purchasePrice', label: 'Cost Price', align: 'right' },

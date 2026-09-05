@@ -1398,7 +1398,7 @@ function PurchaseProductPickerModal({ open, onClose, products = [], onSelectProd
       title="Select Product"
       subtitle={`Choose from ${products.length} catalog products, or add a new one for this purchase.`}
       icon={Boxes}
-      size="lg"
+      size="xl"
       footer={
         <div className="flex items-center justify-between w-full">
           <button
@@ -1417,7 +1417,7 @@ function PurchaseProductPickerModal({ open, onClose, products = [], onSelectProd
     >
       <div className="space-y-3">
         <div className="flex flex-col sm:flex-row items-center gap-2">
-          <div className="relative flex-1 w-full">
+          <div className="relative w-full sm:w-[60%]">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[color:var(--text-muted)]" />
             <input
               type="text"
@@ -1442,7 +1442,7 @@ function PurchaseProductPickerModal({ open, onClose, products = [], onSelectProd
             <select
               value={categoryFilter}
               onChange={(e) => setCategoryFilter(e.target.value)}
-              className="field-input text-xs py-2 px-3 min-w-[140px] rounded-xl font-semibold cursor-pointer shrink-0"
+              className="field-input text-xs py-2 px-3 rounded-xl font-semibold cursor-pointer w-full sm:w-[30%]"
             >
               <option value="ALL">All Categories</option>
               {categories.map((c) => (
@@ -1627,7 +1627,7 @@ function NewPurchaseModal({
               unit: l.unit || p?.unit || 'pcs',
               total: lineTot,
               trackBatches: Boolean(p?.trackBatches),
-              showBatch: Boolean(p?.trackBatches || batchTrackingEnabled),
+              showBatch: Boolean(p?.trackBatches),
               sellPrice: p?.price ?? ''
             };
           });
@@ -1700,8 +1700,14 @@ function NewPurchaseModal({
         discount,
         total,
         isCustom: !prod.id,
+        // Batch entry only ever applies to a product that's already batch-
+        // tracked in the catalog (product.trackBatches) — a store-wide
+        // "batch tracking enabled" setting used to auto-show this drawer for
+        // every product too, but the backend only ever creates batches when
+        // product.trackBatches is true, so any batch/expiry typed here for a
+        // non-tracked product was silently discarded on save.
         trackBatches: Boolean(prod.trackBatches),
-        showBatch: Boolean(prod.trackBatches || batchTrackingEnabled),
+        showBatch: Boolean(prod.trackBatches),
         batches: [
           {
             id: `b_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
@@ -2409,15 +2415,21 @@ function NewPurchaseModal({
                               onOpenPicker={(i) => setActivePickerIndex(i)}
                               onUpdateName={(i, name) => handleItemChange(i, 'name', name)}
                             />
-                            <div className="mt-1 flex items-center gap-1.5">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  const nextVal = !(item.showBatch || item.trackBatches);
-                                  handleItemChange(idx, 'showBatch', nextVal);
-                                  if (nextVal) {
-                                    handleItemChange(idx, 'trackBatches', true);
-                                    if (!item.batches || item.batches.length === 0) {
+                            {/* Batch entry is only ever offered for a product that's
+                                already batch-tracked in the catalog — the backend
+                                only creates batches when product.trackBatches is
+                                true, so this can no longer be used to turn batching
+                                on ad hoc for a normal product mid-purchase. To start
+                                batching a product, mark it "Track by Batch" in
+                                Inventory first. */}
+                            {Boolean(product?.trackBatches) && (
+                              <div className="mt-1 flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const nextVal = !(item.showBatch || item.trackBatches);
+                                    handleItemChange(idx, 'showBatch', nextVal);
+                                    if (nextVal && (!item.batches || item.batches.length === 0)) {
                                       handleItemChange(idx, 'batches', [
                                         {
                                           id: `b_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
@@ -2429,24 +2441,24 @@ function NewPurchaseModal({
                                         }
                                       ]);
                                     }
-                                  }
-                                }}
-                                className={`text-[10px] font-bold px-2 py-0.5 rounded-lg border transition-all inline-flex items-center gap-1 ${
-                                  (item.batches && item.batches.length > 1) || item.batches?.[0]?.batchNo || item.batchNo || item.expiryDate
-                                    ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border-amber-300 dark:border-amber-700'
-                                    : 'bg-white dark:bg-slate-900 text-slate-500 hover:text-indigo-600 border-slate-200 dark:border-slate-800'
-                                }`}
-                              >
-                                <Boxes className="w-3 h-3 text-amber-600" />
-                                {Array.isArray(item.batches) && item.batches.length > 1
-                                  ? `${item.batches.length} Batches (${item.batches.reduce((s, b) => s + (Number(b.qty) || 0), 0)} ${item.unit || 'pcs'})`
-                                  : item.batches?.[0]?.batchNo
-                                  ? `Batch #${item.batches[0].batchNo}`
-                                  : item.batchNo
-                                  ? `Batch #${item.batchNo}`
-                                  : (item.showBatch || item.trackBatches ? 'Hide Batch Details' : '+ Add Batch / Expiry')}
-                              </button>
-                            </div>
+                                  }}
+                                  className={`text-[10px] font-bold px-2 py-0.5 rounded-lg border transition-all inline-flex items-center gap-1 ${
+                                    (item.batches && item.batches.length > 1) || item.batches?.[0]?.batchNo || item.batchNo || item.expiryDate
+                                      ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border-amber-300 dark:border-amber-700'
+                                      : 'bg-white dark:bg-slate-900 text-slate-500 hover:text-indigo-600 border-slate-200 dark:border-slate-800'
+                                  }`}
+                                >
+                                  <Boxes className="w-3 h-3 text-amber-600" />
+                                  {Array.isArray(item.batches) && item.batches.length > 1
+                                    ? `${item.batches.length} Batches (${item.batches.reduce((s, b) => s + (Number(b.qty) || 0), 0)} ${item.unit || 'pcs'})`
+                                    : item.batches?.[0]?.batchNo
+                                    ? `Batch #${item.batches[0].batchNo}`
+                                    : item.batchNo
+                                    ? `Batch #${item.batchNo}`
+                                    : (item.showBatch || item.trackBatches ? 'Hide Batch Details' : 'Add Batch / Expiry')}
+                                </button>
+                              </div>
+                            )}
                           </td>
 
                           <td className="py-2 px-3">

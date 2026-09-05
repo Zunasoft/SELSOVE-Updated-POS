@@ -20,7 +20,8 @@ import { ThermalReceiptView, THERMAL_THEMES, BILLING_THERMAL_THEME_IDS } from '.
 import { InvoiceDocumentView, INVOICE_THEMES, ACCENT_COLORS } from './InvoiceDocumentTemplates';
 import { exportBillToWord, exportInvoiceToWord } from '../lib/exporters';
 
-const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Credit (Udhar)', 'Partial Payment'];
+const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Credit (Udhar)', 'Partial Payment', 'Multi Pay'];
+const SPLIT_PAYMENT_METHODS = ['Cash', 'UPI', 'Card', 'Net Banking', 'Cheque'];
 const DISCOUNT_PRESETS = [0, 5, 10, 15, 20];
 
 export function getProductImageUrl(url, name = '', barcode = '') {
@@ -679,6 +680,10 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   const [cashTendered, setCashTendered] = useState('');
   const [partialPaidAmount, setPartialPaidAmount] = useState('');
   const [partialPaymentMethod, setPartialPaymentMethod] = useState('Cash');
+  const [splitRows, setSplitRows] = useState([
+    { method: 'Cash', amount: '', ref: '' },
+    { method: 'UPI', amount: '', ref: '' }
+  ]);
   const [paymentRef, setPaymentRef] = useState('');
   const [redeemPoints, setRedeemPoints] = useState(0);
   const [redeemAdvance, setRedeemAdvance] = useState(0);
@@ -1072,7 +1077,12 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         }
       }
 
-      const local = products.find((p) => p.barcode === trimmed || (p.barcodes || []).includes(trimmed));
+      const local = products.find(
+        (p) =>
+          p.barcode === trimmed ||
+          (p.sku && p.sku.toLowerCase() === trimmed.toLowerCase()) ||
+          (p.barcodes || []).includes(trimmed)
+      );
       if (local) {
         addToCart(local, 1);
         playScanSound('add');
@@ -1367,6 +1377,20 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
   const maxDiscount = settings?.pos?.maxDiscountPercent ?? 100;
 
+  const addSplitRow = () => {
+    const unused = SPLIT_PAYMENT_METHODS.find((m) => !splitRows.some((r) => r.method === m)) || 'Cash';
+    setSplitRows((prev) => [...prev, { method: unused, amount: '', ref: '' }]);
+  };
+  const removeSplitRow = (idx) => setSplitRows((prev) => (prev.length <= 1 ? prev : prev.filter((_, i) => i !== idx)));
+  const updateSplitRow = (idx, patch) => setSplitRows((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
+
+  const splitEntries = useMemo(
+    () => splitRows.filter((r) => (Number(r.amount) || 0) > 0).map((r) => ({ method: r.method, amount: Math.round((Number(r.amount) || 0) * 100) / 100, ref: (r.ref || '').trim() })),
+    [splitRows]
+  );
+  const splitTotal = useMemo(() => Math.round(splitEntries.reduce((s, r) => s + r.amount, 0) * 100) / 100, [splitEntries]);
+  const splitRemaining = Math.round((payable - splitTotal) * 100) / 100;
+
   const checkout = async () => {
     if (cart.length === 0) return;
     // Guard against a double-tap/double-click firing two POST /orders for the
@@ -1375,8 +1399,25 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
     // entries independently, since the backend has no dedup/idempotency check.
     if (checkingOut) return;
 
-    if ((paymentMode === 'Credit (Udhar)' || paymentMode === 'Partial Payment') && !customer) {
-      showToast('Select a customer for credit / partial payment sales.', 'error');
+    const isMultiPay = paymentMode === 'Multi Pay';
+
+    if (isMultiPay) {
+      if (splitEntries.length < 2) {
+        showToast('Enter an amount for at least two payment methods, or pick a single payment mode instead.', 'error');
+        return;
+      }
+      if (splitTotal <= 0) {
+        showToast('Enter the amount collected for each payment method.', 'error');
+        return;
+      }
+      if (splitTotal > payable + 0.01) {
+        showToast(`Split amounts (${money(splitTotal)}) add up to more than the payable amount (${money(payable)}).`, 'error');
+        return;
+      }
+    }
+
+    if ((paymentMode === 'Credit (Udhar)' || paymentMode === 'Partial Payment' || (isMultiPay && splitRemaining > 0.01)) && !customer) {
+      showToast('Select a customer to carry the remaining balance as credit / udhar.', 'error');
       return;
     }
 
@@ -1387,7 +1428,13 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
       return;
     }
 
-    const creditPortion = isPartial ? Math.max(0, payable - partialPaid) : (paymentMode === 'Credit (Udhar)' ? payable : 0);
+    const multiPaid = isMultiPay ? Math.min(payable, splitTotal) : 0;
+
+    const creditPortion = isPartial
+      ? Math.max(0, payable - partialPaid)
+      : isMultiPay
+        ? Math.max(0, payable - multiPaid)
+        : (paymentMode === 'Credit (Udhar)' ? payable : 0);
 
     if (customer?.creditLimit > 0 && creditPortion > 0) {
       const projected = (customer.outstanding || 0) + creditPortion;
@@ -1401,7 +1448,13 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
     setCheckingOut(true);
     try {
-      const actualPaymentMode = payable === 0 && advanceCredit.applied > 0 ? 'Advance / Store Credit' : (isPartial ? partialPaymentMethod : paymentMode);
+      const actualPaymentMode = payable === 0 && advanceCredit.applied > 0
+        ? 'Advance / Store Credit'
+        : isPartial
+          ? partialPaymentMethod
+          : isMultiPay
+            ? 'Split Payment'
+            : paymentMode;
       const res = await api.post('/orders', {
         customerId: customer?.id || null,
         customerName: customer?.name || 'Walk-in Customer',
@@ -1413,8 +1466,9 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         customerStateCode: customer?.stateCode || '',
         paymentMethod: actualPaymentMode,
         paymentRef: paymentRef.trim() || '',
-        status: isPartial ? 'PARTIALLY_PAID' : undefined,
-        paidAmount: isPartial ? partialPaid : undefined,
+        splitPayments: isMultiPay ? splitEntries : undefined,
+        status: (isPartial || (isMultiPay && creditPortion > 0)) ? 'PARTIALLY_PAID' : undefined,
+        paidAmount: isPartial ? partialPaid : (isMultiPay ? multiPaid : undefined),
         subtotal: totals.subtotal,
         tax: totals.tax,
         discount: totals.discountAmount,
@@ -1432,6 +1486,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
       clearCart();
       setCashTendered('');
       setPartialPaidAmount('');
+      setSplitRows([{ method: 'Cash', amount: '', ref: '' }, { method: 'UPI', amount: '', ref: '' }]);
       setPaymentRef('');
       setRedeemPoints(0);
       setRedeemAdvance(0);
@@ -1517,6 +1572,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         (p) =>
           p.name.toLowerCase().includes(needle) ||
           (p.regionalName || p.printName || '').toLowerCase().includes(needle) ||
+          (p.sku && p.sku.toLowerCase().includes(needle)) ||
           p.id.toLowerCase().includes(needle) ||
           (p.barcodes || [p.barcode]).some((b) => String(b).includes(needle))
       );
@@ -1691,6 +1747,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                               </span>
                             </div>
                             <div className="text-[10px] text-[color:var(--text-muted)] flex items-center gap-2 mt-0.5">
+                              {p.sku && <span className="font-mono font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/50 border border-indigo-200 dark:border-indigo-800/60 px-1.5 py-0.2 rounded">SKU: {p.sku}</span>}
                               {p.barcode && <span className="font-mono bg-[color:var(--bg-subtle)] px-1.5 py-0.2 rounded">{p.barcode}</span>}
                               <span>{p.unit || 'pcs'}</span>
                               <span className={stockInfo.isOut ? 'text-rose-500 font-semibold' : 'text-emerald-600 dark:text-emerald-400 font-semibold'}>
@@ -1902,11 +1959,17 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
                     {/* Overlay Badges */}
                     <div className="absolute top-1 left-1 right-1 flex items-center justify-between gap-0.5 pointer-events-none">
-                      {p.barcode ? (
-                        <span className="tabular truncate text-[8px] font-mono font-bold px-1 py-0.2 rounded bg-slate-950/80 text-white backdrop-blur-xs shadow-xs max-w-[65%]">
-                          {p.barcode}
-                        </span>
-                      ) : <span />}
+                      <div className="flex items-center gap-0.5 max-w-[70%] truncate">
+                        {p.sku ? (
+                          <span className="tabular truncate text-[8px] font-mono font-bold px-1 py-0.2 rounded bg-indigo-950/90 text-indigo-200 border border-indigo-500/30 backdrop-blur-xs shadow-xs" title={`SKU: ${p.sku}`}>
+                            {p.sku}
+                          </span>
+                        ) : p.barcode ? (
+                          <span className="tabular truncate text-[8px] font-mono font-bold px-1 py-0.2 rounded bg-slate-950/80 text-white backdrop-blur-xs shadow-xs" title={`Barcode: ${p.barcode}`}>
+                            {p.barcode}
+                          </span>
+                        ) : null}
+                      </div>
 
                       <div className="flex items-center gap-0.5 shrink-0">
                         {isRecent && (
@@ -2860,6 +2923,79 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                 <div className="flex justify-between font-bold text-amber-800 dark:text-amber-300 border-t border-amber-100 dark:border-amber-900/60 pt-1">
                   <span>Added to Customer Udhar (Due):</span>
                   <span className="font-mono">{money(Math.max(0, payable - (Number(partialPaidAmount) || 0)))}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {paymentMode === 'Multi Pay' && (
+            <div className="p-3.5 rounded-2xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800/60 space-y-3">
+              <div className="flex items-center justify-between text-xs font-bold text-indigo-900 dark:text-indigo-300">
+                <span className="flex items-center gap-1.5">
+                  <Wallet className="w-4 h-4 text-indigo-600" />
+                  Split Across Payment Methods
+                </span>
+                <span>Payable: {money(payable)}</span>
+              </div>
+
+              {!customer && splitRemaining > 0.01 && (
+                <div className="p-2 rounded-xl bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-300 text-[11px] font-semibold">
+                  ⚠️ Select a registered customer above to record any remaining balance as credit / udhar.
+                </div>
+              )}
+
+              <div className="space-y-2">
+                {splitRows.map((row, idx) => (
+                  <div key={idx} className="grid grid-cols-[1fr_1fr_auto] gap-2 items-center">
+                    <Select value={row.method} onChange={(e) => updateSplitRow(idx, { method: e.target.value })} className="bg-white dark:bg-slate-900 text-xs">
+                      {SPLIT_PAYMENT_METHODS.map((m) => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </Select>
+                    <Input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={row.amount}
+                      onChange={(e) => updateSplitRow(idx, { amount: e.target.value })}
+                      placeholder="Amount"
+                      className="font-bold font-mono text-sm bg-white dark:bg-slate-900"
+                    />
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => removeSplitRow(idx)}
+                      disabled={splitRows.length <= 1}
+                      className="!px-2"
+                    >
+                      <MinusCircle className="w-4 h-4" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+
+              <Button size="sm" onClick={addSplitRow}>
+                <PlusCircle className="w-3.5 h-3.5 mr-1" /> Add payment method
+              </Button>
+
+              <div className="rounded-xl p-2.5 bg-white/80 dark:bg-slate-900/80 border border-indigo-200 dark:border-indigo-800 text-xs space-y-1">
+                <div className="flex justify-between text-[11px] text-[color:var(--text-secondary)]">
+                  <span>Entered so far:</span>
+                  <span className="font-bold font-mono">{money(splitTotal)}</span>
+                </div>
+                <div
+                  className={`flex justify-between font-bold border-t pt-1 ${
+                    splitRemaining > 0.01
+                      ? 'text-amber-700 dark:text-amber-400 border-amber-100 dark:border-amber-900/60'
+                      : splitRemaining < -0.01
+                        ? 'text-rose-700 dark:text-rose-400 border-rose-100 dark:border-rose-900/60'
+                        : 'text-emerald-700 dark:text-emerald-400 border-emerald-100 dark:border-emerald-900/60'
+                  }`}
+                >
+                  <span>
+                    {splitRemaining > 0.01 ? 'Remaining (→ Customer Udhar)' : splitRemaining < -0.01 ? 'Over by' : 'Fully covered'}
+                  </span>
+                  <span className="font-mono">{money(Math.abs(splitRemaining))}</span>
                 </div>
               </div>
             </div>

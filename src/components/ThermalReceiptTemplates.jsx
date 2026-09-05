@@ -881,7 +881,20 @@ export function ThermalReceiptView({
       {/* 10. Payment Breakdown & Advance Credit */}
       {sectionMap.payments_breakup && (cfg.showPaymentBreakup || cfg.showAdvanceSummary) && (
         <div className="mt-1 pt-1 border-t border-dotted border-slate-400 text-[10px] space-y-0.5">
-          {cfg.showPaymentBreakup && (
+          {cfg.showPaymentBreakup && Array.isArray(receipt.splitPayments) && receipt.splitPayments.length > 0 ? (
+            <>
+              {receipt.splitPayments.map((p, i) => (
+                <div key={i} className="flex justify-between">
+                  <span>{p.method}{p.ref ? ` (${p.ref})` : ''}:</span>
+                  <span>₹{Number(p.amount || 0).toFixed(2)}</span>
+                </div>
+              ))}
+              <div className="flex justify-between font-bold border-t border-dotted border-slate-400 pt-0.5">
+                <span>{labels.paidLabel || 'Total Paid'}:</span>
+                <span>₹{Number(receipt.paidAmount ?? receipt.total).toFixed(2)}</span>
+              </div>
+            </>
+          ) : cfg.showPaymentBreakup && (
             <>
               <div className="flex justify-between font-bold">
                 <span>{labels.paidLabel || 'Paid Mode'}: {receipt.paymentMethod || 'CASH'}</span>

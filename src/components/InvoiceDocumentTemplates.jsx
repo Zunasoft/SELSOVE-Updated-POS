@@ -411,13 +411,6 @@ export function InvoiceDocumentView({
   const themeMeta = INVOICE_THEMES.find((t) => t.id === baseThemeId) || INVOICE_THEMES[0];
   const customTemplateConfig = selectedCustom ? (selectedCustom.config || {}) : {};
 
-  // Deliberately NOT spreading `billing` into this merge. Template appearance
-  // is per-theme data — it belongs only in `customTemplateConfig` (this
-  // theme's own saved override, looked up by its own id) or `customConfig`
-  // (an explicit live-preview override from the editor). Spreading the whole
-  // `billing` settings object here used to mean whichever theme was *last
-  // saved* bled its exact settings into every other theme's rendering too,
-  // since billing is one global object shared by all of them.
   const cfg = {
     ...themeMeta.defaults,
     ...customTemplateConfig,
@@ -508,11 +501,6 @@ export function InvoiceDocumentView({
 
   const containerWidth = isA5 ? 'max-w-[700px] text-[10.5px]' : 'max-w-[860px] text-[11.5px]';
 
-  // A saved custom template's `sections` array can end up missing an entry
-  // entirely (rather than explicitly disabled) — e.g. from an older save
-  // before a section was introduced. Treat "missing" as "shown" (the same as
-  // a brand-new theme), and only hide a section the saved config explicitly
-  // disabled.
   const sections = cfg.sections || DEFAULT_INVOICE_SECTIONS;
   const sectionMap = {};
   DEFAULT_INVOICE_SECTIONS.forEach((s) => { sectionMap[s.id] = true; });
