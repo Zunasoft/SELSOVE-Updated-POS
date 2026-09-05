@@ -663,6 +663,37 @@ export function ProductFormModal({
     const primaryType = canonicalProductType(rawType);
     const resolvedTypes = primaryType === 'both' ? ['standard', 'raw'] : [primaryType];
 
+    let rawBarcodes = [];
+    if (Array.isArray(product.barcodes) && product.barcodes.length > 0) {
+      rawBarcodes = product.barcodes.map(String).map((b) => b.trim()).filter(Boolean);
+    } else if (typeof product.barcodes === 'string' && product.barcodes.trim()) {
+      rawBarcodes = product.barcodes.split(',').map((b) => b.trim()).filter(Boolean);
+    }
+    if (product.barcode && !rawBarcodes.includes(String(product.barcode).trim())) {
+      rawBarcodes.unshift(String(product.barcode).trim());
+    }
+
+    const primaryBarcode = String(product.barcode || rawBarcodes[0] || '').trim();
+
+    let barcodeList = [];
+    if (Array.isArray(product.barcodeDetails) && product.barcodeDetails.length > 0) {
+      barcodeList = product.barcodeDetails.map((b) => ({
+        _key: genRowKey(),
+        code: b.code || '',
+        type: b.type || (b.code === primaryBarcode ? 'primary' : 'alternate')
+      }));
+    } else {
+      barcodeList = rawBarcodes.map((code, idx) => ({
+        _key: genRowKey(),
+        code,
+        type: code === primaryBarcode || (idx === 0 && !primaryBarcode) ? 'primary' : 'alternate'
+      }));
+    }
+
+    if (barcodeList.length === 0) {
+      barcodeList = [{ _key: genRowKey(), code: '', type: 'primary' }];
+    }
+
     setForm({
       ...blankProduct(categories),
       ...product,
@@ -675,7 +706,9 @@ export function ProductFormModal({
       productTypes: resolvedTypes,
       regionalName: product.regionalName || product.printName || '',
       sku: product.sku || '',
-      barcodes: Array.isArray(product.barcodes) ? product.barcodes.join(', ') : product.barcode || '',
+      barcode: primaryBarcode,
+      barcodes: rawBarcodes.join(', '),
+      barcodeList,
       warehouses: product.warehouses || {},
       dozenQuantity: product.dozenQuantity || 12,
       enableMinorUnit: enableMinor,
@@ -771,6 +804,96 @@ export function ProductFormModal({
       ...f,
       altUnits: (f.altUnits || []).filter((_, i) => i !== index)
     }));
+  };
+
+  const addBarcodeRow = (initialCode = '') => {
+    setForm((f) => {
+      const list = Array.isArray(f.barcodeList) ? [...f.barcodeList] : [];
+      const isFirst = list.length === 0;
+      const newRow = {
+        _key: genRowKey(),
+        code: initialCode || '',
+        type: isFirst ? 'primary' : 'alternate'
+      };
+      const nextList = [...list, newRow];
+      const primaryCode = nextList.find((b) => b.type === 'primary')?.code || nextList[0]?.code || '';
+      return {
+        ...f,
+        barcodeList: nextList,
+        barcode: primaryCode,
+        barcodes: nextList.map((b) => b.code).filter(Boolean).join(', ')
+      };
+    });
+  };
+
+  const updateBarcodeRow = (index, patch) => {
+    setForm((f) => {
+      const list = Array.isArray(f.barcodeList) ? [...f.barcodeList] : [];
+      if (!list[index]) return f;
+      const updated = { ...list[index], ...patch };
+
+      let nextList = list.map((item, i) => {
+        if (i === index) return updated;
+        if (patch.type === 'primary' && item.type === 'primary') {
+          return { ...item, type: 'alternate' };
+        }
+        return item;
+      });
+
+      const primaryCode = nextList.find((b) => b.type === 'primary')?.code || nextList[0]?.code || '';
+
+      return {
+        ...f,
+        barcodeList: nextList,
+        barcode: primaryCode,
+        barcodes: nextList.map((b) => b.code).filter(Boolean).join(', ')
+      };
+    });
+  };
+
+  const makePrimaryBarcode = (index) => {
+    setForm((f) => {
+      const list = Array.isArray(f.barcodeList) ? [...f.barcodeList] : [];
+      if (!list[index]) return f;
+      const nextList = list.map((item, i) => ({
+        ...item,
+        type: i === index ? 'primary' : (item.type === 'primary' ? 'alternate' : item.type)
+      }));
+      const primaryCode = nextList[index]?.code || '';
+      return {
+        ...f,
+        barcodeList: nextList,
+        barcode: primaryCode,
+        barcodes: nextList.map((b) => b.code).filter(Boolean).join(', ')
+      };
+    });
+  };
+
+  const removeBarcodeRow = (index) => {
+    setForm((f) => {
+      const list = Array.isArray(f.barcodeList) ? [...f.barcodeList] : [];
+      if (list.length <= 1) {
+        const nextList = [{ ...list[0], code: '' }];
+        return {
+          ...f,
+          barcodeList: nextList,
+          barcode: '',
+          barcodes: ''
+        };
+      }
+      const wasPrimary = list[index]?.type === 'primary';
+      const nextList = list.filter((_, i) => i !== index);
+      if (wasPrimary && nextList.length > 0) {
+        nextList[0] = { ...nextList[0], type: 'primary' };
+      }
+      const primaryCode = nextList.find((b) => b.type === 'primary')?.code || nextList[0]?.code || '';
+      return {
+        ...f,
+        barcodeList: nextList,
+        barcode: primaryCode,
+        barcodes: nextList.map((b) => b.code).filter(Boolean).join(', ')
+      };
+    });
   };
 
   // Keep every auto-tracked unit price/MRP in sync whenever the main Price or MRP changes.
@@ -990,14 +1113,25 @@ export function ProductFormModal({
       });
     }
 
+    const cleanBarcodeList = (form.barcodeList || [])
+      .map((b) => ({ ...b, code: String(b.code || '').trim() }))
+      .filter((b) => b.code);
+
+    const primaryRow = cleanBarcodeList.find((b) => b.type === 'primary') || cleanBarcodeList[0];
+    const primaryBarcode = primaryRow ? primaryRow.code : (form.barcode ? String(form.barcode).trim() : '');
+
+    const allBarcodes = [...new Set(cleanBarcodeList.map((b) => b.code))];
+    if (primaryBarcode && !allBarcodes.includes(primaryBarcode)) {
+      allBarcodes.unshift(primaryBarcode);
+    }
+
     const payload = {
       ...form,
       sku: form.sku ? String(form.sku).trim().toUpperCase() : '',
       printName: form.regionalName || form.printName,
-      barcodes: String(form.barcodes || '')
-        .split(',')
-        .map((b) => b.trim())
-        .filter(Boolean),
+      barcode: primaryBarcode,
+      barcodes: allBarcodes,
+      barcodeDetails: cleanBarcodeList,
       enableMinorUnit: Boolean(form.enableMinorUnit),
       customSubUnitName: form.enableMinorUnit ? form.customSubUnitName : '',
       customSubUnitFactor: form.enableMinorUnit ? form.customSubUnitFactor : '',
@@ -1411,12 +1545,12 @@ export function ProductFormModal({
               </div>
             )}
 
-            {/* Dedicated Product Identifiers (SKU & Barcodes) Section */}
+            {/* SKU Identification Card */}
             <div className="p-3.5 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
               <div className="flex items-center justify-between">
                 <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider flex items-center gap-1.5">
-                  <Barcode className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
-                  Product Identifiers (SKU & Barcodes)
+                  <Tag className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+                  Product SKU Identifier
                 </h4>
                 <button
                   type="button"
@@ -1435,30 +1569,163 @@ export function ProductFormModal({
                 </button>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <Field label="SKU Code" hint="Stock Keeping Unit / internal item code">
-                  <Input
-                    value={form.sku || ''}
-                    onChange={(e) => setForm({ ...form, sku: e.target.value.toUpperCase() })}
-                    placeholder="e.g. SKU-APP-101"
-                  />
-                </Field>
+              <Field label="SKU Code" hint="Unique internal Stock Keeping Unit (e.g. SKU-APPL-1001)">
+                <Input
+                  value={form.sku || ''}
+                  onChange={(e) => setForm({ ...form, sku: e.target.value.toUpperCase() })}
+                  placeholder="e.g. SKU-APP-101"
+                />
+              </Field>
+            </div>
 
-                <Field label="Primary Barcode" hint="Leave blank to auto-generate">
-                  <Input
-                    value={form.barcode}
-                    onChange={(e) => setForm({ ...form, barcode: e.target.value })}
-                    placeholder="Scannable barcode"
-                  />
-                </Field>
+            {/* Multiple Barcodes Manifest Panel (Warehouse Transfer Style) */}
+            <div className="space-y-3 p-3.5 rounded-xl border border-indigo-200 dark:border-indigo-800/80 bg-indigo-50/40 dark:bg-indigo-950/20">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <Barcode className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                    <h4 className="text-xs font-bold text-[color:var(--text-primary)] uppercase tracking-wider">
+                      Product Barcodes Manifest ({(form.barcodeList || []).length})
+                    </h4>
+                  </div>
+                  <p className="text-[11px] text-[color:var(--text-muted)] mt-0.5">
+                    Create and configure multiple scannable barcodes for this same product (e.g. Primary, Packaging, Outer Carton, Supplier Barcodes). All barcodes will scan into the POS terminal.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    icon={RefreshCw}
+                    onClick={() => addBarcodeRow(randomBarcode())}
+                    className="text-xs text-indigo-600 dark:text-indigo-400 font-bold"
+                  >
+                    Generate Barcode
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    icon={Plus}
+                    onClick={() => addBarcodeRow('')}
+                  >
+                    Add Barcode
+                  </Button>
+                </div>
+              </div>
 
-                <Field label="Multiple Barcodes" hint="Comma separated alternates">
-                  <Input
-                    value={form.barcodes}
-                    onChange={(e) => setForm({ ...form, barcodes: e.target.value })}
-                    placeholder="e.g. 89012345001, 89012345002"
-                  />
-                </Field>
+              {/* Manifest Column Headers */}
+              {(form.barcodeList || []).length > 0 && (
+                <div className="hidden md:grid grid-cols-12 gap-2 px-2 text-[10px] font-bold uppercase text-[color:var(--text-muted)]">
+                  <div className="col-span-5">Scannable Barcode Number</div>
+                  <div className="col-span-3">Barcode Type / Role</div>
+                  <div className="col-span-2">Designation</div>
+                  <div className="col-span-2 text-right">Actions</div>
+                </div>
+              )}
+
+              {/* Barcode Rows */}
+              <div className="space-y-2">
+                {(form.barcodeList || []).map((row, idx) => {
+                  const isPrimary = row.type === 'primary' || idx === 0;
+                  return (
+                    <div
+                      key={row._key || idx}
+                      className={`grid grid-cols-12 gap-2 items-center p-2.5 rounded-xl border transition-all ${
+                        isPrimary
+                          ? 'border-indigo-300 dark:border-indigo-700 bg-white dark:bg-slate-900 shadow-xs'
+                          : 'border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)]'
+                      }`}
+                    >
+                      {/* Barcode Input */}
+                      <div className="col-span-12 md:col-span-5">
+                        <div className="relative">
+                          <Input
+                            value={row.code || ''}
+                            onChange={(e) => updateBarcodeRow(idx, { code: e.target.value })}
+                            placeholder={isPrimary ? "Primary barcode (auto if blank)" : "e.g. 89012345002"}
+                            className="font-mono text-xs font-bold pl-8"
+                          />
+                          <Barcode className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                        </div>
+                      </div>
+
+                      {/* Barcode Type */}
+                      <div className="col-span-6 md:col-span-3">
+                        <Select
+                          value={row.type || (idx === 0 ? 'primary' : 'alternate')}
+                          onChange={(e) => updateBarcodeRow(idx, { type: e.target.value })}
+                          className="text-xs"
+                        >
+                          <option value="primary">Primary Barcode</option>
+                          <option value="packaging">Packaging / Retail Pack</option>
+                          <option value="carton">Carton / Outer Case</option>
+                          <option value="inner_pack">Inner Box / Bundle</option>
+                          <option value="supplier">Supplier / Vendor Code</option>
+                          <option value="alternate">Alternate Barcode</option>
+                        </Select>
+                      </div>
+
+                      {/* Primary Badge or Set as Primary Button */}
+                      <div className="col-span-6 md:col-span-2 flex items-center">
+                        {isPrimary ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
+                            <CheckCircle className="h-3 w-3 text-indigo-600 dark:text-indigo-400" />
+                            Primary
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => makePrimaryBarcode(idx)}
+                            className="text-[10.5px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            Set as Primary
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Actions */}
+                      <div className="col-span-12 md:col-span-2 flex items-center justify-end gap-1">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          title="Generate random 10-digit barcode"
+                          icon={RefreshCw}
+                          onClick={() => updateBarcodeRow(idx, { code: randomBarcode() })}
+                          className="h-8 px-2 text-indigo-600 hover:text-indigo-800 dark:text-indigo-400"
+                        />
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          title="Remove this barcode"
+                          icon={Trash2}
+                          onClick={() => removeBarcodeRow(idx)}
+                          disabled={(form.barcodeList || []).length <= 1}
+                          className="h-8 px-2 text-rose-500 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/30 disabled:opacity-30 disabled:cursor-not-allowed"
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Bottom Quick Add & Help */}
+              <div className="flex flex-wrap items-center justify-between pt-1 text-[11px] text-[color:var(--text-muted)]">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  icon={Plus}
+                  onClick={() => addBarcodeRow('')}
+                >
+                  Add Product Barcode
+                </Button>
+                <span>
+                  Tip: Multiple barcodes allow POS scanners to identify this product regardless of pack size or vendor barcode.
+                </span>
               </div>
             </div>
 

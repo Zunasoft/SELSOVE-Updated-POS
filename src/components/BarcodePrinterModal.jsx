@@ -39,16 +39,27 @@ export default function BarcodePrinterModal({ product, companyName, onClose, sho
   const [selectedBatchId, setSelectedBatchId] = useState('');
   const [showBatchInfo, setShowBatchInfo] = useState(true);
 
-  // InventoryManager swaps `product` directly between rows without ever
-  // passing null in between, so this component never unmounts between two
-  // different products — without this, a batch picked for the previous
-  // product would stay selected (and be printed) against the new one.
+  const allBarcodes = React.useMemo(() => {
+    let list = [];
+    if (Array.isArray(product?.barcodes) && product.barcodes.length > 0) {
+      list = product.barcodes.map(String).map((b) => b.trim()).filter(Boolean);
+    }
+    if (product?.barcode && !list.includes(String(product.barcode).trim())) {
+      list.unshift(String(product.barcode).trim());
+    }
+    return list.length ? list : [product?.barcode || '123456789'];
+  }, [product]);
+
+  const [selectedBarcode, setSelectedBarcode] = useState(product?.barcode || '');
+
   useEffect(() => {
     setSelectedBatchId('');
-  }, [product?.id]);
+    setSelectedBarcode(product?.barcode || allBarcodes[0] || '');
+  }, [product?.id, allBarcodes]);
 
   if (!product) return null;
 
+  const activeBarcode = selectedBarcode || product.barcode || allBarcodes[0] || '123456789';
   const sellableBatches = product.trackBatches
     ? (product.batches || []).filter((b) => Number(b.qty) > 0)
     : [];
@@ -71,9 +82,9 @@ export default function BarcodePrinterModal({ product, companyName, onClose, sho
           ${showRegionalName && (product.regionalName || product.printName) ? `<div class="regional-name">${product.regionalName || product.printName}</div>` : ''}
           <div class="barcode-wrapper">
             <svg viewBox="0 0 160 40" class="barcode-svg">
-              ${Array.from({ length: (product.barcode || '123456').length })
+              ${Array.from({ length: (activeBarcode || '123456').length })
                 .map((_, idx) => {
-                  const code = (product.barcode || '123456').charCodeAt(idx);
+                  const code = (activeBarcode || '123456').charCodeAt(idx);
                   const x = 10 + idx * 11;
                   return `<rect x="${x}" y="0" width="${(code % 3) + 1}" height="40" fill="#000" />
                           <rect x="${x + (code % 3) + 3}" y="0" width="${((code * 2) % 3) + 1}" height="40" fill="#000" />`;
@@ -81,7 +92,7 @@ export default function BarcodePrinterModal({ product, companyName, onClose, sho
                 .join('')}
             </svg>
           </div>
-          <div class="barcode-num">${product.barcode}</div>
+          <div class="barcode-num">${activeBarcode}</div>
           ${showBatchInfo && selectedBatch ? `<div class="batch-row">Batch: ${selectedBatch.batchNo}${selectedBatch.expiryDate ? ` · Exp: ${String(selectedBatch.expiryDate).slice(0, 10)}` : ''}</div>` : ''}
           <div class="price-row">
             ${showMrp && product.mrp ? `<span class="mrp">MRP: ₹${product.mrp}</span>` : ''}
@@ -161,6 +172,18 @@ export default function BarcodePrinterModal({ product, companyName, onClose, sho
           </div>
         </div>
 
+        {allBarcodes.length > 1 && (
+          <Field label="Select Barcode to Print" hint="This product has multiple barcodes configured">
+            <Select value={activeBarcode} onChange={(e) => setSelectedBarcode(e.target.value)}>
+              {allBarcodes.map((bc, idx) => (
+                <option key={bc} value={bc}>
+                  {bc} {bc === product.barcode ? '(Primary Barcode)' : `(Alternate Barcode #${idx})`}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        )}
+
         {sellableBatches.length > 0 && (
           <Field label="Batch" hint="Prints this batch's number/expiry and uses its price override, if any">
             <Select value={selectedBatchId} onChange={(e) => setSelectedBatchId(e.target.value)}>
@@ -225,9 +248,9 @@ export default function BarcodePrinterModal({ product, companyName, onClose, sho
             <div className="text-[10px] text-indigo-700 font-medium">{product.regionalName || product.printName}</div>
           )}
           <div className="w-full py-1">
-            <BarcodeSVG value={product.barcode} />
+            <BarcodeSVG value={activeBarcode} />
           </div>
-          <div className="text-[10px] font-mono tracking-widest text-slate-700">{product.barcode}</div>
+          <div className="text-[10px] font-mono tracking-widest text-slate-700">{activeBarcode}</div>
           {showBatchInfo && selectedBatch && (
             <div className="text-[9px] text-slate-500">
               Batch: {selectedBatch.batchNo}{selectedBatch.expiryDate ? ` · Exp: ${String(selectedBatch.expiryDate).slice(0, 10)}` : ''}
