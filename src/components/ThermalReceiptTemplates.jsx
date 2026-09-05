@@ -624,6 +624,20 @@ export function ThermalReceiptView({
   DEFAULT_THERMAL_SECTIONS.forEach((s) => { sectionMap[s.id] = true; });
   sections.forEach((s) => { sectionMap[s.id] = s.enabled !== false; });
 
+  // Resolve the actual render order from the user-configured `sections` array
+  // (this used to be computed and then ignored — every section rendered in a
+  // fixed hardcoded order regardless of what was saved here). Any id missing
+  // from an older/incomplete saved config is appended in its default position
+  // so nothing silently disappears from render.
+  const orderedSectionIds = [
+    ...sections.map((s) => s.id),
+    ...DEFAULT_THERMAL_SECTIONS.map((s) => s.id).filter((id) => !sections.some((s2) => s2.id === id))
+  ];
+  // bill_meta always renders its divider + receipt title even when the
+  // "Bill Number, Date, Time & Cashier" toggle is off — only the bill-info
+  // block inside billMetaNode itself is gated by sectionMap.bill_meta.
+  const enabledOrder = orderedSectionIds.filter((id) => sectionMap[id] || id === 'bill_meta');
+
   // If template has exact custom HTML markup (e.g. from Word or custom HTML import), render it directly!
   if (cfg.customHtml && cfg.customHtml.trim()) {
     return (
@@ -643,64 +657,55 @@ export function ThermalReceiptView({
     );
   }
 
-  return (
-    <div
-      id="printable-thermal-receipt"
-      className={`bg-white text-black font-mono p-3 sm:p-4 mx-auto rounded-xl border border-dashed border-slate-300 shadow-md print:border-none print:shadow-none print:p-0 print:m-0 w-full overflow-hidden box-border ${widthClass} ${fontScale}`}
-      style={{ boxSizing: 'border-box' }}
-    >
-      {cfg.customCss && <style dangerouslySetInnerHTML={{ __html: cfg.customCss }} />}
-
-      {/* 1. Header & Store Branding */}
-      {sectionMap.header_branding && (
-        <div className="text-center space-y-0.5 mb-1.5">
-          {cfg.showLogo && company.logoUrl && (
-            <div className="flex justify-center mb-1">
-              <img src={company.logoUrl} alt="Logo" className="h-10 w-10 object-contain" />
-            </div>
-          )}
-          <div className="font-black text-sm uppercase tracking-tight">{company.name}</div>
-          {cfg.showStoreAddress && company.address && (
-            <div className="text-[10px] leading-tight">{company.address}</div>
-          )}
-          {cfg.showStoreAddress && (company.city || company.state || company.pin) && (
-            <div className="text-[10px] leading-tight">
-              {[company.city, company.state, company.pin].filter(Boolean).join(', ')}
-            </div>
-          )}
+  // Per-section content, built once and slotted into `enabledOrder` below so
+  // the visual order actually matches the user's configured section order.
+  // The dashed dividers (and the fixed "Receipt Title" line) aren't
+  // reorderable sections of their own — they travel with the section they
+  // visually separate, so they move along with it if it's reordered.
+  const headerBrandingNode = (
+    <div className="text-center space-y-0.5 mb-1.5">
+      {cfg.showLogo && company.logoUrl && (
+        <div className="flex justify-center mb-1">
+          <img src={company.logoUrl} alt="Logo" className="h-10 w-10 object-contain" />
         </div>
       )}
-
-      {/* 2. Store Tax IDs & Contact */}
-      {sectionMap.store_meta && (
-        <div className="text-center text-[10.5px] space-y-0.5 mb-1">
-          {cfg.showStorePhone && company.phone && <div>Tel: {company.phone}</div>}
-          {cfg.showStoreEmail && company.email && <div>Email: {company.email}</div>}
-          {cfg.showGstin && company.gstin && (
-            <div className="font-bold">GSTIN: {company.gstin}</div>
-          )}
-          {cfg.showFssai && (company.fssai || company.fssaiNo) && (
-            <div className="font-medium text-[10px]">FSSAI Lic No: {company.fssai || company.fssaiNo}</div>
-          )}
+      <div className="font-black text-sm uppercase tracking-tight">{company.name}</div>
+      {cfg.showStoreAddress && company.address && (
+        <div className="text-[10px] leading-tight">{company.address}</div>
+      )}
+      {cfg.showStoreAddress && (company.city || company.state || company.pin) && (
+        <div className="text-[10px] leading-tight">
+          {[company.city, company.state, company.pin].filter(Boolean).join(', ')}
         </div>
       )}
+    </div>
+  );
 
-      {/* 3. Custom Notice / Announcement Banner */}
-      {sectionMap.custom_banner && cfg.customBannerText && (
-        <div className="my-1.5 p-1 text-center font-bold text-[10.5px] border border-black border-dashed bg-slate-50">
-          {cfg.customBannerText}
-        </div>
+  const storeMetaNode = (
+    <div className="text-center text-[10.5px] space-y-0.5 mb-1">
+      {cfg.showStorePhone && company.phone && <div>Tel: {company.phone}</div>}
+      {cfg.showStoreEmail && company.email && <div>Email: {company.email}</div>}
+      {cfg.showGstin && company.gstin && (
+        <div className="font-bold">GSTIN: {company.gstin}</div>
       )}
+      {cfg.showFssai && (company.fssai || company.fssaiNo) && (
+        <div className="font-medium text-[10px]">FSSAI Lic No: {company.fssai || company.fssaiNo}</div>
+      )}
+    </div>
+  );
 
-      {/* Divider */}
+  const customBannerNode = cfg.customBannerText ? (
+    <div className="my-1.5 p-1 text-center font-bold text-[10.5px] border border-black border-dashed bg-slate-50">
+      {cfg.customBannerText}
+    </div>
+  ) : null;
+
+  const billMetaNode = (
+    <>
       <div className="overflow-hidden whitespace-nowrap text-center opacity-70 my-1 w-full">{divider}</div>
-
-      {/* Receipt Title */}
       <div className="text-center font-bold text-[11px] uppercase tracking-wider my-0.5">
         {labels.receiptTitle || billing.invoiceTitle || 'TAX INVOICE'}
       </div>
-
-      {/* 4. Bill Meta (Bill #, Date, Cashier, Token, Table) */}
       {sectionMap.bill_meta && (
         <div className="space-y-0.5 text-[10.5px]">
           <div className="flex justify-between">
@@ -716,261 +721,281 @@ export function ThermalReceiptView({
           )}
         </div>
       )}
+    </>
+  );
 
-      {/* 5. Customer Info */}
-      {sectionMap.customer_info && cfg.showCustomerDetails && (receipt.customerName || receipt.customerPhone) && (
-        <div className="mt-1 pt-1 border-t border-dotted border-slate-400 text-[10px] space-y-0.5">
-          <div className="flex justify-between">
-            <span>Customer: <strong>{receipt.customerName || 'Walk-in'}</strong></span>
-            {receipt.customerPhone && <span>{receipt.customerPhone}</span>}
-          </div>
-          {cfg.showCustomerGstin && receipt.customerGstin && (
-            <div className="font-bold">Cust GSTIN: {receipt.customerGstin}</div>
-          )}
-          {cfg.showLoyaltySummary && receipt.customerLoyaltyPoints !== undefined && (
-            <div className="flex justify-between text-slate-700">
-              <span>Points Balance: {receipt.customerLoyaltyPoints} pts</span>
-              {receipt.loyaltyPointsEarned > 0 && <span>+Earned: {receipt.loyaltyPointsEarned} pts</span>}
-            </div>
-          )}
+  const customerInfoNode = (cfg.showCustomerDetails && (receipt.customerName || receipt.customerPhone)) ? (
+    <div className="mt-1 pt-1 border-t border-dotted border-slate-400 text-[10px] space-y-0.5">
+      <div className="flex justify-between">
+        <span>Customer: <strong>{receipt.customerName || 'Walk-in'}</strong></span>
+        {receipt.customerPhone && <span>{receipt.customerPhone}</span>}
+      </div>
+      {cfg.showCustomerGstin && receipt.customerGstin && (
+        <div className="font-bold">Cust GSTIN: {receipt.customerGstin}</div>
+      )}
+      {cfg.showLoyaltySummary && receipt.customerLoyaltyPoints !== undefined && (
+        <div className="flex justify-between text-slate-700">
+          <span>Points Balance: {receipt.customerLoyaltyPoints} pts</span>
+          {receipt.loyaltyPointsEarned > 0 && <span>+Earned: {receipt.loyaltyPointsEarned} pts</span>}
         </div>
       )}
+    </div>
+  ) : null;
 
-      {/* Divider */}
+  const itemsTableNode = (
+    <>
       <div className="overflow-hidden whitespace-nowrap text-center opacity-70 my-1 w-full">{divider}</div>
+      <div className="w-full overflow-hidden">
+        <table className="w-full table-fixed text-left border-collapse text-[10.5px]">
+          <thead>
+            <tr className="border-b border-black font-bold pb-0.5">
+              <th className="text-left py-0.5 truncate">{labels.itemHeader || 'Item'}</th>
+              {cfg.showHsn && <th className="text-center w-[16%] py-0.5 truncate">{labels.hsnHeader || 'HSN'}</th>}
+              <th className="text-right w-[12%] py-0.5">{labels.qtyHeader || 'Qty'}</th>
+              <th className="text-right w-[18%] py-0.5">{labels.rateHeader || 'Rate'}</th>
+              {cfg.showItemTaxRate && <th className="text-right w-[14%] py-0.5">{labels.taxHeader || 'Tax%'}</th>}
+              <th className="text-right w-[20%] py-0.5">{labels.totalHeader || 'Amount'}</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-dotted divide-slate-300">
+            {(receipt.items || []).map((it, idx) => {
+              const qty = Number(it.qty) || 1;
+              const price = Number(it.price) || 0;
+              const discount = Number(it.discount) || 0;
+              const taxRate = Number(it.taxRate) || 0;
+              const taxable = Math.max(0, Math.round((qty * price - discount) * 100) / 100);
+              const lineTotal = Number(it.total) || Math.round((taxable + (taxable * taxRate) / 100) * 100) / 100;
 
-      {/* 6. Itemized Product Table */}
-      {sectionMap.items_table && (
-        <div className="w-full overflow-hidden">
-          <table className="w-full table-fixed text-left border-collapse text-[10.5px]">
-            <thead>
-              <tr className="border-b border-black font-bold pb-0.5">
-                <th className="text-left py-0.5 truncate">{labels.itemHeader || 'Item'}</th>
-                {cfg.showHsn && <th className="text-center w-[16%] py-0.5 truncate">{labels.hsnHeader || 'HSN'}</th>}
-                <th className="text-right w-[12%] py-0.5">{labels.qtyHeader || 'Qty'}</th>
-                <th className="text-right w-[18%] py-0.5">{labels.rateHeader || 'Rate'}</th>
-                {cfg.showItemTaxRate && <th className="text-right w-[14%] py-0.5">{labels.taxHeader || 'Tax%'}</th>}
-                <th className="text-right w-[20%] py-0.5">{labels.totalHeader || 'Amount'}</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-dotted divide-slate-300">
-              {(receipt.items || []).map((it, idx) => {
-                const qty = Number(it.qty) || 1;
-                const price = Number(it.price) || 0;
-                const discount = Number(it.discount) || 0;
-                const taxRate = Number(it.taxRate) || 0;
-                const taxable = Math.max(0, Math.round((qty * price - discount) * 100) / 100);
-                const lineTotal = Number(it.total) || Math.round((taxable + (taxable * taxRate) / 100) * 100) / 100;
-
-                return (
-                  <tr key={idx} className="py-0.5">
-                    <td className="py-0.5 text-left font-medium truncate pr-1">
-                      <div className="truncate font-bold">{it.printName || it.name}</div>
-                      {cfg.showItemDiscount && discount > 0 && (
-                        <div className="text-[9px] text-slate-600 font-normal truncate">
-                          (Disc: -₹{discount.toFixed(2)})
-                        </div>
-                      )}
+              return (
+                <tr key={idx} className="py-0.5">
+                  <td className="py-0.5 text-left font-medium truncate pr-1">
+                    <div className="truncate font-bold">{it.printName || it.name}</div>
+                    {cfg.showItemDiscount && discount > 0 && (
+                      <div className="text-[9px] text-slate-600 font-normal truncate">
+                        (Disc: -₹{discount.toFixed(2)})
+                      </div>
+                    )}
+                  </td>
+                  {cfg.showHsn && (
+                    <td className="py-0.5 text-center text-[9px] opacity-80 truncate">
+                      {it.hsn || it.hsnCode || '—'}
                     </td>
-                    {cfg.showHsn && (
-                      <td className="py-0.5 text-center text-[9px] opacity-80 truncate">
-                        {it.hsn || it.hsnCode || '—'}
-                      </td>
-                    )}
-                    <td className="py-0.5 text-right font-bold">{qty}</td>
-                    <td className="py-0.5 text-right">{price.toFixed(2)}</td>
-                    {cfg.showItemTaxRate && (
-                      <td className="py-0.5 text-right text-[9px]">{taxRate}%</td>
-                    )}
-                    <td className="py-0.5 text-right font-bold">{lineTotal.toFixed(2)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* Divider */}
-      <div className="overflow-hidden whitespace-nowrap text-center opacity-70 my-1 w-full">{divider}</div>
-
-      {/* 7. Totals & Tax Summary */}
-      {sectionMap.totals_summary && (
-        <div className="space-y-0.5 text-[11px]">
-          <div className="flex justify-between">
-            <span>{labels.subtotalLabel || 'Subtotal'}:</span>
-            <span className="font-bold">₹{Number(receipt.subtotal ?? receipt.total).toFixed(2)}</span>
-          </div>
-
-          {receipt.discount > 0 && (
-            <div className="flex justify-between">
-              <span>Bill Discount:</span>
-              <span>-₹{Number(receipt.discount).toFixed(2)}</span>
-            </div>
-          )}
-
-          {receipt.tax > 0 && (
-            <div className="flex justify-between">
-              <span>{labels.taxLabel || 'Total GST'}:</span>
-              <span>₹{Number(receipt.tax).toFixed(2)}</span>
-            </div>
-          )}
-
-          {receipt.roundOff !== undefined && receipt.roundOff !== 0 && (
-            <div className="flex justify-between text-[10px]">
-              <span>Round Off:</span>
-              <span>{receipt.roundOff > 0 ? `+₹${receipt.roundOff.toFixed(2)}` : `-₹${Math.abs(receipt.roundOff).toFixed(2)}`}</span>
-            </div>
-          )}
-
-          {/* Grand Total */}
-          <div className="flex justify-between font-black text-sm pt-1 border-t border-b border-black my-1">
-            <span>{labels.totalLabel || 'NET TOTAL'}:</span>
-            <span>₹{Number(receipt.total).toFixed(2)}</span>
-          </div>
-
-          {cfg.showWordsTotal && (
-            <div className="text-[9.5px] italic text-center py-0.5">
-              {numberToWords(receipt.total)}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* 8. GST Slab Breakdown Table */}
-      {sectionMap.gst_slabs && cfg.showGstBreakup && Object.keys(gstSlabs).length > 0 && (
-        <div className="mt-1 pt-1 border-t border-dotted border-slate-400 text-[9.5px]">
-          <div className="font-bold uppercase text-[9px] mb-0.5">GST Slab Breakdown:</div>
-          <table className="w-full text-right border-collapse">
-            <thead>
-              <tr className="border-b border-slate-400 font-bold">
-                <th className="text-left">Rate</th>
-                <th>Taxable</th>
-                {billing.interState ? <th>IGST</th> : <><th>CGST</th><th>SGST</th></>}
-                <th>Tax</th>
-              </tr>
-            </thead>
-            <tbody>
-              {Object.entries(gstSlabs).map(([rate, v]) => (
-                <tr key={rate}>
-                  <td className="text-left">{rate}%</td>
-                  <td>{v.taxable.toFixed(2)}</td>
-                  {billing.interState ? (
-                    <td>{v.igst.toFixed(2)}</td>
-                  ) : (
-                    <>
-                      <td>{v.cgst.toFixed(2)}</td>
-                      <td>{v.sgst.toFixed(2)}</td>
-                    </>
                   )}
-                  <td className="font-bold">{v.tax.toFixed(2)}</td>
+                  <td className="py-0.5 text-right font-bold">{qty}</td>
+                  <td className="py-0.5 text-right">{price.toFixed(2)}</td>
+                  {cfg.showItemTaxRate && (
+                    <td className="py-0.5 text-right text-[9px]">{taxRate}%</td>
+                  )}
+                  <td className="py-0.5 text-right font-bold">{lineTotal.toFixed(2)}</td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="overflow-hidden whitespace-nowrap text-center opacity-70 my-1 w-full">{divider}</div>
+    </>
+  );
+
+  const totalsSummaryNode = (
+    <div className="space-y-0.5 text-[11px]">
+      <div className="flex justify-between">
+        <span>{labels.subtotalLabel || 'Subtotal'}:</span>
+        <span className="font-bold">₹{Number(receipt.subtotal ?? receipt.total).toFixed(2)}</span>
+      </div>
+
+      {receipt.discount > 0 && (
+        <div className="flex justify-between">
+          <span>Bill Discount:</span>
+          <span>-₹{Number(receipt.discount).toFixed(2)}</span>
         </div>
       )}
 
-      {/* 9. Savings Badge */}
-      {sectionMap.savings_badge && cfg.showSavings && totalSavings > 0 && (
-        <div className="my-1.5 p-1 text-center font-bold text-[10.5px] border border-black bg-slate-50">
-          {labels.savingsLabel || '🎉 YOU SAVED'}: ₹{totalSavings.toFixed(2)}!
+      {receipt.tax > 0 && (
+        <div className="flex justify-between">
+          <span>{labels.taxLabel || 'Total GST'}:</span>
+          <span>₹{Number(receipt.tax).toFixed(2)}</span>
         </div>
       )}
 
-      {/* 10. Payment Breakdown & Advance Credit */}
-      {sectionMap.payments_breakup && (cfg.showPaymentBreakup || cfg.showAdvanceSummary) && (
-        <div className="mt-1 pt-1 border-t border-dotted border-slate-400 text-[10px] space-y-0.5">
-          {cfg.showPaymentBreakup && Array.isArray(receipt.splitPayments) && receipt.splitPayments.length > 0 ? (
-            <>
-              {receipt.splitPayments.map((p, i) => (
-                <div key={i} className="flex justify-between">
-                  <span>{p.method}{p.ref ? ` (${p.ref})` : ''}:</span>
-                  <span>₹{Number(p.amount || 0).toFixed(2)}</span>
-                </div>
-              ))}
-              <div className="flex justify-between font-bold border-t border-dotted border-slate-400 pt-0.5">
-                <span>{labels.paidLabel || 'Total Paid'}:</span>
-                <span>₹{Number(receipt.paidAmount ?? receipt.total).toFixed(2)}</span>
-              </div>
-            </>
-          ) : cfg.showPaymentBreakup && (
-            <>
-              <div className="flex justify-between font-bold">
-                <span>{labels.paidLabel || 'Paid Mode'}: {receipt.paymentMethod || 'CASH'}</span>
-                <span>₹{Number(receipt.paidAmount ?? receipt.total).toFixed(2)}</span>
-              </div>
-              {receipt.changeAmount > 0 && (
-                <div className="flex justify-between">
-                  <span>{labels.changeLabel || 'Change Returned'}:</span>
-                  <span>₹{Number(receipt.changeAmount).toFixed(2)}</span>
-                </div>
+      {receipt.roundOff !== undefined && receipt.roundOff !== 0 && (
+        <div className="flex justify-between text-[10px]">
+          <span>Round Off:</span>
+          <span>{receipt.roundOff > 0 ? `+₹${receipt.roundOff.toFixed(2)}` : `-₹${Math.abs(receipt.roundOff).toFixed(2)}`}</span>
+        </div>
+      )}
+
+      {/* Grand Total */}
+      <div className="flex justify-between font-black text-sm pt-1 border-t border-b border-black my-1">
+        <span>{labels.totalLabel || 'NET TOTAL'}:</span>
+        <span>₹{Number(receipt.total).toFixed(2)}</span>
+      </div>
+
+      {cfg.showWordsTotal && (
+        <div className="text-[9.5px] italic text-center py-0.5">
+          {numberToWords(receipt.total)}
+        </div>
+      )}
+    </div>
+  );
+
+  const gstSlabsNode = (cfg.showGstBreakup && Object.keys(gstSlabs).length > 0) ? (
+    <div className="mt-1 pt-1 border-t border-dotted border-slate-400 text-[9.5px]">
+      <div className="font-bold uppercase text-[9px] mb-0.5">GST Slab Breakdown:</div>
+      <table className="w-full text-right border-collapse">
+        <thead>
+          <tr className="border-b border-slate-400 font-bold">
+            <th className="text-left">Rate</th>
+            <th>Taxable</th>
+            {billing.interState ? <th>IGST</th> : <><th>CGST</th><th>SGST</th></>}
+            <th>Tax</th>
+          </tr>
+        </thead>
+        <tbody>
+          {Object.entries(gstSlabs).map(([rate, v]) => (
+            <tr key={rate}>
+              <td className="text-left">{rate}%</td>
+              <td>{v.taxable.toFixed(2)}</td>
+              {billing.interState ? (
+                <td>{v.igst.toFixed(2)}</td>
+              ) : (
+                <>
+                  <td>{v.cgst.toFixed(2)}</td>
+                  <td>{v.sgst.toFixed(2)}</td>
+                </>
               )}
-            </>
-          )}
+              <td className="font-bold">{v.tax.toFixed(2)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  ) : null;
 
-          {cfg.showAdvanceSummary && receipt.advanceRedeemed > 0 && (
-            <div className="flex justify-between text-slate-700">
-              <span>Advance Adjusted:</span>
-              <span>-₹{Number(receipt.advanceRedeemed).toFixed(2)}</span>
+  const savingsBadgeNode = (cfg.showSavings && totalSavings > 0) ? (
+    <div className="my-1.5 p-1 text-center font-bold text-[10.5px] border border-black bg-slate-50">
+      {labels.savingsLabel || '🎉 YOU SAVED'}: ₹{totalSavings.toFixed(2)}!
+    </div>
+  ) : null;
+
+  const paymentsBreakupNode = (cfg.showPaymentBreakup || cfg.showAdvanceSummary) ? (
+    <div className="mt-1 pt-1 border-t border-dotted border-slate-400 text-[10px] space-y-0.5">
+      {cfg.showPaymentBreakup && Array.isArray(receipt.splitPayments) && receipt.splitPayments.length > 0 ? (
+        <>
+          {receipt.splitPayments.map((p, i) => (
+            <div key={i} className="flex justify-between">
+              <span>{p.method}{p.ref ? ` (${p.ref})` : ''}:</span>
+              <span>₹{Number(p.amount || 0).toFixed(2)}</span>
+            </div>
+          ))}
+          <div className="flex justify-between font-bold border-t border-dotted border-slate-400 pt-0.5">
+            <span>{labels.paidLabel || 'Total Paid'}:</span>
+            <span>₹{Number(receipt.paidAmount ?? receipt.total).toFixed(2)}</span>
+          </div>
+        </>
+      ) : cfg.showPaymentBreakup && (
+        <>
+          <div className="flex justify-between font-bold">
+            <span>{labels.paidLabel || 'Paid Mode'}: {receipt.paymentMethod || 'CASH'}</span>
+            <span>₹{Number(receipt.paidAmount ?? receipt.total).toFixed(2)}</span>
+          </div>
+          {receipt.changeAmount > 0 && (
+            <div className="flex justify-between">
+              <span>{labels.changeLabel || 'Change Returned'}:</span>
+              <span>₹{Number(receipt.changeAmount).toFixed(2)}</span>
             </div>
           )}
+        </>
+      )}
 
-          {cfg.showAdvanceSummary && receipt.advanceBalance !== undefined && (
-            <div className="flex justify-between text-slate-700 font-medium">
-              <span>Remaining Store Credit:</span>
-              <span>₹{Number(receipt.advanceBalance).toFixed(2)}</span>
-            </div>
-          )}
+      {cfg.showAdvanceSummary && receipt.advanceRedeemed > 0 && (
+        <div className="flex justify-between text-slate-700">
+          <span>Advance Adjusted:</span>
+          <span>-₹{Number(receipt.advanceRedeemed).toFixed(2)}</span>
         </div>
       )}
 
-      {/* 11. UPI Payment / Invoice QR Code */}
-      {sectionMap.qr_payment && cfg.showQrCode && qrDataUrl && (
-        <div className="my-2 flex flex-col items-center justify-center text-center">
-          <img src={qrDataUrl} alt="QR Code" className="h-24 w-24 border border-black p-0.5" />
-          <div className="text-[9px] mt-0.5 font-bold uppercase tracking-wider">
-            {cfg.qrCodeType === 'invoice' ? 'Scan for Digital Invoice' : 'Scan to Pay via UPI'}
-          </div>
-          {cfg.qrCodeType !== 'invoice' && (billing.upiId || company.upiId) && (
-            <div className="text-[8.5px] opacity-80">{billing.upiId || company.upiId}</div>
-          )}
+      {cfg.showAdvanceSummary && receipt.advanceBalance !== undefined && (
+        <div className="flex justify-between text-slate-700 font-medium">
+          <span>Remaining Store Credit:</span>
+          <span>₹{Number(receipt.advanceBalance).toFixed(2)}</span>
         </div>
       )}
+    </div>
+  ) : null;
 
-      {/* 12. Order Barcode */}
-      {sectionMap.barcode && cfg.showBarcode && receipt.orderId && (
-        <div className="my-1.5 text-center">
-          <div className="inline-block px-2 py-0.5 border border-black font-mono font-bold tracking-widest text-[11px]">
-            *{receipt.orderId}*
-          </div>
-        </div>
+  const qrPaymentNode = (cfg.showQrCode && qrDataUrl) ? (
+    <div className="my-2 flex flex-col items-center justify-center text-center">
+      <img src={qrDataUrl} alt="QR Code" className="h-24 w-24 border border-black p-0.5" />
+      <div className="text-[9px] mt-0.5 font-bold uppercase tracking-wider">
+        {cfg.qrCodeType === 'invoice' ? 'Scan for Digital Invoice' : 'Scan to Pay via UPI'}
+      </div>
+      {cfg.qrCodeType !== 'invoice' && (billing.upiId || company.upiId) && (
+        <div className="text-[8.5px] opacity-80">{billing.upiId || company.upiId}</div>
       )}
+    </div>
+  ) : null;
 
-      {/* Divider */}
+  const barcodeNode = (cfg.showBarcode && receipt.orderId) ? (
+    <div className="my-1.5 text-center">
+      <div className="inline-block px-2 py-0.5 border border-black font-mono font-bold tracking-widest text-[11px]">
+        *{receipt.orderId}*
+      </div>
+    </div>
+  ) : null;
+
+  const termsFooterNode = (
+    <>
       <div className="overflow-hidden whitespace-nowrap text-center opacity-70 my-1">{divider}</div>
-
-      {/* 13. Terms & Conditions, Greeting & Signatory */}
-      {sectionMap.terms_footer && (
-        <div className="text-center text-[10px] space-y-1">
-          {cfg.showTerms && (
-            <div className="text-[9px] leading-tight text-slate-700 whitespace-pre-line">
-              <div className="font-bold">{labels.termsTitle || 'Terms & Conditions'}:</div>
-              {billing.terms || billing.termsText || cfg.termsText || '1. Goods once sold will not be taken back.\n2. Subject to local jurisdiction.'}
-            </div>
-          )}
-
-          {cfg.showFooterNote && (
-            <div className="font-bold text-[10.5px]">
-              {labels.greetingText || billing.footerNote || billing.footerText || cfg.greetingText || 'Thank you! Visit again.'}
-            </div>
-          )}
-
-          <div className="text-[8px] text-slate-400 pt-1">
-            Software by Selsolve POS
+      <div className="text-center text-[10px] space-y-1">
+        {cfg.showTerms && (
+          <div className="text-[9px] leading-tight text-slate-700 whitespace-pre-line">
+            <div className="font-bold">{labels.termsTitle || 'Terms & Conditions'}:</div>
+            {billing.terms || billing.termsText || cfg.termsText || '1. Goods once sold will not be taken back.\n2. Subject to local jurisdiction.'}
           </div>
+        )}
+
+        {cfg.showFooterNote && (
+          <div className="font-bold text-[10.5px]">
+            {labels.greetingText || billing.footerNote || billing.footerText || cfg.greetingText || 'Thank you! Visit again.'}
+          </div>
+        )}
+
+        <div className="text-[8px] text-slate-400 pt-1">
+          Software by Selsolve POS
         </div>
-      )}
+      </div>
+    </>
+  );
+
+  const sectionNodes = {
+    header_branding: headerBrandingNode,
+    store_meta: storeMetaNode,
+    custom_banner: customBannerNode,
+    bill_meta: billMetaNode,
+    customer_info: customerInfoNode,
+    items_table: itemsTableNode,
+    totals_summary: totalsSummaryNode,
+    gst_slabs: gstSlabsNode,
+    savings_badge: savingsBadgeNode,
+    payments_breakup: paymentsBreakupNode,
+    qr_payment: qrPaymentNode,
+    barcode: barcodeNode,
+    terms_footer: termsFooterNode
+  };
+
+  return (
+    <div
+      id="printable-thermal-receipt"
+      className={`bg-white text-black font-mono p-3 sm:p-4 mx-auto rounded-xl border border-dashed border-slate-300 shadow-md print:border-none print:shadow-none print:p-0 print:m-0 w-full overflow-hidden box-border ${widthClass} ${fontScale}`}
+      style={{ boxSizing: 'border-box' }}
+    >
+      {cfg.customCss && <style dangerouslySetInnerHTML={{ __html: cfg.customCss }} />}
+
+      {enabledOrder.map((id) => {
+        const node = sectionNodes[id];
+        return node ? <React.Fragment key={id}>{node}</React.Fragment> : null;
+      })}
     </div>
   );
 }

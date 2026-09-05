@@ -671,14 +671,14 @@ export function DataTable({
  * ------------------------------------------------------------------ */
 
 const MODAL_WIDTH = {
-  sm: 'max-w-sm',
-  md: 'max-w-md',
-  lg: 'max-w-2xl',
-  '70': 'w-[70vw] min-w-[750px] max-w-[95vw]',
-  half: 'w-[70vw] min-w-[750px] max-w-[95vw]',
-  xl: 'w-[70vw] min-w-[750px] max-w-[95vw]',
-  '2xl': 'w-[78vw] min-w-[850px] max-w-[96vw]',
-  full: 'w-[88vw] min-w-[950px] max-w-[98vw]',
+  sm: 'w-[95vw] max-w-sm',
+  md: 'w-[95vw] max-w-md',
+  lg: 'w-[95vw] max-w-2xl',
+  '70': 'w-[94vw] max-w-5xl',
+  half: 'w-[94vw] max-w-5xl',
+  xl: 'w-[96vw] max-w-6xl',
+  '2xl': 'w-[97vw] max-w-7xl',
+  full: 'w-[98vw] max-w-[1550px]',
   fullscreen: 'max-w-[99vw] w-[99vw] max-h-[98vh] h-[98vh] flex flex-col'
 };
 

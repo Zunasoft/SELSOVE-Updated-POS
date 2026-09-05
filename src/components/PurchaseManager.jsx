@@ -1,14 +1,16 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
   Truck, Plus, Trash2, ClipboardList, Wallet, X, Search, Boxes, FileText,
   Undo2, Ban, AlertTriangle, Download, Code, Printer, ChevronLeft, ChevronRight, Paperclip,
-  CreditCard, Clock, CheckCircle2, Edit3, ChevronDown, Receipt, Calendar, Building2, User
+  CreditCard, Clock, CheckCircle2, Edit3, ChevronDown, Receipt, Calendar, Building2, User, Eye
 } from 'lucide-react';
 
 import api, { money, fmtDate, todayISO, monthStartISO, financialYearStartISO, API_BASE } from '../lib/api';
 import { exportPurchaseToWord, exportPurchaseOrderToWord } from '../lib/exporters';
 import { getProductUnitOptions } from './POSTerminal';
 import { ProductFormModal } from './InventoryManager';
+import InvoiceEditModal from './InvoiceEditModal';
 import {
   Panel, SectionHeader, Button, Modal, Field, Input, Select, Textarea,
   Badge, Money, Spinner, EmptyState, DateRange, StatTile, DataTable, cx, SearchInput
@@ -48,6 +50,7 @@ export default function PurchaseManager({ tenant, token, showToast }) {
   const [view, setView] = useState('INVOICES');
   const [showNew, setShowNew] = useState(false);
   const [detail, setDetail] = useState(null);
+  const [editTarget, setEditTarget] = useState(null);
   const [payVendorTarget, setPayVendorTarget] = useState(null);
   const [showNewPO, setShowNewPO] = useState(false);
   const [receivePO, setReceivePO] = useState(null);
@@ -322,6 +325,15 @@ export default function PurchaseManager({ tenant, token, showToast }) {
         })}
       </div>
 
+      <AnimatePresence mode="wait">
+        <motion.div
+          key={view}
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -8 }}
+          transition={{ duration: 0.15, ease: 'easeOut' }}
+          className="space-y-4"
+        >
       {(view === 'INVOICES' || view === 'BY VENDOR') && (
         <>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
@@ -429,7 +441,16 @@ export default function PurchaseManager({ tenant, token, showToast }) {
             maxHeight="56vh"
             columns={[
               { key: 'date', label: 'Date', width: 100, render: (p) => fmtDate(p.date) },
-              { key: 'invoiceNo', label: 'Invoice No', render: (p) => <span className="font-bold">{p.invoiceNo}</span> },
+              {
+                key: 'invoiceNo',
+                label: 'Invoice No',
+                render: (p) => (
+                  <span className="flex items-center gap-1.5">
+                    <span className="font-bold">{p.invoiceNo}</span>
+                    {p.isEdited && <Badge tone="info">Edited</Badge>}
+                  </span>
+                )
+              },
               { key: 'vendorName', label: 'Vendor', render: (p) => p.vendorName },
               { key: 'items', label: 'Items', width: 70, align: 'right', render: (p) => p.items?.length || 0 },
               { key: 'subtotal', label: 'Taxable', align: 'right', width: 110, render: (p) => <Money value={p.subtotal} /> },
@@ -464,19 +485,45 @@ export default function PurchaseManager({ tenant, token, showToast }) {
               {
                 key: 'actions',
                 label: '',
-                width: 50,
+                width: 130,
                 render: (p) => (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setDownloadTarget(p);
-                    }}
-                    className="p-1.5 rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 transition-colors"
-                    title="Download / Export"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                  </button>
+                  <div className="flex items-center justify-end gap-1">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setDetail(p);
+                      }}
+                      className="p-1.5 rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 transition-colors"
+                      title="View Purchase Invoice"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                    </button>
+                    {p.status !== 'VOID' && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setEditTarget(p);
+                        }}
+                        className="p-1.5 rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 transition-colors"
+                        title="Edit vendor, notes & shipping details"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setDownloadTarget(p);
+                      }}
+                      className="p-1.5 rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 transition-colors"
+                      title="Download / Export"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 )
               }
             ]}
@@ -602,6 +649,8 @@ export default function PurchaseManager({ tenant, token, showToast }) {
       {(view === 'INVOICES' || view === 'PAYMENTS MADE') && (
         <VendorPayablesPanel vendors={vendors} onPay={setPayVendorTarget} />
       )}
+        </motion.div>
+      </AnimatePresence>
 
       <NewPurchaseModal
         open={showNew}
@@ -655,6 +704,7 @@ export default function PurchaseManager({ tenant, token, showToast }) {
         onClose={() => setDetail(null)}
         onVoid={handleVoidPurchase}
         onDownload={setDownloadTarget}
+        onEdit={setEditTarget}
         onReturn={(p) => {
           setDetail(null);
           setReturnTarget(p);
@@ -665,6 +715,20 @@ export default function PurchaseManager({ tenant, token, showToast }) {
         }}
         showToast={showToast}
       />
+
+      {editTarget && (
+        <InvoiceEditModal
+          invoice={editTarget}
+          kind="purchase"
+          showToast={showToast}
+          onClose={() => setEditTarget(null)}
+          onSaved={(updated) => {
+            setEditTarget(null);
+            setDetail((d) => (d && d.id === updated?.id ? updated : d));
+            loadPurchases();
+          }}
+        />
+      )}
 
       <PayVendorModal
         vendor={payVendorTarget}
@@ -849,14 +913,23 @@ function PaymentStatusBadge({ purchase }) {
   );
 }
 
-function PurchaseDetailModal({ purchase, vendorCredits = [], onClose, onVoid, onReturn, onDownload, onAttachmentsChanged, showToast }) {
+function PurchaseDetailModal({ purchase, vendorCredits = [], onClose, onVoid, onReturn, onDownload, onEdit, onAttachmentsChanged, showToast }) {
   const isVoid = purchase?.status === 'VOID';
   return (
     <Modal
       open={Boolean(purchase)}
       onClose={onClose}
       title={purchase ? `Invoice ${purchase.invoiceNo}` : ''}
-      subtitle={purchase ? `${purchase.vendorName} · ${fmtDate(purchase.date)} · Voucher ${purchase.voucherNo}` : ''}
+      subtitle={
+        purchase ? (
+          <span className="inline-flex items-center gap-2">
+            {`${purchase.vendorName} · ${fmtDate(purchase.date)} · Voucher ${purchase.voucherNo}`}
+            {purchase.isEdited && <Badge tone="info">EDITED</Badge>}
+          </span>
+        ) : (
+          ''
+        )
+      }
       icon={Truck}
       size="xl"
       footer={
@@ -864,6 +937,11 @@ function PurchaseDetailModal({ purchase, vendorCredits = [], onClose, onVoid, on
           {purchase && onDownload && (
             <Button variant="outline" icon={Download} onClick={() => onDownload(purchase)}>
               Download / Export
+            </Button>
+          )}
+          {purchase && !isVoid && onEdit && (
+            <Button variant="outline" icon={Edit3} onClick={() => onEdit(purchase)}>
+              Edit Details
             </Button>
           )}
           {purchase && !isVoid && purchase.vendorId && (
@@ -2057,7 +2135,8 @@ function NewPurchaseModal({
             : 'Generate a formal purchase invoice with vendor details, product items, GST taxes, batch tracking, and inventory inward.'
         }
         icon={Receipt}
-        size="xl"
+        size="2xl"
+        allowFullscreen={true}
       >
         <form onSubmit={(e) => e.preventDefault()} className="space-y-4">
           {/* Vendor Information & Auto-fill Card */}
@@ -3130,7 +3209,8 @@ function PurchaseOrderModal({
         title="New Purchase Order (PO)"
         subtitle="Place an order commitment with a vendor. Physical stock and accounting entries are updated when you receive against it."
         icon={FileText}
-        size="half"
+        size="2xl"
+        allowFullscreen={true}
         footer={
           <div className="flex items-center justify-between w-full">
             <Button onClick={onClose}>Cancel</Button>

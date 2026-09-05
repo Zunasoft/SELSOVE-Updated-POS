@@ -9,9 +9,9 @@ import { renderCustomDocumentHtml } from '../lib/exporters';
 
 export const DEFAULT_INVOICE_SECTIONS = [
   { id: 'invoice_header', name: 'Header, Logo & Company Tax Identifiers', enabled: true },
+  { id: 'custom_banner', name: 'Custom Notice / Announcement Banner', enabled: true },
   { id: 'buyer_shipping', name: 'Buyer (Bill-To) & Consignee (Ship-To) Addresses', enabled: true },
   { id: 'transport_meta', name: 'Order, PO, E-Way & Transport Details', enabled: true },
-  { id: 'custom_banner', name: 'Custom Notice / Announcement Banner', enabled: true },
   { id: 'items_table', name: 'Itemized Line Items & HSN Table', enabled: true },
   { id: 'bank_qr_totals', name: 'Bank Details, UPI QR & Total Summary', enabled: true },
   { id: 'hsn_summary', name: 'HSN / SAC Tax Slab Summary Matrix', enabled: true },
@@ -506,6 +506,26 @@ export function InvoiceDocumentView({
   DEFAULT_INVOICE_SECTIONS.forEach((s) => { sectionMap[s.id] = true; });
   sections.forEach((s) => { sectionMap[s.id] = s.enabled !== false; });
 
+  // Resolve the actual render order from the user-configured `sections` array
+  // (this used to be computed and then ignored — every section rendered in a
+  // fixed hardcoded order regardless of what was saved here). Any id missing
+  // from an older/incomplete saved config is appended in its default position
+  // so nothing silently disappears from render.
+  const orderedSectionIds = [
+    ...sections.map((s) => s.id),
+    ...DEFAULT_INVOICE_SECTIONS.map((s) => s.id).filter((id) => !sections.some((s2) => s2.id === id))
+  ];
+  const enabledOrder = orderedSectionIds.filter((id) => sectionMap[id]);
+
+  // buyer_shipping & transport_meta share a 2-column grid when adjacent (the
+  // default layout). If the user reorders them apart, each renders as its
+  // own full-width block instead.
+  const buyerIdx = enabledOrder.indexOf('buyer_shipping');
+  const transportIdx = enabledOrder.indexOf('transport_meta');
+  const pairAdjacent = buyerIdx !== -1 && transportIdx !== -1 && Math.abs(buyerIdx - transportIdx) === 1;
+  const buyerFirst = buyerIdx < transportIdx;
+  const pairFirstId = pairAdjacent ? (buyerFirst ? 'buyer_shipping' : 'transport_meta') : null;
+
   // If template has exact custom HTML markup (e.g. from Word or custom HTML import), render it directly!
   if (cfg.customHtml && cfg.customHtml.trim()) {
     return (
@@ -525,6 +545,487 @@ export function InvoiceDocumentView({
     );
   }
 
+  // Per-section content, built once and slotted into `enabledOrder` below so
+  // the visual order actually matches the user's configured section order
+  // (previously this order was computed and then ignored).
+  const invoiceHeaderNode = (
+    <div className={`p-4 sm:p-6 pb-4 border-b flex flex-col sm:flex-row sm:items-start justify-between gap-4 ${accent.border}`}>
+      <div className="flex items-start gap-3.5">
+        {cfg.showInvoiceLogo && company.logoUrl && (
+          <img
+            src={company.logoUrl}
+            alt="Logo"
+            className="h-12 w-12 rounded-lg object-contain border border-slate-100 shrink-0"
+          />
+        )}
+        <div>
+          <div className="text-lg font-black tracking-tight text-slate-950 uppercase">
+            {company.name}
+          </div>
+          {company.address && (
+            <div className="text-xs text-slate-600 mt-0.5 max-w-sm">{company.address}</div>
+          )}
+          <div className="text-xs text-slate-600">
+            {[company.city, company.state && `State: ${company.state}`, company.pincode && `PIN: ${company.pincode}`].filter(Boolean).join(' · ')}
+            {company.stateCode && ` (Code: ${company.stateCode})`}
+          </div>
+
+          {/* Statutory Tax IDs */}
+          {cfg.showCompanyTaxMeta && (
+            <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1.5 text-[10.5px] text-slate-800">
+              {company.gstin && (
+                <span className="font-bold">
+                  GSTIN: <span className="font-mono">{company.gstin}</span>
+                </span>
+              )}
+              {company.pan && (
+                <span className="font-semibold">
+                  PAN: <span className="font-mono">{company.pan}</span>
+                </span>
+              )}
+              {company.cin && (
+                <span className="font-semibold">
+                  CIN: <span className="font-mono">{company.cin}</span>
+                </span>
+              )}
+              {company.fssaiNo && (
+                <span className="font-semibold">
+                  FSSAI: <span className="font-mono">{company.fssaiNo}</span>
+                </span>
+              )}
+              {company.lutBondNo && (
+                <span className="font-semibold">
+                  LUT Bond: <span className="font-mono">{company.lutBondNo}</span>
+                </span>
+              )}
+            </div>
+          )}
+
+          <div className="text-[10.5px] text-slate-500 mt-0.5">
+            {[company.phone && `Tel: ${company.phone}`, company.email && `Email: ${company.email}`, company.website].filter(Boolean).join(' · ')}
+          </div>
+        </div>
+      </div>
+
+      <div className="text-right sm:min-w-[190px] shrink-0">
+        <div className="text-[9px] font-bold uppercase tracking-widest text-slate-400">
+          {labels.recipientCopy || 'Original for Recipient'}
+        </div>
+        <div
+          className="text-xl font-black tracking-tight uppercase mt-0.5"
+          style={{ color: accent.hex }}
+        >
+          {labels.invoiceTitle || billing.invoiceTitle || 'TAX INVOICE'}
+        </div>
+        <div className="text-sm font-mono font-bold text-slate-900 mt-0.5">
+          #{invoice.orderId}
+        </div>
+
+        {isVoid ? (
+          <div className="text-[10px] font-extrabold text-rose-600 uppercase tracking-wider mt-1">
+            [ VOID / CANCELLED ]
+          </div>
+        ) : isDraft ? (
+          <div className="text-[10px] font-extrabold text-sky-600 uppercase tracking-wider mt-1">
+            [ DRAFT INVOICE ]
+          </div>
+        ) : isPaid ? (
+          <div className="text-[10px] font-extrabold text-emerald-700 uppercase tracking-wider mt-1">
+            [ PAID IN FULL ]
+          </div>
+        ) : isPartiallyPaid ? (
+          <div className="text-[10px] font-extrabold text-amber-700 uppercase tracking-wider mt-1">
+            [ PARTIALLY PAID ]
+          </div>
+        ) : (
+          <div className="text-[10px] font-extrabold text-rose-700 uppercase tracking-wider mt-1">
+            [ UNPAID / DUE ]
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  const customBannerNode = cfg.customBannerText ? (
+    <div
+      className="px-4 py-2 text-center font-bold text-xs border-b"
+      style={{ backgroundColor: accent.hex + '15', color: accent.hex, borderColor: accent.hex + '30' }}
+    >
+      {cfg.customBannerText}
+    </div>
+  ) : null;
+
+  const buyerShippingInner = (
+    <>
+      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+        {labels.billToTitle || 'Bill To (Buyer / Customer)'}
+      </div>
+      <div className="text-sm font-bold text-slate-950">
+        {invoice.customerName || 'Walk-in Customer'}
+      </div>
+      {invoice.customerAddress && (
+        <div className="text-slate-600 max-w-xs">{invoice.customerAddress}</div>
+      )}
+      {invoice.customerPhone && (
+        <div className="text-slate-600">Phone: {invoice.customerPhone}</div>
+      )}
+      {invoice.customerGstin && (
+        <div className="text-slate-800 font-bold">
+          GSTIN / UIN: <span className="font-mono underline">{invoice.customerGstin}</span>
+        </div>
+      )}
+      {invoice.customerPan && (
+        <div className="text-slate-700">PAN: {invoice.customerPan}</div>
+      )}
+      {(invoice.customerState || invoice.customerStateCode) && (
+        <div className="text-slate-600">
+          State: {invoice.customerState || '—'}{invoice.customerStateCode ? ` (Code: ${invoice.customerStateCode})` : ''}
+        </div>
+      )}
+
+      {/* Consignee (Ship To) if enabled */}
+      {cfg.showConsigneeShipTo && invoice.consigneeAddress && (
+        <div className="pt-2 mt-2 border-t border-slate-100">
+          <div className="text-[9.5px] font-bold uppercase tracking-wider text-slate-500">
+            {labels.shipToTitle || 'Ship To (Consignee)'}
+          </div>
+          <div className="font-semibold text-slate-900">{invoice.consigneeName || invoice.customerName}</div>
+          <div className="text-slate-600 text-[11px]">{invoice.consigneeAddress}</div>
+          {invoice.consigneeGstin && (
+            <div className="text-slate-800 text-[10.5px]">GSTIN: {invoice.consigneeGstin}</div>
+          )}
+        </div>
+      )}
+    </>
+  );
+
+  const transportMetaNode = (
+    <div className="flex flex-col">
+      <div className={`px-4 sm:px-5 py-2.5 flex items-center justify-between text-white ${accent.bgHeader}`}>
+        <div>
+          <span className="text-[10px] font-bold uppercase tracking-wider block">
+            {isPaid ? 'Total Paid' : isPartiallyPaid ? 'Partially Paid' : 'Total Amount Due'}
+          </span>
+          {isPartiallyPaid && (
+            <span className="text-[9.5px] opacity-90 block">
+              Paid: ₹{paidAmt.toFixed(2)} · Due: ₹{dueAmt.toFixed(2)}
+            </span>
+          )}
+        </div>
+        <span className="text-base font-black font-mono">₹{Number(invoice.total).toFixed(2)}</span>
+      </div>
+
+      <div className="p-4 sm:p-5 space-y-1 text-xs">
+        <div className="flex justify-between gap-3">
+          <span className="text-slate-500">Invoice Date:</span>
+          <span className="font-bold font-mono">{fmtDate(invoice.date)}</span>
+        </div>
+        {invoice.dueDate && (
+          <div className="flex justify-between gap-3">
+            <span className="text-slate-500">Due Date:</span>
+            <span className="font-bold font-mono">{fmtDate(invoice.dueDate)}</span>
+          </div>
+        )}
+        {invoice.paymentTerms && (
+          <div className="flex justify-between gap-3">
+            <span className="text-slate-500">Payment Terms:</span>
+            <span className="font-bold">{invoice.paymentTerms}</span>
+          </div>
+        )}
+        {invoice.buyerOrderNo && (
+          <div className="flex justify-between gap-3">
+            <span className="text-slate-500">Buyer Order / PO No:</span>
+            <span className="font-bold">
+              {invoice.buyerOrderNo}{invoice.buyerOrderDate ? ` dt. ${fmtDate(invoice.buyerOrderDate)}` : ''}
+            </span>
+          </div>
+        )}
+
+        {/* Transport & Dispatch Details */}
+        {cfg.showTransportMeta && (
+          <>
+            {invoice.eWayBillNo && (
+              <div className="flex justify-between gap-3">
+                <span className="text-slate-500">E-Way Bill No:</span>
+                <span className="font-mono font-bold">{invoice.eWayBillNo}</span>
+              </div>
+            )}
+            {invoice.vehicleNo && (
+              <div className="flex justify-between gap-3">
+                <span className="text-slate-500">Motor Vehicle No:</span>
+                <span className="font-mono font-bold">{invoice.vehicleNo}</span>
+              </div>
+            )}
+            {invoice.dispatchDocNo && (
+              <div className="flex justify-between gap-3">
+                <span className="text-slate-500">Despatch Doc No:</span>
+                <span className="font-bold">{invoice.dispatchDocNo}</span>
+              </div>
+            )}
+            {invoice.placeOfSupply && (
+              <div className="flex justify-between gap-3">
+                <span className="text-slate-500">Place of Supply:</span>
+                <span className="font-bold">{invoice.placeOfSupply}</span>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+
+  const itemsTableNode = (
+    <div className="overflow-x-auto">
+      <table className="w-full text-left text-xs border-collapse">
+        <thead>
+          <tr className={`border-b uppercase font-bold text-[10px] tracking-wider ${accent.bgLight} ${accent.textMain}`}>
+            <th className="py-2.5 px-3 w-8">#</th>
+            <th className="py-2.5 px-3">{labels.itemColHeader || 'Item Description'}</th>
+            {cfg.showItemHsn && <th className="py-2.5 px-3 text-center">{labels.hsnColHeader || 'HSN/SAC'}</th>}
+            <th className="py-2.5 px-3 text-right">{labels.qtyColHeader || 'Qty'}</th>
+            {cfg.showItemUnit && <th className="py-2.5 px-3 text-left">{labels.unitColHeader || 'Unit'}</th>}
+            <th className="py-2.5 px-3 text-right">{labels.rateColHeader || 'Rate (₹)'}</th>
+            <th className="py-2.5 px-3 text-right">{labels.taxableColHeader || 'Taxable (₹)'}</th>
+            {cfg.showItemTaxBreakup && <th className="py-2.5 px-3 text-right">{labels.taxRateColHeader || 'Tax %'}</th>}
+            <th className="py-2.5 px-3 text-right">{labels.amountColHeader || 'Amount (₹)'}</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-200">
+          {(invoice.items || []).map((it, idx) => {
+            const qty = Number(it.qty) || 1;
+            const price = Number(it.price) || 0;
+            const discount = Number(it.discount) || 0;
+            const taxRate = Number(it.taxRate) || 0;
+            const taxable = Math.max(0, Math.round((qty * price - discount) * 100) / 100);
+            const lineTotal = Number(it.total) || Math.round((taxable + (taxable * taxRate) / 100) * 100) / 100;
+
+            return (
+              <tr key={idx} className="hover:bg-slate-50/70">
+                <td className="py-2.5 px-3 text-slate-500 font-mono text-[11px]">{idx + 1}</td>
+                <td className="py-2.5 px-3 font-semibold text-slate-900">
+                  <div>{it.printName || it.name}</div>
+                  {it.discount > 0 && (
+                    <div className="text-[10px] text-emerald-700 font-normal">
+                      (Disc: -₹{discount.toFixed(2)})
+                    </div>
+                  )}
+                </td>
+                {cfg.showItemHsn && (
+                  <td className="py-2.5 px-3 text-center font-mono text-slate-600 text-[11px]">
+                    {it.hsn || it.hsnCode || '—'}
+                  </td>
+                )}
+                <td className="py-2.5 px-3 text-right font-mono font-bold">{qty}</td>
+                {cfg.showItemUnit && (
+                  <td className="py-2.5 px-3 text-left text-slate-500">{it.unit || 'pcs'}</td>
+                )}
+                <td className="py-2.5 px-3 text-right font-mono">{price.toFixed(2)}</td>
+                <td className="py-2.5 px-3 text-right font-mono">{taxable.toFixed(2)}</td>
+                {cfg.showItemTaxBreakup && (
+                  <td className="py-2.5 px-3 text-right font-mono text-[11px]">{taxRate}%</td>
+                )}
+                <td className="py-2.5 px-3 text-right font-mono font-bold text-slate-950">
+                  {lineTotal.toFixed(2)}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  const bankQrTotalsNode = (
+    <div className="p-4 sm:p-6 space-y-4 border-t border-slate-200">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 items-start">
+        {/* Left: Bank details & UPI QR */}
+        <div className="space-y-3">
+          {cfg.showBankDetails && (company.bankAccountNumber || company.upiId) && (
+            <div className="rounded-xl border border-slate-200 p-3.5 bg-slate-50/60 space-y-1.5 text-xs">
+              <div className="font-bold text-slate-800 uppercase tracking-wider text-[10px] flex items-center gap-1.5">
+                <CreditCard className="w-3.5 h-3.5" style={{ color: accent.hex }} />
+                Bank Transfer Details
+              </div>
+              {company.bankAccountHolder && <div>Account: <strong>{company.bankAccountHolder}</strong></div>}
+              {company.bankName && <div>Bank: <strong>{company.bankName}</strong></div>}
+              {company.bankAccountNumber && <div>A/C No: <strong className="font-mono">{company.bankAccountNumber}</strong></div>}
+              {company.bankIfsc && <div>IFSC: <strong className="font-mono">{company.bankIfsc}</strong></div>}
+              {company.bankBranch && <div>Branch: {company.bankBranch}</div>}
+            </div>
+          )}
+
+          {cfg.showPaymentQr && qrDataUrl && (
+            <div className="flex items-center gap-3 p-3 rounded-xl border border-slate-200 bg-slate-50/60">
+              <img src={qrDataUrl} alt="UPI Payment QR" className="h-20 w-20 rounded-md border border-slate-300" />
+              <div className="text-[11px]">
+                <div className="font-bold text-slate-800 uppercase tracking-wider text-[10px]">Instant UPI Payment</div>
+                <div className="text-slate-600 mt-0.5">Scan with GPay, PhonePe, Paytm</div>
+                <div className="text-slate-900 font-mono font-bold mt-0.5">{billing.upiId || company.upiId}</div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Right: Subtotal, Taxes & Grand Total */}
+        <div className="space-y-2 text-xs">
+          <div className="flex justify-between py-1 border-b border-slate-100">
+            <span className="text-slate-600">{labels.subtotalLabel || 'Total Taxable Amount:'}</span>
+            <span className="font-mono font-semibold">₹{totalTaxableValue.toFixed(2)}</span>
+          </div>
+
+          {invoice.discount > 0 && (
+            <div className="flex justify-between py-1 border-b border-slate-100 text-emerald-700 font-semibold">
+              <span>{labels.discountLabel || 'Special Discount:'}</span>
+              <span className="font-mono">-₹{Number(invoice.discount).toFixed(2)}</span>
+            </div>
+          )}
+
+          {totalTaxAmt > 0 && (
+            <div className="flex justify-between py-1 border-b border-slate-100">
+              <span className="text-slate-600">{labels.taxLabel || 'Total GST:'}</span>
+              <span className="font-mono font-semibold">₹{totalTaxAmt.toFixed(2)}</span>
+            </div>
+          )}
+
+          {invoice.roundOff !== undefined && invoice.roundOff !== 0 && (
+            <div className="flex justify-between py-1 border-b border-slate-100 text-slate-500">
+              <span>Round Off:</span>
+              <span className="font-mono">{invoice.roundOff > 0 ? `+₹${invoice.roundOff.toFixed(2)}` : `-₹${Math.abs(invoice.roundOff).toFixed(2)}`}</span>
+            </div>
+          )}
+
+          <div className={`flex justify-between py-2.5 border-t-2 border-b-2 font-black text-sm ${accent.border} ${accent.textMain}`}>
+            <span>{labels.totalLabel || 'TOTAL INVOICE VALUE:'}</span>
+            <span className="text-base font-mono">₹{Number(invoice.total).toFixed(2)}</span>
+          </div>
+
+          {(paidAmt > 0 || dueAmt > 0) && (
+            <div className="space-y-1 pt-1 font-mono text-xs">
+              <div className="flex justify-between text-emerald-700 font-bold">
+                <span>Amount Paid:</span>
+                <span>₹{paidAmt.toFixed(2)}</span>
+              </div>
+              {dueAmt > 0 && (
+                <div className="flex justify-between text-rose-700 font-bold">
+                  <span>Balance Due:</span>
+                  <span>₹{dueAmt.toFixed(2)}</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {cfg.showInvoiceWordsTotal && (
+            <div className="pt-2 border-t border-slate-100">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">
+                {labels.wordsLabel || 'Amount in Words (Rupees):'}
+              </span>
+              <div className="text-[11.5px] font-bold text-slate-900 italic mt-0.5">
+                {numberToWords(invoice.total)}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  const hsnSummaryNode = (cfg.showHsnSummaryTable && Object.keys(hsnSummary).length > 0) ? (
+    <div className="p-4 sm:p-6 pt-0 border-t border-slate-200">
+      <div className="font-bold text-[10.5px] uppercase tracking-wider text-slate-700 mb-1.5 pt-3">
+        GST Tax & HSN/SAC Summary
+      </div>
+      <table className="w-full text-xs border border-slate-200 border-collapse">
+        <thead>
+          <tr className={`text-[10px] uppercase font-bold border-b border-slate-200 ${accent.bgLight} ${accent.textMain}`}>
+            <th className="py-1.5 px-2.5 border-r border-slate-200">HSN/SAC</th>
+            <th className="py-1.5 px-2.5 border-r border-slate-200 text-right">Taxable (₹)</th>
+            {billing.interState ? (
+              <>
+                <th className="py-1.5 px-2.5 border-r border-slate-200 text-right">IGST Rate</th>
+                <th className="py-1.5 px-2.5 border-r border-slate-200 text-right">IGST Amt (₹)</th>
+              </>
+            ) : (
+              <>
+                <th className="py-1.5 px-2.5 border-r border-slate-200 text-right">CGST Amt (₹)</th>
+                <th className="py-1.5 px-2.5 border-r border-slate-200 text-right">SGST Amt (₹)</th>
+              </>
+            )}
+            <th className="py-1.5 px-2.5 text-right">Total Tax (₹)</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100 font-mono text-[11px]">
+          {Object.entries(hsnSummary).map(([hsn, v]) => (
+            <tr key={hsn}>
+              <td className="py-1.5 px-2.5 border-r border-slate-100 font-bold">{hsn}</td>
+              <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.taxable.toFixed(2)}</td>
+              {billing.interState ? (
+                <>
+                  <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.rate}%</td>
+                  <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.igst.toFixed(2)}</td>
+                </>
+              ) : (
+                <>
+                  <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.cgst.toFixed(2)}</td>
+                  <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.sgst.toFixed(2)}</td>
+                </>
+              )}
+              <td className="py-1.5 px-2.5 text-right font-bold">{v.tax.toFixed(2)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  ) : null;
+
+  const termsSignatureNode = (
+    <div className="p-4 sm:p-6 pt-3 border-t border-slate-200 space-y-4">
+      <div className="flex flex-col sm:flex-row items-end justify-between gap-6">
+        <div className="text-slate-600 text-xs max-w-md space-y-1">
+          {cfg.showInvoiceTerms && (
+            <div>
+              <div className="font-bold text-slate-700 uppercase tracking-wider text-[10px]">
+                {labels.termsTitle || 'Terms & Conditions'}
+              </div>
+              <div className="whitespace-pre-line text-[11px] text-slate-600 mt-0.5">
+                {cfg.termsText || billing.termsText || billing.terms || '1. Goods once sold will not be taken back.\n2. Interest @ 18% p.a. will be charged for delayed payments.\n3. Subject to local jurisdiction only.'}
+              </div>
+            </div>
+          )}
+          {billing.footerText && (
+            <div className="italic text-slate-500 text-[10.5px] mt-1">
+              {billing.footerText}
+            </div>
+          )}
+        </div>
+
+        {cfg.showInvoiceSignature && (
+          <div className="text-center sm:text-right space-y-1 shrink-0">
+            <div className="text-[11px] font-bold text-slate-800">
+              For {company.name}
+            </div>
+            <div className="h-10" />
+            <div className="border-t border-slate-400 pt-1 font-bold text-slate-900 text-[11px]">
+              {labels.signatoryTitle || 'Authorised Signatory'}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="text-center text-[9.5px] text-slate-400 pt-2 border-t border-slate-100">
+        {labels.computerGeneratedNote || 'This is a Computer Generated Tax Invoice'}
+      </div>
+    </div>
+  );
+
+  const simpleSectionNodes = {
+    invoice_header: invoiceHeaderNode,
+    custom_banner: customBannerNode,
+    items_table: itemsTableNode,
+    bank_qr_totals: bankQrTotalsNode,
+    hsn_summary: hsnSummaryNode,
+    terms_signature: termsSignatureNode
+  };
+
   return (
     <div
       id="printable-tax-invoice"
@@ -533,487 +1034,43 @@ export function InvoiceDocumentView({
     >
       {cfg.customCss && <style dangerouslySetInnerHTML={{ __html: cfg.customCss }} />}
 
-      {/* ----------------- 1. INVOICE HEADER BAR ----------------- */}
-      {sectionMap.invoice_header && (
-        <div className={`p-4 sm:p-6 pb-4 border-b flex flex-col sm:flex-row sm:items-start justify-between gap-4 ${accent.border}`}>
-          <div className="flex items-start gap-3.5">
-            {cfg.showInvoiceLogo && company.logoUrl && (
-              <img
-                src={company.logoUrl}
-                alt="Logo"
-                className="h-12 w-12 rounded-lg object-contain border border-slate-100 shrink-0"
-              />
-            )}
-            <div>
-              <div className="text-lg font-black tracking-tight text-slate-950 uppercase">
-                {company.name}
-              </div>
-              {company.address && (
-                <div className="text-xs text-slate-600 mt-0.5 max-w-sm">{company.address}</div>
-              )}
-              <div className="text-xs text-slate-600">
-                {[company.city, company.state && `State: ${company.state}`, company.pincode && `PIN: ${company.pincode}`].filter(Boolean).join(' · ')}
-                {company.stateCode && ` (Code: ${company.stateCode})`}
-              </div>
-
-              {/* Statutory Tax IDs */}
-              {cfg.showCompanyTaxMeta && (
-                <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1.5 text-[10.5px] text-slate-800">
-                  {company.gstin && (
-                    <span className="font-bold">
-                      GSTIN: <span className="font-mono">{company.gstin}</span>
-                    </span>
-                  )}
-                  {company.pan && (
-                    <span className="font-semibold">
-                      PAN: <span className="font-mono">{company.pan}</span>
-                    </span>
-                  )}
-                  {company.cin && (
-                    <span className="font-semibold">
-                      CIN: <span className="font-mono">{company.cin}</span>
-                    </span>
-                  )}
-                  {company.fssaiNo && (
-                    <span className="font-semibold">
-                      FSSAI: <span className="font-mono">{company.fssaiNo}</span>
-                    </span>
-                  )}
-                  {company.lutBondNo && (
-                    <span className="font-semibold">
-                      LUT Bond: <span className="font-mono">{company.lutBondNo}</span>
-                    </span>
-                  )}
-                </div>
-              )}
-
-              <div className="text-[10.5px] text-slate-500 mt-0.5">
-                {[company.phone && `Tel: ${company.phone}`, company.email && `Email: ${company.email}`, company.website].filter(Boolean).join(' · ')}
-              </div>
-            </div>
-          </div>
-
-          <div className="text-right sm:min-w-[190px] shrink-0">
-            <div className="text-[9px] font-bold uppercase tracking-widest text-slate-400">
-              {labels.recipientCopy || 'Original for Recipient'}
-            </div>
-            <div
-              className="text-xl font-black tracking-tight uppercase mt-0.5"
-              style={{ color: accent.hex }}
-            >
-              {labels.invoiceTitle || billing.invoiceTitle || 'TAX INVOICE'}
-            </div>
-            <div className="text-sm font-mono font-bold text-slate-900 mt-0.5">
-              #{invoice.orderId}
-            </div>
-
-            {isVoid ? (
-              <div className="text-[10px] font-extrabold text-rose-600 uppercase tracking-wider mt-1">
-                [ VOID / CANCELLED ]
-              </div>
-            ) : isDraft ? (
-              <div className="text-[10px] font-extrabold text-sky-600 uppercase tracking-wider mt-1">
-                [ DRAFT INVOICE ]
-              </div>
-            ) : isPaid ? (
-              <div className="text-[10px] font-extrabold text-emerald-700 uppercase tracking-wider mt-1">
-                [ PAID IN FULL ]
-              </div>
-            ) : isPartiallyPaid ? (
-              <div className="text-[10px] font-extrabold text-amber-700 uppercase tracking-wider mt-1">
-                [ PARTIALLY PAID ]
-              </div>
-            ) : (
-              <div className="text-[10px] font-extrabold text-rose-700 uppercase tracking-wider mt-1">
-                [ UNPAID / DUE ]
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Custom Announcement / Notice Banner */}
-      {sectionMap.custom_banner && cfg.customBannerText && (
-        <div
-          className="px-4 py-2 text-center font-bold text-xs border-b"
-          style={{ backgroundColor: accent.hex + '15', color: accent.hex, borderColor: accent.hex + '30' }}
-        >
-          {cfg.customBannerText}
-        </div>
-      )}
-
-      {/* ----------------- 2. BUYER (BILL-TO) & SHIP-TO & DATES ----------------- */}
-      {(sectionMap.buyer_shipping || sectionMap.transport_meta) && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 border-b border-slate-200 text-xs">
-          {/* Bill To & Ship To */}
-          {sectionMap.buyer_shipping && (
-            <div className="p-4 sm:p-5 sm:border-r border-slate-200 space-y-1">
-              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                {labels.billToTitle || 'Bill To (Buyer / Customer)'}
-              </div>
-              <div className="text-sm font-bold text-slate-950">
-                {invoice.customerName || 'Walk-in Customer'}
-              </div>
-              {invoice.customerAddress && (
-                <div className="text-slate-600 max-w-xs">{invoice.customerAddress}</div>
-              )}
-              {invoice.customerPhone && (
-                <div className="text-slate-600">Phone: {invoice.customerPhone}</div>
-              )}
-              {invoice.customerGstin && (
-                <div className="text-slate-800 font-bold">
-                  GSTIN / UIN: <span className="font-mono underline">{invoice.customerGstin}</span>
-                </div>
-              )}
-              {invoice.customerPan && (
-                <div className="text-slate-700">PAN: {invoice.customerPan}</div>
-              )}
-              {(invoice.customerState || invoice.customerStateCode) && (
-                <div className="text-slate-600">
-                  State: {invoice.customerState || '—'}{invoice.customerStateCode ? ` (Code: ${invoice.customerStateCode})` : ''}
-                </div>
-              )}
-
-              {/* Consignee (Ship To) if enabled */}
-              {cfg.showConsigneeShipTo && invoice.consigneeAddress && (
-                <div className="pt-2 mt-2 border-t border-slate-100">
-                  <div className="text-[9.5px] font-bold uppercase tracking-wider text-slate-500">
-                    {labels.shipToTitle || 'Ship To (Consignee)'}
-                  </div>
-                  <div className="font-semibold text-slate-900">{invoice.consigneeName || invoice.customerName}</div>
-                  <div className="text-slate-600 text-[11px]">{invoice.consigneeAddress}</div>
-                  {invoice.consigneeGstin && (
-                    <div className="text-slate-800 text-[10.5px]">GSTIN: {invoice.consigneeGstin}</div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Invoice Dates, Transport & Order Meta */}
-          {sectionMap.transport_meta && (
-            <div className="flex flex-col">
-              <div className={`px-4 sm:px-5 py-2.5 flex items-center justify-between text-white ${accent.bgHeader}`}>
-                <div>
-                  <span className="text-[10px] font-bold uppercase tracking-wider block">
-                    {isPaid ? 'Total Paid' : isPartiallyPaid ? 'Partially Paid' : 'Total Amount Due'}
-                  </span>
-                  {isPartiallyPaid && (
-                    <span className="text-[9.5px] opacity-90 block">
-                      Paid: ₹{paidAmt.toFixed(2)} · Due: ₹{dueAmt.toFixed(2)}
-                    </span>
-                  )}
-                </div>
-                <span className="text-base font-black font-mono">₹{Number(invoice.total).toFixed(2)}</span>
-              </div>
-
-              <div className="p-4 sm:p-5 space-y-1 text-xs">
-                <div className="flex justify-between gap-3">
-                  <span className="text-slate-500">Invoice Date:</span>
-                  <span className="font-bold font-mono">{fmtDate(invoice.date)}</span>
-                </div>
-                {invoice.dueDate && (
-                  <div className="flex justify-between gap-3">
-                    <span className="text-slate-500">Due Date:</span>
-                    <span className="font-bold font-mono">{fmtDate(invoice.dueDate)}</span>
-                  </div>
-                )}
-                {invoice.paymentTerms && (
-                  <div className="flex justify-between gap-3">
-                    <span className="text-slate-500">Payment Terms:</span>
-                    <span className="font-bold">{invoice.paymentTerms}</span>
-                  </div>
-                )}
-                {invoice.buyerOrderNo && (
-                  <div className="flex justify-between gap-3">
-                    <span className="text-slate-500">Buyer Order / PO No:</span>
-                    <span className="font-bold">
-                      {invoice.buyerOrderNo}{invoice.buyerOrderDate ? ` dt. ${fmtDate(invoice.buyerOrderDate)}` : ''}
-                    </span>
-                  </div>
-                )}
-
-                {/* Transport & Dispatch Details */}
-                {cfg.showTransportMeta && (
+      {enabledOrder.map((id) => {
+        if (id === 'buyer_shipping' || id === 'transport_meta') {
+          if (pairAdjacent) {
+            if (id !== pairFirstId) return null;
+            return (
+              <div key="buyer_transport_pair" className="grid grid-cols-1 sm:grid-cols-2 border-b border-slate-200 text-xs">
+                {buyerFirst ? (
                   <>
-                    {invoice.eWayBillNo && (
-                      <div className="flex justify-between gap-3">
-                        <span className="text-slate-500">E-Way Bill No:</span>
-                        <span className="font-mono font-bold">{invoice.eWayBillNo}</span>
-                      </div>
-                    )}
-                    {invoice.vehicleNo && (
-                      <div className="flex justify-between gap-3">
-                        <span className="text-slate-500">Motor Vehicle No:</span>
-                        <span className="font-mono font-bold">{invoice.vehicleNo}</span>
-                      </div>
-                    )}
-                    {invoice.dispatchDocNo && (
-                      <div className="flex justify-between gap-3">
-                        <span className="text-slate-500">Despatch Doc No:</span>
-                        <span className="font-bold">{invoice.dispatchDocNo}</span>
-                      </div>
-                    )}
-                    {invoice.placeOfSupply && (
-                      <div className="flex justify-between gap-3">
-                        <span className="text-slate-500">Place of Supply:</span>
-                        <span className="font-bold">{invoice.placeOfSupply}</span>
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ----------------- 3. ITEMS TABLE ----------------- */}
-      {sectionMap.items_table && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs border-collapse">
-            <thead>
-              <tr className={`border-b uppercase font-bold text-[10px] tracking-wider ${accent.bgLight} ${accent.textMain}`}>
-                <th className="py-2.5 px-3 w-8">#</th>
-                <th className="py-2.5 px-3">{labels.itemColHeader || 'Item Description'}</th>
-                {cfg.showItemHsn && <th className="py-2.5 px-3 text-center">{labels.hsnColHeader || 'HSN/SAC'}</th>}
-                <th className="py-2.5 px-3 text-right">{labels.qtyColHeader || 'Qty'}</th>
-                {cfg.showItemUnit && <th className="py-2.5 px-3 text-left">{labels.unitColHeader || 'Unit'}</th>}
-                <th className="py-2.5 px-3 text-right">{labels.rateColHeader || 'Rate (₹)'}</th>
-                <th className="py-2.5 px-3 text-right">{labels.taxableColHeader || 'Taxable (₹)'}</th>
-                {cfg.showItemTaxBreakup && <th className="py-2.5 px-3 text-right">{labels.taxRateColHeader || 'Tax %'}</th>}
-                <th className="py-2.5 px-3 text-right">{labels.amountColHeader || 'Amount (₹)'}</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-200">
-              {(invoice.items || []).map((it, idx) => {
-                const qty = Number(it.qty) || 1;
-                const price = Number(it.price) || 0;
-                const discount = Number(it.discount) || 0;
-                const taxRate = Number(it.taxRate) || 0;
-                const taxable = Math.max(0, Math.round((qty * price - discount) * 100) / 100);
-                const lineTotal = Number(it.total) || Math.round((taxable + (taxable * taxRate) / 100) * 100) / 100;
-
-                return (
-                  <tr key={idx} className="hover:bg-slate-50/70">
-                    <td className="py-2.5 px-3 text-slate-500 font-mono text-[11px]">{idx + 1}</td>
-                    <td className="py-2.5 px-3 font-semibold text-slate-900">
-                      <div>{it.printName || it.name}</div>
-                      {it.discount > 0 && (
-                        <div className="text-[10px] text-emerald-700 font-normal">
-                          (Disc: -₹{discount.toFixed(2)})
-                        </div>
-                      )}
-                    </td>
-                    {cfg.showItemHsn && (
-                      <td className="py-2.5 px-3 text-center font-mono text-slate-600 text-[11px]">
-                        {it.hsn || it.hsnCode || '—'}
-                      </td>
-                    )}
-                    <td className="py-2.5 px-3 text-right font-mono font-bold">{qty}</td>
-                    {cfg.showItemUnit && (
-                      <td className="py-2.5 px-3 text-left text-slate-500">{it.unit || 'pcs'}</td>
-                    )}
-                    <td className="py-2.5 px-3 text-right font-mono">{price.toFixed(2)}</td>
-                    <td className="py-2.5 px-3 text-right font-mono">{taxable.toFixed(2)}</td>
-                    {cfg.showItemTaxBreakup && (
-                      <td className="py-2.5 px-3 text-right font-mono text-[11px]">{taxRate}%</td>
-                    )}
-                    <td className="py-2.5 px-3 text-right font-mono font-bold text-slate-950">
-                      {lineTotal.toFixed(2)}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* ----------------- 4. TOTALS, BANK & WORDS ----------------- */}
-      {sectionMap.bank_qr_totals && (
-        <div className="p-4 sm:p-6 space-y-4 border-t border-slate-200">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 items-start">
-            {/* Left: Bank details & UPI QR */}
-            <div className="space-y-3">
-              {cfg.showBankDetails && (company.bankAccountNumber || company.upiId) && (
-                <div className="rounded-xl border border-slate-200 p-3.5 bg-slate-50/60 space-y-1.5 text-xs">
-                  <div className="font-bold text-slate-800 uppercase tracking-wider text-[10px] flex items-center gap-1.5">
-                    <CreditCard className="w-3.5 h-3.5" style={{ color: accent.hex }} />
-                    Bank Transfer Details
-                  </div>
-                  {company.bankAccountHolder && <div>Account: <strong>{company.bankAccountHolder}</strong></div>}
-                  {company.bankName && <div>Bank: <strong>{company.bankName}</strong></div>}
-                  {company.bankAccountNumber && <div>A/C No: <strong className="font-mono">{company.bankAccountNumber}</strong></div>}
-                  {company.bankIfsc && <div>IFSC: <strong className="font-mono">{company.bankIfsc}</strong></div>}
-                  {company.bankBranch && <div>Branch: {company.bankBranch}</div>}
-                </div>
-              )}
-
-              {cfg.showPaymentQr && qrDataUrl && (
-                <div className="flex items-center gap-3 p-3 rounded-xl border border-slate-200 bg-slate-50/60">
-                  <img src={qrDataUrl} alt="UPI Payment QR" className="h-20 w-20 rounded-md border border-slate-300" />
-                  <div className="text-[11px]">
-                    <div className="font-bold text-slate-800 uppercase tracking-wider text-[10px]">Instant UPI Payment</div>
-                    <div className="text-slate-600 mt-0.5">Scan with GPay, PhonePe, Paytm</div>
-                    <div className="text-slate-900 font-mono font-bold mt-0.5">{billing.upiId || company.upiId}</div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Right: Subtotal, Taxes & Grand Total */}
-            <div className="space-y-2 text-xs">
-              <div className="flex justify-between py-1 border-b border-slate-100">
-                <span className="text-slate-600">{labels.subtotalLabel || 'Total Taxable Amount:'}</span>
-                <span className="font-mono font-semibold">₹{totalTaxableValue.toFixed(2)}</span>
-              </div>
-
-              {invoice.discount > 0 && (
-                <div className="flex justify-between py-1 border-b border-slate-100 text-emerald-700 font-semibold">
-                  <span>{labels.discountLabel || 'Special Discount:'}</span>
-                  <span className="font-mono">-₹{Number(invoice.discount).toFixed(2)}</span>
-                </div>
-              )}
-
-              {totalTaxAmt > 0 && (
-                <div className="flex justify-between py-1 border-b border-slate-100">
-                  <span className="text-slate-600">{labels.taxLabel || 'Total GST:'}</span>
-                  <span className="font-mono font-semibold">₹{totalTaxAmt.toFixed(2)}</span>
-                </div>
-              )}
-
-              {invoice.roundOff !== undefined && invoice.roundOff !== 0 && (
-                <div className="flex justify-between py-1 border-b border-slate-100 text-slate-500">
-                  <span>Round Off:</span>
-                  <span className="font-mono">{invoice.roundOff > 0 ? `+₹${invoice.roundOff.toFixed(2)}` : `-₹${Math.abs(invoice.roundOff).toFixed(2)}`}</span>
-                </div>
-              )}
-
-              <div className={`flex justify-between py-2.5 border-t-2 border-b-2 font-black text-sm ${accent.border} ${accent.textMain}`}>
-                <span>{labels.totalLabel || 'TOTAL INVOICE VALUE:'}</span>
-                <span className="text-base font-mono">₹{Number(invoice.total).toFixed(2)}</span>
-              </div>
-
-              {(paidAmt > 0 || dueAmt > 0) && (
-                <div className="space-y-1 pt-1 font-mono text-xs">
-                  <div className="flex justify-between text-emerald-700 font-bold">
-                    <span>Amount Paid:</span>
-                    <span>₹{paidAmt.toFixed(2)}</span>
-                  </div>
-                  {dueAmt > 0 && (
-                    <div className="flex justify-between text-rose-700 font-bold">
-                      <span>Balance Due:</span>
-                      <span>₹{dueAmt.toFixed(2)}</span>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {cfg.showInvoiceWordsTotal && (
-                <div className="pt-2 border-t border-slate-100">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">
-                    {labels.wordsLabel || 'Amount in Words (Rupees):'}
-                  </span>
-                  <div className="text-[11.5px] font-bold text-slate-900 italic mt-0.5">
-                    {numberToWords(invoice.total)}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ----------------- 5. HSN SUMMARY TABLE ----------------- */}
-      {sectionMap.hsn_summary && cfg.showHsnSummaryTable && Object.keys(hsnSummary).length > 0 && (
-        <div className="p-4 sm:p-6 pt-0 border-t border-slate-200">
-          <div className="font-bold text-[10.5px] uppercase tracking-wider text-slate-700 mb-1.5 pt-3">
-            GST Tax & HSN/SAC Summary
-          </div>
-          <table className="w-full text-xs border border-slate-200 border-collapse">
-            <thead>
-              <tr className={`text-[10px] uppercase font-bold border-b border-slate-200 ${accent.bgLight} ${accent.textMain}`}>
-                <th className="py-1.5 px-2.5 border-r border-slate-200">HSN/SAC</th>
-                <th className="py-1.5 px-2.5 border-r border-slate-200 text-right">Taxable (₹)</th>
-                {billing.interState ? (
-                  <>
-                    <th className="py-1.5 px-2.5 border-r border-slate-200 text-right">IGST Rate</th>
-                    <th className="py-1.5 px-2.5 border-r border-slate-200 text-right">IGST Amt (₹)</th>
+                    <div className="p-4 sm:p-5 sm:border-r border-slate-200 space-y-1">{buyerShippingInner}</div>
+                    <div>{transportMetaNode}</div>
                   </>
                 ) : (
                   <>
-                    <th className="py-1.5 px-2.5 border-r border-slate-200 text-right">CGST Amt (₹)</th>
-                    <th className="py-1.5 px-2.5 border-r border-slate-200 text-right">SGST Amt (₹)</th>
+                    <div>{transportMetaNode}</div>
+                    <div className="p-4 sm:p-5 sm:border-l border-slate-200 space-y-1">{buyerShippingInner}</div>
                   </>
                 )}
-                <th className="py-1.5 px-2.5 text-right">Total Tax (₹)</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 font-mono text-[11px]">
-              {Object.entries(hsnSummary).map(([hsn, v]) => (
-                <tr key={hsn}>
-                  <td className="py-1.5 px-2.5 border-r border-slate-100 font-bold">{hsn}</td>
-                  <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.taxable.toFixed(2)}</td>
-                  {billing.interState ? (
-                    <>
-                      <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.rate}%</td>
-                      <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.igst.toFixed(2)}</td>
-                    </>
-                  ) : (
-                    <>
-                      <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.cgst.toFixed(2)}</td>
-                      <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.sgst.toFixed(2)}</td>
-                    </>
-                  )}
-                  <td className="py-1.5 px-2.5 text-right font-bold">{v.tax.toFixed(2)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* ----------------- 6. FOOTER, TERMS & SIGNATURE ----------------- */}
-      {sectionMap.terms_signature && (
-        <div className="p-4 sm:p-6 pt-3 border-t border-slate-200 space-y-4">
-          <div className="flex flex-col sm:flex-row items-end justify-between gap-6">
-            <div className="text-slate-600 text-xs max-w-md space-y-1">
-              {cfg.showInvoiceTerms && (
-                <div>
-                  <div className="font-bold text-slate-700 uppercase tracking-wider text-[10px]">
-                    {labels.termsTitle || 'Terms & Conditions'}
-                  </div>
-                  <div className="whitespace-pre-line text-[11px] text-slate-600 mt-0.5">
-                    {cfg.termsText || billing.termsText || billing.terms || '1. Goods once sold will not be taken back.\n2. Interest @ 18% p.a. will be charged for delayed payments.\n3. Subject to local jurisdiction only.'}
-                  </div>
-                </div>
-              )}
-              {billing.footerText && (
-                <div className="italic text-slate-500 text-[10.5px] mt-1">
-                  {billing.footerText}
-                </div>
-              )}
-            </div>
-
-            {cfg.showInvoiceSignature && (
-              <div className="text-center sm:text-right space-y-1 shrink-0">
-                <div className="text-[11px] font-bold text-slate-800">
-                  For {company.name}
-                </div>
-                <div className="h-10" />
-                <div className="border-t border-slate-400 pt-1 font-bold text-slate-900 text-[11px]">
-                  {labels.signatoryTitle || 'Authorised Signatory'}
-                </div>
               </div>
-            )}
-          </div>
+            );
+          }
+          if (id === 'buyer_shipping') {
+            return (
+              <div key={id} className="border-b border-slate-200 text-xs p-4 sm:p-5 space-y-1">
+                {buyerShippingInner}
+              </div>
+            );
+          }
+          return (
+            <div key={id} className="border-b border-slate-200 text-xs">
+              {transportMetaNode}
+            </div>
+          );
+        }
 
-          <div className="text-center text-[9.5px] text-slate-400 pt-2 border-t border-slate-100">
-            {labels.computerGeneratedNote || 'This is a Computer Generated Tax Invoice'}
-          </div>
-        </div>
-      )}
+        const node = simpleSectionNodes[id];
+        return node ? <React.Fragment key={id}>{node}</React.Fragment> : null;
+      })}
     </div>
   );
 }

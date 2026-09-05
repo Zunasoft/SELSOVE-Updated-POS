@@ -158,6 +158,18 @@ export default function App() {
     }
   }, [isFullscreen]);
 
+  // Lock document body scroll in fullscreen mode so POS screen stays strictly static
+  useEffect(() => {
+    if (isFullscreen) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
+    }
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, [isFullscreen]);
+
   // Listen for F11 and Escape key events
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -276,7 +288,7 @@ export default function App() {
 
   const screens = {
     dashboard: <ShopDashboard {...shared} onNavigate={handleTabClick} />,
-    pos: <POSTerminal {...shared} settings={settings} onSaleCompleted={fetchStoreData} />,
+    pos: <POSTerminal {...shared} settings={settings} isFullscreen={isFullscreen} onSaleCompleted={fetchStoreData} />,
     invoices: <InvoicesManager {...shared} settings={settings} onNavigate={handleTabClick} />,
     inventory: (
       <InventoryManager
@@ -448,7 +460,7 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <main className={`w-full flex-1 ${isFullscreen ? 'fixed inset-0 z-[100] overflow-y-auto bg-[color:var(--bg-app)] p-2 sm:p-4' : 'p-3 sm:p-4 lg:p-5'}`}>
+      <main className={`w-full flex-1 ${isFullscreen ? 'fixed inset-0 z-[100] h-screen max-h-screen w-screen max-w-screen overflow-hidden flex flex-col bg-[color:var(--bg-main)] p-2 sm:p-3' : 'p-3 sm:p-4 lg:p-5'}`}>
         <AnimatePresence>
           {isFullscreen && showFsHint && (
             <motion.div
@@ -456,7 +468,7 @@ export default function App() {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: -10, scale: 0.95 }}
               transition={{ duration: 0.2 }}
-              className="sticky top-2 z-[110] flex items-center justify-between gap-3 bg-slate-900/90 text-white px-3.5 py-1.5 rounded-full text-xs font-bold shadow-xl backdrop-blur-md max-w-fit ml-auto mb-3 border border-slate-700/80"
+              className="fixed top-3 right-4 z-[110] flex items-center justify-between gap-3 bg-slate-900/90 text-white px-3.5 py-1.5 rounded-full text-xs font-bold shadow-xl backdrop-blur-md border border-slate-700/80 pointer-events-auto"
             >
               <span className="flex items-center gap-1.5">
                 <Maximize2 className="w-3.5 h-3.5 text-indigo-400" />
@@ -474,7 +486,9 @@ export default function App() {
         </AnimatePresence>
         <ErrorBoundary key={activeTab} label="This section hit an unexpected error.">
           <React.Suspense fallback={<div className="flex h-64 items-center justify-center"><Spinner label="Opening section…" /></div>}>
-            {screens[activeTab]}
+            <div className={isFullscreen ? 'h-full flex-1 min-h-0 overflow-hidden flex flex-col' : 'w-full'}>
+              {screens[activeTab]}
+            </div>
           </React.Suspense>
         </ErrorBoundary>
       </main>

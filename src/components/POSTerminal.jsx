@@ -7,7 +7,7 @@ import {
   Flame, ArrowUpDown, Clock, History, Zap, FileCheck, CreditCard,
   Coins, Building2, Sparkles, PlusCircle, MinusCircle, AlertCircle, CheckCheck,
   TrendingUp, TrendingDown, Filter, ArrowRight, Users, Maximize2, Minimize2,
-  FileText, Download, ChevronLeft, ChevronRight
+  FileText, Download, ChevronLeft, ChevronRight, Edit3
 } from 'lucide-react';
 
 import api, { money, fmtDateTime, fmtDate, API_BASE } from '../lib/api';
@@ -19,6 +19,7 @@ import { getCategoryTheme } from '../lib/categoryTheme';
 import { ThermalReceiptView, THERMAL_THEMES, BILLING_THERMAL_THEME_IDS } from './ThermalReceiptTemplates';
 import { InvoiceDocumentView, INVOICE_THEMES, ACCENT_COLORS } from './InvoiceDocumentTemplates';
 import { exportBillToWord, exportInvoiceToWord } from '../lib/exporters';
+import InvoiceEditModal from './InvoiceEditModal';
 
 const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Credit (Udhar)', 'Partial Payment', 'Multi Pay'];
 const SPLIT_PAYMENT_METHODS = ['Cash', 'UPI', 'Card', 'Net Banking', 'Cheque'];
@@ -629,7 +630,12 @@ export function resolveProductPricing(product, customer, priceSheets = [], overr
  * keyboard wedge, so keystrokes are captured globally rather than requiring the
  * search box to hold focus, and weighed items pull a stable read from the scale.
  */
-export default function POSTerminal({ tenant, showToast, settings: appSettings, onSaleCompleted }) {
+export default function POSTerminal({ tenant, showToast, settings: appSettings, onSaleCompleted, isFullscreen }) {
+  // App.jsx already tracks native fullscreen state (covering all vendor-prefixed
+  // fullscreenchange events) and passes it down — trust it instead of keeping a
+  // second, narrower listener set here that can desync from it.
+  const isFs = Boolean(isFullscreen);
+
   const [categories, setCategories] = useState([]);
   const [products, setProducts] = useState([]);
   const [customers, setCustomers] = useState([]);
@@ -1628,7 +1634,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   const sessionOpen = session?.status === 'open';
 
   return (
-    <div className="relative min-h-[80vh] w-full rounded-2xl">
+    <div className={`relative w-full rounded-2xl ${isFs ? 'h-full flex-1 overflow-hidden flex flex-col' : 'min-h-[80vh]'}`}>
       {/* Drawer Closed / Shift Ended Lock Popup inside Billing Section */}
       {!sessionOpen && (
         <div className="absolute inset-0 z-30 flex items-center justify-center bg-slate-950/70 backdrop-blur-md p-4 sm:p-6 rounded-2xl animate-in fade-in duration-200">
@@ -1664,10 +1670,17 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         </div>
       )}
 
-      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-10">
+      <div className={`grid grid-cols-1 gap-3 lg:grid-cols-10 ${isFs ? 'h-full flex-1 min-h-0 overflow-hidden' : 'items-start'}`}>
         {/* ----------------------------- Catalogue (70%) ----------------------------- */}
-        <div className="space-y-3 lg:col-span-7">
-        <Panel className="flex flex-wrap items-center gap-2 relative">
+        <div className={`lg:col-span-7 ${isFs ? 'h-full min-h-0 flex flex-col gap-3 overflow-hidden' : 'space-y-3 lg:sticky lg:self-start lg:top-[84px] transform-gpu'}`}>
+        <Panel className="flex flex-wrap items-center gap-2 relative shrink-0">
+          {isFs && (
+            <img
+              src="/Selsolve Logo Square.png"
+              alt="Selsolve"
+              className="h-8 w-8 rounded-xl object-contain shadow-xs shrink-0"
+            />
+          )}
           <div className="relative min-w-[220px] flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[color:var(--text-muted)]" />
             <input
@@ -1831,14 +1844,14 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         </Panel>
 
         {!sessionOpen && (
-          <div className="flex items-center gap-2 rounded-2xl bg-amber-50 px-4 py-2.5 text-[12px] font-semibold text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+          <div className="flex items-center gap-2 rounded-2xl bg-amber-50 px-4 py-2.5 text-[12px] font-semibold text-amber-700 dark:bg-amber-950/40 dark:text-amber-300 shrink-0">
             <Lock className="h-4 w-4" />
             The counter session is closed. Open a session to track cash float and denominations for this shift.
           </div>
         )}
 
         {/* Category Filters Marquee Scrollable Track */}
-        <div className="relative group/cat flex items-center">
+        <div className="relative group/cat flex items-center shrink-0">
           {categories.length > 4 && (
             <button
               type="button"
@@ -1903,25 +1916,26 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         </div>
 
         {filtered.length === 0 ? (
-          <Panel>
+          <Panel className={isFs ? 'flex-1 min-h-0 overflow-y-auto' : ''}>
             <EmptyState
               title={selectedCategory === 'recent-billed' ? 'No recently billed items' : 'No items match'}
               hint={selectedCategory === 'recent-billed' ? 'Products you bill will automatically appear here.' : 'Clear the search or pick another category.'}
             />
           </Panel>
         ) : (
-          <div className="grid max-h-[calc(100vh+11.5rem)] grid-cols-2 gap-2.5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-4 2xl:grid-cols-4 overflow-y-auto pr-1 pb-2">
-            {visibleProductCards.map(({ product: p, stockInfo, out, isLow, pricing, isRecent, imgUrl, autoVisual, catTheme }) => {
-              return (
-                <motion.button
-                  key={p.id}
-                  whileTap={{ scale: 0.97 }}
-                  onClick={() => {
-                    addToCart(p, 1);
-                    playScanSound('add');
-                  }}
-                  className="surface group flex flex-col justify-between rounded-xl p-2.5 text-left transition-all hover:-translate-y-0.5 hover:shadow-md cursor-pointer relative overflow-hidden border border-[color:var(--border)] hover:border-indigo-400 dark:hover:border-indigo-600"
-                >
+          <div className={`${isFs ? 'flex-1 min-h-0' : 'max-h-[calc(100vh-13rem)]'} overflow-y-auto overscroll-contain pr-1 pb-2`}>
+            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-4 2xl:grid-cols-4">
+              {visibleProductCards.map(({ product: p, stockInfo, out, isLow, pricing, isRecent, imgUrl, autoVisual, catTheme }) => {
+                return (
+                  <motion.button
+                    key={p.id}
+                    whileTap={{ scale: 0.97 }}
+                    onClick={() => {
+                      addToCart(p, 1);
+                      playScanSound('add');
+                    }}
+                    className="surface group flex flex-col justify-between rounded-xl p-2.5 text-left transition-all hover:-translate-y-0.5 hover:shadow-md cursor-pointer relative overflow-hidden border border-[color:var(--border)] hover:border-indigo-400 dark:hover:border-indigo-600"
+                  >
                   {/* Category Accent Top Line */}
                   <div className={`absolute top-0 left-0 right-0 h-[3.5px] ${catTheme.topBar}`} />
 
@@ -1993,7 +2007,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                   {/* Product Info */}
                   <div className="min-w-0 flex-1 flex flex-col justify-between">
                     <div>
-                      <div className="line-clamp-2 text-[11px] sm:text-[11.5px] font-bold leading-tight text-[color:var(--text-primary)] group-hover:text-[color:var(--accent)] transition-colors">
+                      <div className="line-clamp-2 min-h-[2.1rem] sm:min-h-[2.2rem] text-[11px] sm:text-[11.5px] font-bold leading-tight text-[color:var(--text-primary)] group-hover:text-[color:var(--accent)] transition-colors">
                         {p.name}
                       </div>
                       {pricing.ruleSource && (
@@ -2024,12 +2038,19 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
               );
             })}
           </div>
-        )}
-      </div>
+        </div>
+      )}
+    </div>
 
       {/* ------------------------------- Cart / Billing (30%) ------------------------------- */}
-      <div className="lg:sticky lg:top-20 lg:col-span-3">
-        <Panel className="space-y-3">
+      <div
+        className={`lg:col-span-3 pr-1 ${
+          isFs
+            ? 'h-full min-h-0 flex flex-col overflow-hidden pt-[30px]'
+            : 'lg:sticky lg:top-[84px] transform-gpu'
+        }`}
+      >
+        <Panel className="space-y-2.5 shrink-0">
           <div className="flex items-center justify-between gap-2 border-b pb-2.5" style={{ borderColor: 'var(--border)' }}>
             <div className="flex items-center gap-2">
               <ShoppingCart className="h-4 w-4 text-[color:var(--accent)]" />
@@ -2162,7 +2183,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
             </div>
           )}
 
-          <div className="max-h-[34vh] space-y-1.5 overflow-y-auto pr-1">
+          <div className={`${isFs ? 'max-h-[calc(18vh+20px)] 2xl:max-h-[calc(22vh+20px)] min-h-[130px]' : 'max-h-[26vh] sm:max-h-[30vh]'} space-y-1.5 overflow-y-auto overscroll-contain pr-1`}>
             {cart.length === 0 ? (
               <EmptyState
                 icon={ShoppingCart}
@@ -2376,14 +2397,14 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         </Panel>
 
         {/* Invoices Section in rows near the billing cart */}
-        <Panel className="space-y-2 mt-3">
-          <div className="flex items-center justify-between border-b pb-2" style={{ borderColor: 'var(--border)' }}>
+        <Panel className={`space-y-1.5 mt-2 ${isFs ? 'flex-1 min-h-0 flex flex-col overflow-hidden' : ''}`}>
+          <div className="flex items-center justify-between border-b pb-2 shrink-0" style={{ borderColor: 'var(--border)' }}>
             <div className="flex items-center gap-1.5">
               <Receipt className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
               <span className="text-[12px] font-bold text-[color:var(--text-primary)]">Recent Invoices</span>
               {recentInvoices.length > 0 && (
                 <span className="text-[10px] px-1.5 py-0.5 rounded-full font-bold bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400">
-                  {recentInvoices.length}
+                  {Math.min(4, recentInvoices.length)}
                 </span>
               )}
             </div>
@@ -2401,8 +2422,8 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
               No recent bills for this shift
             </div>
           ) : (
-            <div className="divide-y divide-[color:var(--border-subtle)]">
-              {recentInvoices.slice(0, 5).map((inv) => (
+            <div className={`divide-y divide-[color:var(--border-subtle)] ${isFs ? 'flex-1 min-h-0 overflow-y-auto' : 'max-h-[190px] sm:max-h-[240px] overflow-y-auto'} overscroll-contain pr-1`}>
+              {recentInvoices.slice(0, 4).map((inv) => (
                 <div
                   key={inv.orderId}
                   className="flex items-center justify-between py-2 text-xs hover:bg-[color:var(--bg-subtle)] px-2.5 rounded-xl transition-colors group cursor-pointer border border-transparent hover:border-[color:var(--border)]"
@@ -2453,6 +2474,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
             </div>
           )}
         </Panel>
+      </div>
       </div>
 
       {/* ----------------------------- Modals ----------------------------- */}
@@ -3012,6 +3034,8 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         settings={settings}
         tenant={tenant}
         onClose={() => setReceipt(null)}
+        showToast={showToast}
+        onUpdated={(updated) => setReceipt(updated)}
       />
 
       <Modal open={showHeld} onClose={() => setShowHeld(false)} title={`Held Bills (${heldBills.length})`} icon={PauseCircle} size="lg">
@@ -3081,7 +3105,6 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         showToast={showToast}
       />
     </div>
-    </div>
   );
 }
 
@@ -3101,7 +3124,7 @@ function Row({ label, value, tone }) {
  * Receipt
  * ------------------------------------------------------------------ */
 
-function ReceiptModal({ receipt, settings, tenant, onClose }) {
+function ReceiptModal({ receipt, settings, tenant, onClose, showToast, onUpdated }) {
   // `receipt` toggles between null and populated on every checkout, but this
   // component stays mounted the whole time (the parent always renders it) —
   // so the early return used to sit before the hooks below, which meant the
@@ -3127,6 +3150,7 @@ function ReceiptModal({ receipt, settings, tenant, onClose }) {
     BILLING_THERMAL_THEME_IDS.includes(billing?.activeThermalTemplate) ? billing.activeThermalTemplate : 'detailed_gst'
   );
   const [showFullscreenView, setShowFullscreenView] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
 
   useEffect(() => {
     if (billing?.activeInvoiceTemplate) setSelectedInvoiceTheme(billing.activeInvoiceTemplate);
@@ -3158,7 +3182,12 @@ function ReceiptModal({ receipt, settings, tenant, onClose }) {
         open
         onClose={onClose}
         title={`Bill / Invoice — ${receipt.orderId}`}
-        subtitle={receipt.voucherNo ? `Voucher ${receipt.voucherNo}` : `Issued ${fmtDateTime(receipt.date)}`}
+        subtitle={
+          <span className="inline-flex items-center gap-2">
+            {receipt.voucherNo ? `Voucher ${receipt.voucherNo}` : `Issued ${fmtDateTime(receipt.date)}`}
+            {receipt.isEdited && <Badge tone="info">EDITED</Badge>}
+          </span>
+        }
         icon={Receipt}
         size={viewMode === 'TAX_INVOICE' ? 'fullscreen' : 'lg'}
         allowFullscreen={true}
@@ -3282,6 +3311,11 @@ function ReceiptModal({ receipt, settings, tenant, onClose }) {
               <Button size="sm" variant="secondary" icon={Maximize2} onClick={() => setShowFullscreenView(true)}>
                 Full Screen
               </Button>
+              {receipt.status !== 'VOID' && receipt.status !== 'DRAFT' && (
+                <Button size="sm" variant="outline" icon={Edit3} onClick={() => setEditOpen(true)}>
+                  Edit Details
+                </Button>
+              )}
               <Button onClick={onClose}>Close</Button>
             </div>
           </div>
@@ -3365,6 +3399,18 @@ function ReceiptModal({ receipt, settings, tenant, onClose }) {
             )}
           </div>
         </Modal>
+      )}
+
+      {editOpen && (
+        <InvoiceEditModal
+          invoice={receipt}
+          showToast={showToast}
+          onClose={() => setEditOpen(false)}
+          onSaved={(updated) => {
+            setEditOpen(false);
+            onUpdated?.(updated);
+          }}
+        />
       )}
     </>
   );
@@ -5243,6 +5289,7 @@ function RecentBillsModal({ open, onClose, onReprint, showToast }) {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
+  const [editTarget, setEditTarget] = useState(null);
 
   const fetchOrders = useCallback(() => {
     setLoading(true);
@@ -5345,19 +5392,27 @@ function RecentBillsModal({ open, onClose, onReprint, showToast }) {
               {
                 key: 'status',
                 label: 'Status',
-                width: 80,
-                render: (o) => <Badge tone={o.status === 'VOID' ? 'danger' : 'success'}>{o.status === 'VOID' ? 'Void' : 'OK'}</Badge>
+                width: 90,
+                render: (o) => (
+                  <div className="flex flex-col items-start gap-0.5">
+                    <Badge tone={o.status === 'VOID' ? 'danger' : 'success'}>{o.status === 'VOID' ? 'Void' : 'OK'}</Badge>
+                    {o.isEdited && <Badge tone="info">Edited</Badge>}
+                  </div>
+                )
               },
               {
                 key: 'actions',
                 label: '',
                 align: 'right',
-                width: 150,
+                width: 190,
                 render: (o) => (
                   <div className="flex justify-end gap-1">
                     <Button size="sm" variant="ghost" icon={Printer} onClick={() => onReprint(o)}>
                       Reprint
                     </Button>
+                    {o.status !== 'VOID' && (
+                      <Button size="sm" variant="ghost" icon={Edit3} onClick={() => setEditTarget(o)} title="Edit customer, notes & shipping details" />
+                    )}
                     {o.status !== 'VOID' && (
                       <Button size="sm" variant="ghost" icon={X} onClick={() => voidBill(o)} className="text-rose-500" />
                     )}
@@ -5371,6 +5426,18 @@ function RecentBillsModal({ open, onClose, onReprint, showToast }) {
           />
         )}
       </div>
+
+      {editTarget && (
+        <InvoiceEditModal
+          invoice={editTarget}
+          showToast={showToast}
+          onClose={() => setEditTarget(null)}
+          onSaved={(updated) => {
+            setEditTarget(null);
+            setOrders((prev) => prev.map((o) => (o.orderId === updated?.orderId ? updated : o)));
+          }}
+        />
+      )}
     </Modal>
   );
 }
