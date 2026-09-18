@@ -10,11 +10,13 @@ import api, { money, fmtDate, todayISO, monthStartISO, financialYearStartISO, AP
 import { exportPurchaseToWord, exportPurchaseOrderToWord } from '../lib/exporters';
 import { getProductUnitOptions } from './POSTerminal';
 import { ProductFormModal } from './InventoryManager';
+import { PartyFormModal } from './CustomerVendorLedger';
 import InvoiceEditModal from './InvoiceEditModal';
 import {
   Panel, SectionHeader, Button, Modal, Field, Input, Select, Textarea,
   Badge, Money, Spinner, EmptyState, DateRange, StatTile, DataTable, cx, SearchInput
 } from '../lib/ui';
+import { isWholeNumberUnit } from '../lib/units';
 
 const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Cheque'];
 
@@ -1593,6 +1595,13 @@ function NewPurchaseModal({
   const [loading, setLoading] = useState(false);
   const [activePickerIndex, setActivePickerIndex] = useState(null);
   const [newProductLineIndex, setNewProductLineIndex] = useState(null);
+  // showVendorForm opens the real "New Vendor" form from Parties when
+  // "+ Create New Vendor…" is picked in the dropdown.
+  const [showVendorForm, setShowVendorForm] = useState(false);
+  // Vendors created via "+ Create new vendor" below, ahead of the parent's
+  // own `vendors` prop catching up on its next refetch.
+  const [addedVendors, setAddedVendors] = useState([]);
+  const allVendors = useMemo(() => [...addedVendors, ...vendors], [addedVendors, vendors]);
 
   // Vendor Information & Auto-fill
   const [selectedVendorId, setSelectedVendorId] = useState('');
@@ -1729,29 +1738,42 @@ function NewPurchaseModal({
 
   const isSoftMoney = ['UPI', 'Card', 'Net Banking', 'Bank Transfer', 'Cheque'].includes(paymentMode);
 
-  // Vendor selection change
-  const handleVendorChange = (id) => {
-    setSelectedVendorId(id);
-    if (!id) {
-      setVendorName('');
-      setVendorPhone('');
-      setVendorGstin('');
-      setVendorPan('');
-      setVendorAddress('');
-      setVendorState('');
-      setVendorStateCode('');
+  // Vendor selection
+  const handleSelectVendor = (ven) => {
+    setSelectedVendorId(ven.id);
+    setVendorName(ven.name || '');
+    setVendorPhone(ven.phone || '');
+    setVendorGstin(ven.gstin || '');
+    setVendorPan(ven.pan || '');
+    setVendorAddress(ven.address || '');
+    setVendorState(ven.state || '');
+    setVendorStateCode(ven.stateCode || '');
+  };
+
+  const clearSelectedVendor = () => {
+    setSelectedVendorId('');
+    setVendorName('');
+    setVendorPhone('');
+    setVendorGstin('');
+    setVendorPan('');
+    setVendorAddress('');
+    setVendorState('');
+    setVendorStateCode('');
+  };
+
+  // Dropdown onChange — the last option ("__new__") opens the real
+  // Parties create-vendor form instead of selecting a party.
+  const handleVendorDropdownChange = (value) => {
+    if (value === '__new__') {
+      setShowVendorForm(true);
       return;
     }
-    const ven = vendors.find((v) => v.id === id);
-    if (ven) {
-      setVendorName(ven.name || '');
-      setVendorPhone(ven.phone || '');
-      setVendorGstin(ven.gstin || '');
-      setVendorPan(ven.pan || '');
-      setVendorAddress(ven.address || '');
-      setVendorState(ven.state || '');
-      setVendorStateCode(ven.stateCode || '');
+    if (!value) {
+      clearSelectedVendor();
+      return;
     }
+    const ven = allVendors.find((v) => v.id === value);
+    if (ven) handleSelectVendor(ven);
   };
 
   // Product selection
@@ -1813,7 +1835,10 @@ function NewPurchaseModal({
   const handleItemChange = (index, field, value) => {
     setItems((prev) => {
       const next = [...prev];
-      const updated = { ...next[index], [field]: value };
+      // Whole-number units (pcs, box, dozen, ...) can't carry a fractional
+      // received quantity — same rule Billing enforces on the way out.
+      const cleanValue = field === 'qty' && isWholeNumberUnit(next[index]?.unit) ? String(value).replace(/\./g, '') : value;
+      const updated = { ...next[index], [field]: cleanValue };
       const qty = Number(updated.qty) || 0;
       const rate = Number(updated.rate) || 0;
       const taxRate = Number(updated.taxRate) || 0;
@@ -2112,6 +2137,9 @@ function NewPurchaseModal({
       if (res.data?.accountingError) {
         showToast(`Purchase saved, but accounting note: ${res.data.accountingError}`, 'error');
       }
+      if (Array.isArray(res.data?.batchNoWarnings) && res.data.batchNoWarnings.length) {
+        res.data.batchNoWarnings.forEach((w) => showToast(w, 'error'));
+      }
       showToast(res.message || 'Vendor purchase invoice recorded successfully.');
       onSaved();
     } catch (err) {
@@ -2152,28 +2180,28 @@ function NewPurchaseModal({
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <Field label="Select Registered Vendor">
-                <Select
-                  value={selectedVendorId}
-                  disabled={Boolean(poContext)}
-                  onChange={(e) => handleVendorChange(e.target.value)}
-                >
-                  <option value="">— Unregistered / Walk-in Supplier —</option>
-                  {(vendors || []).map((v) => (
-                    <option key={v.id} value={v.id}>
-                      {v.name} {Number(v.outstandingPayable) > 0 ? `(Payable: ${money(v.outstandingPayable)})` : ''}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-
-              <Field label="Vendor / Supplier Name *">
-                <Input
-                  value={vendorName}
-                  onChange={(e) => setVendorName(e.target.value)}
-                  placeholder="Supplier / Company Name"
-                  required
-                />
+              <Field label="Vendor *" className="md:col-span-2">
+                {poContext ? (
+                  <div className="p-1.5 px-2.5 rounded-xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/50 flex items-center justify-between gap-2">
+                    <div className="min-w-0 pr-1">
+                      <div className="font-bold text-xs text-[color:var(--text-primary)] truncate">{vendorName}</div>
+                      {vendorPhone && <div className="text-[10px] text-[color:var(--text-muted)] font-mono">{vendorPhone}</div>}
+                    </div>
+                  </div>
+                ) : (
+                  <Select
+                    value={selectedVendorId}
+                    onChange={(e) => handleVendorDropdownChange(e.target.value)}
+                  >
+                    <option value="">— Select a Vendor —</option>
+                    <option value="__new__">+ Create New Vendor…</option>
+                    {allVendors.map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.name} {Number(v.outstandingPayable) > 0 ? `(Payable: ${money(v.outstandingPayable)})` : ''}
+                      </option>
+                    ))}
+                  </Select>
+                )}
               </Field>
 
               <Field label="Vendor Phone Number">
@@ -2552,7 +2580,7 @@ function NewPurchaseModal({
                           <td className="py-2 px-3">
                             <Input
                               type="number"
-                              step="any"
+                              step={isWholeNumberUnit(item.unit) ? '1' : 'any'}
                               value={item.qty}
                               onChange={(e) => handleItemChange(idx, 'qty', e.target.value)}
                               className="text-right text-xs font-mono font-bold"
@@ -2970,6 +2998,22 @@ function NewPurchaseModal({
           onProductCreated?.(newProduct);
         }}
       />
+
+      <PartyFormModal
+        open={showVendorForm}
+        isCustomer={false}
+        editing={null}
+        groups={[]}
+        onClose={() => setShowVendorForm(false)}
+        showToast={showToast}
+        onSaved={(newVendor) => {
+          setShowVendorForm(false);
+          if (newVendor) {
+            setAddedVendors((prev) => [newVendor, ...prev]);
+            handleSelectVendor(newVendor);
+          }
+        }}
+      />
     </>
   );
 }
@@ -3030,6 +3074,11 @@ function PurchaseOrderModal({
   const [saving, setSaving] = useState(false);
   const [activePickerIndex, setActivePickerIndex] = useState(null);
   const [newProductLineIndex, setNewProductLineIndex] = useState(null);
+  // showVendorForm opens the real "New Vendor" form from Parties when
+  // "+ Create New Vendor…" is picked in the dropdown.
+  const [showVendorForm, setShowVendorForm] = useState(false);
+  const [addedVendors, setAddedVendors] = useState([]);
+  const allVendors = useMemo(() => [...addedVendors, ...vendors], [addedVendors, vendors]);
 
   useEffect(() => {
     if (open) {
@@ -3049,22 +3098,35 @@ function PurchaseOrderModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const handleVendorChange = (id) => {
-    setSelectedVendorId(id);
-    if (!id) {
-      setVendorName('');
-      setVendorPhone('');
-      setVendorGstin('');
-      setVendorAddress('');
+  const handleSelectVendor = (ven) => {
+    setSelectedVendorId(ven.id);
+    setVendorName(ven.name || '');
+    setVendorPhone(ven.phone || '');
+    setVendorGstin(ven.gstin || '');
+    setVendorAddress(ven.address || '');
+  };
+
+  const clearSelectedVendor = () => {
+    setSelectedVendorId('');
+    setVendorName('');
+    setVendorPhone('');
+    setVendorGstin('');
+    setVendorAddress('');
+  };
+
+  // Dropdown onChange — the last option ("__new__") opens the real
+  // Parties create-vendor form instead of selecting a party.
+  const handleVendorDropdownChange = (value) => {
+    if (value === '__new__') {
+      setShowVendorForm(true);
       return;
     }
-    const ven = vendors.find((v) => v.id === id);
-    if (ven) {
-      setVendorName(ven.name || '');
-      setVendorPhone(ven.phone || '');
-      setVendorGstin(ven.gstin || '');
-      setVendorAddress(ven.address || '');
+    if (!value) {
+      clearSelectedVendor();
+      return;
     }
+    const ven = allVendors.find((v) => v.id === value);
+    if (ven) handleSelectVendor(ven);
   };
 
   const addLine = () => setLines((ls) => [...ls, blankPOLine()]);
@@ -3106,7 +3168,8 @@ function PurchaseOrderModal({
   const handleLineChange = (index, field, value) => {
     setLines((prev) => {
       const next = [...prev];
-      const updated = { ...next[index], [field]: value };
+      const cleanValue = field === 'qty' && isWholeNumberUnit(next[index]?.unit) ? String(value).replace(/\./g, '') : value;
+      const updated = { ...next[index], [field]: cleanValue };
       const qty = Number(updated.qty) || 0;
       const rate = Number(updated.rate) || 0;
       const taxRate = Number(updated.taxRate) || 0;
@@ -3234,24 +3297,19 @@ function PurchaseOrderModal({
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <Field label="Select Registered Vendor">
-                <Select value={selectedVendorId} onChange={(e) => handleVendorChange(e.target.value)}>
-                  <option value="">— Unregistered / Custom Vendor —</option>
-                  {(vendors || []).map((v) => (
+              <Field label="Vendor *" className="md:col-span-2">
+                <Select
+                  value={selectedVendorId}
+                  onChange={(e) => handleVendorDropdownChange(e.target.value)}
+                >
+                  <option value="">— Select a Vendor —</option>
+                  <option value="__new__">+ Create New Vendor…</option>
+                  {allVendors.map((v) => (
                     <option key={v.id} value={v.id}>
                       {v.name} {Number(v.outstandingPayable) > 0 ? `(Payable: ${money(v.outstandingPayable)})` : ''}
                     </option>
                   ))}
                 </Select>
-              </Field>
-
-              <Field label="Vendor / Supplier Name *" required>
-                <Input
-                  value={vendorName}
-                  onChange={(e) => setVendorName(e.target.value)}
-                  placeholder="Supplier / Company Name"
-                  required
-                />
               </Field>
 
               <Field label="Vendor Contact Phone">
@@ -3367,7 +3425,7 @@ function PurchaseOrderModal({
                         <td className="py-2 px-3">
                           <Input
                             type="number"
-                            step="any"
+                            step={isWholeNumberUnit(line.unit) ? '1' : 'any'}
                             min="0.01"
                             value={line.qty}
                             onChange={(e) => handleLineChange(idx, 'qty', e.target.value)}
@@ -3522,6 +3580,22 @@ function PurchaseOrderModal({
             handleProductSelect(newProductLineIndex, createdProduct);
           }
           setNewProductLineIndex(null);
+        }}
+      />
+
+      <PartyFormModal
+        open={showVendorForm}
+        isCustomer={false}
+        editing={null}
+        groups={[]}
+        onClose={() => setShowVendorForm(false)}
+        showToast={showToast}
+        onSaved={(newVendor) => {
+          setShowVendorForm(false);
+          if (newVendor) {
+            setAddedVendors((prev) => [newVendor, ...prev]);
+            handleSelectVendor(newVendor);
+          }
         }}
       />
     </>

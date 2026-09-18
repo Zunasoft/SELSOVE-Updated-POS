@@ -10,6 +10,27 @@ const formatUrl = (url) => {
 export const API_BASE = `${formatUrl(ADMIN_BE)}/pos`;
 
 /**
+ * Uploaded images (product photos, company logo, ...) come back from the
+ * backend as a path relative to the API server, e.g.
+ * `/uploads/products/<shop>/<file>` — never an absolute URL. Anything that
+ * renders one directly (an `<img>` on a printed receipt/invoice, in
+ * particular) needs it resolved against the API host first, or the image
+ * silently 404s against the POS frontend's own origin instead. A value that's
+ * already absolute (http(s)/data/blob) or empty passes through unchanged.
+ */
+export const resolveAssetUrl = (url) => {
+  const trimmed = typeof url === 'string' ? url.trim() : '';
+  if (!trimmed) return trimmed;
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('data:') || trimmed.startsWith('blob:')) {
+    return trimmed;
+  }
+  if (trimmed.startsWith('/')) {
+    return `${API_BASE.replace('/api/pos', '')}${trimmed}`;
+  }
+  return trimmed;
+};
+
+/**
  * Every request carries the tenant's JWT and database name so the backend can
  * resolve the isolated store. Session credentials live in localStorage and are
  * read per-request, which keeps the client working after a page refresh.
@@ -104,10 +125,29 @@ export const api = {
 
 const inr = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const inrCompact = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 });
+const inrCache = {};
 
-export const money = (value, { decimals = true, sign = false } = {}) => {
+const getInrFormatter = (digits) => {
+  if (digits === 2) return inr;
+  if (digits === 0) return inrCompact;
+  if (!inrCache[digits]) {
+    inrCache[digits] = new Intl.NumberFormat('en-IN', {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits
+    });
+  }
+  return inrCache[digits];
+};
+
+export const money = (value, { decimals = true, fractionDigits, sign = false } = {}) => {
   const n = Number(value) || 0;
-  const body = decimals ? inr.format(Math.abs(n)) : inrCompact.format(Math.abs(n));
+  const digits = typeof fractionDigits === 'number'
+    ? fractionDigits
+    : (typeof decimals === 'number'
+        ? decimals
+        : (decimals ? 2 : 0));
+  const formatter = getInrFormatter(digits);
+  const body = formatter.format(Math.abs(n));
   const prefix = n < 0 ? '−' : sign && n > 0 ? '+' : '';
   return `${prefix}₹${body}`;
 };

@@ -3,12 +3,20 @@ import { Printer, Tag, Check, X, Sliders } from 'lucide-react';
 import { Modal, Button, Field, Input, Select, Money } from '../lib/ui';
 import { money } from '../lib/api';
 
-/** Simple SVG Code 128 barcode pattern generator */
+/**
+ * Simple SVG Code 128 barcode pattern generator.
+ *
+ * The bars are drawn left-to-right starting at 0, so a short code (which
+ * doesn't fill the minimum 160-wide viewBox) used to leave its bars hugging
+ * the left edge with empty space on the right — visually "tilted" instead of
+ * centered. Fixed by measuring the actual bar width first, then centering
+ * that block inside whichever is wider: the content itself, or the minimum.
+ */
 function BarcodeSVG({ value = '123456789012', height = 40 }) {
   const str = String(value || '000000000');
   // Simple deterministic pseudo-barcode pattern for preview and print
   const bars = [];
-  let x = 10;
+  let x = 0;
   for (let i = 0; i < str.length; i++) {
     const code = str.charCodeAt(i);
     const w1 = (code % 3) + 1;
@@ -21,9 +29,13 @@ function BarcodeSVG({ value = '123456789012', height = 40 }) {
     x += w3 * 1.5 + w1 * 1.2;
   }
 
+  const contentWidth = x;
+  const viewWidth = Math.max(contentWidth + 20, 160);
+  const offsetX = (viewWidth - contentWidth) / 2;
+
   return (
-    <svg viewBox={`0 0 ${Math.max(x + 10, 160)} ${height}`} className="w-full h-auto max-h-12 overflow-visible">
-      {bars}
+    <svg viewBox={`0 0 ${viewWidth} ${height}`} className="w-full h-auto max-h-12 overflow-visible">
+      <g transform={`translate(${offsetX}, 0)`}>{bars}</g>
     </svg>
   );
 }
@@ -38,6 +50,11 @@ export default function BarcodePrinterModal({ product, companyName, onClose, sho
   const [showPrice, setShowPrice] = useState(true);
   const [selectedBatchId, setSelectedBatchId] = useState('');
   const [showBatchInfo, setShowBatchInfo] = useState(true);
+  // What the scannable pattern (and the printed code line) actually encodes —
+  // the product's barcode, or its SKU when there's no barcode worth scanning
+  // (a service item, or a shop that identifies stock by SKU internally).
+  const [codeSource, setCodeSource] = useState('barcode');
+  const [showSkuLine, setShowSkuLine] = useState(false);
 
   const allBarcodes = React.useMemo(() => {
     let list = [];
@@ -55,11 +72,16 @@ export default function BarcodePrinterModal({ product, companyName, onClose, sho
   useEffect(() => {
     setSelectedBatchId('');
     setSelectedBarcode(product?.barcode || allBarcodes[0] || '');
+    // A product with no real barcode (just the auto-generated fallback) has
+    // nothing meaningful to scan — default straight to printing its SKU instead.
+    setCodeSource(product?.barcode ? 'barcode' : (product?.sku ? 'sku' : 'barcode'));
+    setShowSkuLine(false);
   }, [product?.id, allBarcodes]);
 
   if (!product) return null;
 
   const activeBarcode = selectedBarcode || product.barcode || allBarcodes[0] || '123456789';
+  const activeCode = codeSource === 'sku' && product.sku ? product.sku : activeBarcode;
   const sellableBatches = product.trackBatches
     ? (product.batches || []).filter((b) => Number(b.qty) > 0)
     : [];
@@ -73,6 +95,27 @@ export default function BarcodePrinterModal({ product, companyName, onClose, sho
       return;
     }
 
+    // Same variable-width bar layout as the on-screen BarcodeSVG preview, so
+    // print output matches what was previewed — and centered the same way:
+    // measure the actual content width first, then center that block inside
+    // the (at-least-160-wide) viewBox instead of hugging the left edge.
+    const codeForSvg = activeCode || '123456';
+    let barX = 0;
+    const barRects = [];
+    for (let idx = 0; idx < codeForSvg.length; idx++) {
+      const code = codeForSvg.charCodeAt(idx);
+      const w1 = (code % 3) + 1;
+      const w2 = ((code * 2) % 3) + 1;
+      const w3 = ((code * 3) % 3) + 1;
+      barRects.push(`<rect x="${barX}" y="0" width="${w1 * 1.5}" height="40" fill="#000" />`);
+      barX += w1 * 1.5 + w2 * 1.2;
+      barRects.push(`<rect x="${barX}" y="0" width="${w3 * 1.5}" height="40" fill="#000" />`);
+      barX += w3 * 1.5 + w1 * 1.2;
+    }
+    const barContentWidth = barX;
+    const barViewWidth = Math.max(barContentWidth + 20, 160);
+    const barOffsetX = (barViewWidth - barContentWidth) / 2;
+
     const labelsHTML = Array.from({ length: Number(quantity) || 1 })
       .map(
         (_, i) => `
@@ -81,18 +124,12 @@ export default function BarcodePrinterModal({ product, companyName, onClose, sho
           <div class="prod-name">${product.name}</div>
           ${showRegionalName && (product.regionalName || product.printName) ? `<div class="regional-name">${product.regionalName || product.printName}</div>` : ''}
           <div class="barcode-wrapper">
-            <svg viewBox="0 0 160 40" class="barcode-svg">
-              ${Array.from({ length: (activeBarcode || '123456').length })
-                .map((_, idx) => {
-                  const code = (activeBarcode || '123456').charCodeAt(idx);
-                  const x = 10 + idx * 11;
-                  return `<rect x="${x}" y="0" width="${(code % 3) + 1}" height="40" fill="#000" />
-                          <rect x="${x + (code % 3) + 3}" y="0" width="${((code * 2) % 3) + 1}" height="40" fill="#000" />`;
-                })
-                .join('')}
+            <svg viewBox="0 0 ${barViewWidth} 40" class="barcode-svg">
+              <g transform="translate(${barOffsetX}, 0)">${barRects.join('')}</g>
             </svg>
           </div>
-          <div class="barcode-num">${activeBarcode}</div>
+          <div class="barcode-num">${activeCode}</div>
+          ${showSkuLine && codeSource !== 'sku' && product.sku ? `<div class="sku-row">SKU: ${product.sku}</div>` : ''}
           ${showBatchInfo && selectedBatch ? `<div class="batch-row">Batch: ${selectedBatch.batchNo}${selectedBatch.expiryDate ? ` · Exp: ${String(selectedBatch.expiryDate).slice(0, 10)}` : ''}</div>` : ''}
           <div class="price-row">
             ${showMrp && product.mrp ? `<span class="mrp">MRP: ₹${product.mrp}</span>` : ''}
@@ -133,6 +170,7 @@ export default function BarcodePrinterModal({ product, companyName, onClose, sho
     .barcode-svg { width: 100%; height: 100%; }
     .barcode-num { font-size: 9px; font-family: monospace; letter-spacing: 1px; }
     .batch-row { font-size: 7.5px; color: #444; margin-top: 1px; }
+    .sku-row { font-size: 7.5px; color: #444; margin-top: 1px; font-family: monospace; }
     .price-row { display: flex; justify-content: space-around; width: 100%; font-size: 9px; font-weight: bold; margin-top: 2px; }
     .mrp { text-decoration: line-through; color: #555; }
     .sale-price { color: #000; font-size: 10px; }
@@ -164,7 +202,9 @@ export default function BarcodePrinterModal({ product, companyName, onClose, sho
             {(product.regionalName || product.printName) && (
               <p className="text-xs text-indigo-600 font-medium">{product.regionalName || product.printName}</p>
             )}
-            <p className="text-xs text-[color:var(--text-muted)] font-mono mt-0.5">Barcode: {product.barcode}</p>
+            <p className="text-xs text-[color:var(--text-muted)] font-mono mt-0.5">
+              Barcode: {product.barcode || '—'} {product.sku && <span className="ml-2">· SKU: {product.sku}</span>}
+            </p>
           </div>
           <div className="text-right">
             <div className="text-sm font-bold text-emerald-600">{money(labelPrice)}</div>
@@ -172,7 +212,16 @@ export default function BarcodePrinterModal({ product, companyName, onClose, sho
           </div>
         </div>
 
-        {allBarcodes.length > 1 && (
+        {product.sku && (
+          <Field label="What Should the Label Encode?" hint="Choose whether the scannable code and printed number are the barcode or the SKU">
+            <Select value={codeSource} onChange={(e) => setCodeSource(e.target.value)}>
+              <option value="barcode">Barcode Number</option>
+              <option value="sku">SKU Code</option>
+            </Select>
+          </Field>
+        )}
+
+        {codeSource === 'barcode' && allBarcodes.length > 1 && (
           <Field label="Select Barcode to Print" hint="This product has multiple barcodes configured">
             <Select value={activeBarcode} onChange={(e) => setSelectedBarcode(e.target.value)}>
               {allBarcodes.map((bc, idx) => (
@@ -237,6 +286,12 @@ export default function BarcodePrinterModal({ product, companyName, onClose, sho
                 <span>Show Batch No. / Expiry</span>
               </label>
             )}
+            {codeSource === 'barcode' && product.sku && (
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={showSkuLine} onChange={(e) => setShowSkuLine(e.target.checked)} className="rounded text-indigo-600" />
+                <span>Also Show SKU Code</span>
+              </label>
+            )}
           </div>
         </div>
 
@@ -248,9 +303,12 @@ export default function BarcodePrinterModal({ product, companyName, onClose, sho
             <div className="text-[10px] text-indigo-700 font-medium">{product.regionalName || product.printName}</div>
           )}
           <div className="w-full py-1">
-            <BarcodeSVG value={activeBarcode} />
+            <BarcodeSVG value={activeCode} />
           </div>
-          <div className="text-[10px] font-mono tracking-widest text-slate-700">{activeBarcode}</div>
+          <div className="text-[10px] font-mono tracking-widest text-slate-700">{activeCode}</div>
+          {showSkuLine && codeSource !== 'sku' && product.sku && (
+            <div className="text-[9px] text-slate-500 font-mono">SKU: {product.sku}</div>
+          )}
           {showBatchInfo && selectedBatch && (
             <div className="text-[9px] text-slate-500">
               Batch: {selectedBatch.batchNo}{selectedBatch.expiryDate ? ` · Exp: ${String(selectedBatch.expiryDate).slice(0, 10)}` : ''}

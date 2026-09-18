@@ -4,7 +4,7 @@ import {
   Building2, User, Phone, Mail, MapPin, FileText, CheckCircle2,
   AlertCircle, Truck, Package, QrCode, CreditCard, ShieldCheck
 } from 'lucide-react';
-import { money, fmtDate, fmtDateTime } from '../lib/api';
+import { money, fmtDate, fmtDateTime, resolveAssetUrl } from '../lib/api';
 import { renderCustomDocumentHtml } from '../lib/exporters';
 
 export const DEFAULT_INVOICE_SECTIONS = [
@@ -34,6 +34,7 @@ export const INVOICE_THEMES = [
       showTransportMeta: true,
       showItemHsn: true,
       showItemUnit: true,
+      showWarranty: true,
       showItemTaxBreakup: true,
       showHsnSummaryTable: true,
       showBankDetails: true,
@@ -81,6 +82,7 @@ export const INVOICE_THEMES = [
       showTransportMeta: false,
       showItemHsn: true,
       showItemUnit: true,
+      showWarranty: true,
       showItemTaxBreakup: true,
       showHsnSummaryTable: false,
       showBankDetails: true,
@@ -128,6 +130,7 @@ export const INVOICE_THEMES = [
       showTransportMeta: false,
       showItemHsn: true,
       showItemUnit: true,
+      showWarranty: true,
       showItemTaxBreakup: true,
       showHsnSummaryTable: true,
       showBankDetails: true,
@@ -175,6 +178,7 @@ export const INVOICE_THEMES = [
       showTransportMeta: true,
       showItemHsn: true,
       showItemUnit: true,
+      showWarranty: true,
       showItemTaxBreakup: true,
       showHsnSummaryTable: true,
       showBankDetails: true,
@@ -216,12 +220,13 @@ export const INVOICE_THEMES = [
     defaults: {
       accentColor: 'blue',
       paperSize: 'A5',
-      showInvoiceLogo: false,
+      showInvoiceLogo: true,
       showCompanyTaxMeta: false,
       showConsigneeShipTo: false,
       showTransportMeta: false,
       showItemHsn: true,
       showItemUnit: false,
+      showWarranty: true,
       showItemTaxBreakup: false,
       showHsnSummaryTable: false,
       showBankDetails: true,
@@ -311,7 +316,9 @@ export const SAMPLE_INVOICE_DATA = {
       price: 12000.00,
       discount: 300.00,
       taxRate: 18,
-      total: 13806.00
+      total: 13806.00,
+      serialNo: '8829104512',
+      warrantyEndDate: new Date(Date.now() + 365 * 86400000).toISOString()
     },
     {
       name: 'Thermal 80mm High-Density Receipt Rolls (Box of 50)',
@@ -404,6 +411,9 @@ export function InvoiceDocumentView({
   };
 
   const billing = settings?.billing || {};
+  const decimalPlaces = billing.showMoreDecimals || Number(billing.decimalPlaces) > 2
+    ? Math.min(4, Math.max(2, Number(billing.decimalPlaces) || 3))
+    : 2;
   const currentThemeId = activeTheme || customConfig?.activeInvoiceTemplate || billing.activeInvoiceTemplate || 'corporate_blue';
   const customTemplates = (billing.customTemplates || []).filter((t) => t.type === 'invoice');
   const selectedCustom = customTemplates.find((t) => t.id === currentThemeId);
@@ -553,7 +563,7 @@ export function InvoiceDocumentView({
       <div className="flex items-start gap-3.5">
         {cfg.showInvoiceLogo && company.logoUrl && (
           <img
-            src={company.logoUrl}
+            src={resolveAssetUrl(company.logoUrl)}
             alt="Logo"
             className="h-12 w-12 rounded-lg object-contain border border-slate-100 shrink-0"
           />
@@ -809,6 +819,14 @@ export function InvoiceDocumentView({
                       (Disc: -₹{discount.toFixed(2)})
                     </div>
                   )}
+                  {cfg.showWarranty && (it.serialNo || it.warrantyEndDate) && (
+                    <div className="text-[10px] text-slate-500 font-normal leading-tight">
+                      {it.serialNo && <div>S/N: {it.serialNo}</div>}
+                      {it.warrantyEndDate && (
+                        <div>Warranty till {new Date(it.warrantyEndDate).toLocaleDateString('en-IN')}</div>
+                      )}
+                    </div>
+                  )}
                 </td>
                 {cfg.showItemHsn && (
                   <td className="py-2.5 px-3 text-center font-mono text-slate-600 text-[11px]">
@@ -819,13 +837,13 @@ export function InvoiceDocumentView({
                 {cfg.showItemUnit && (
                   <td className="py-2.5 px-3 text-left text-slate-500">{it.unit || 'pcs'}</td>
                 )}
-                <td className="py-2.5 px-3 text-right font-mono">{price.toFixed(2)}</td>
-                <td className="py-2.5 px-3 text-right font-mono">{taxable.toFixed(2)}</td>
+                <td className="py-2.5 px-3 text-right font-mono">{price.toFixed(decimalPlaces)}</td>
+                <td className="py-2.5 px-3 text-right font-mono">{taxable.toFixed(decimalPlaces)}</td>
                 {cfg.showItemTaxBreakup && (
                   <td className="py-2.5 px-3 text-right font-mono text-[11px]">{taxRate}%</td>
                 )}
                 <td className="py-2.5 px-3 text-right font-mono font-bold text-slate-950">
-                  {lineTotal.toFixed(2)}
+                  {lineTotal.toFixed(decimalPlaces)}
                 </td>
               </tr>
             );
@@ -870,45 +888,45 @@ export function InvoiceDocumentView({
         <div className="space-y-2 text-xs">
           <div className="flex justify-between py-1 border-b border-slate-100">
             <span className="text-slate-600">{labels.subtotalLabel || 'Total Taxable Amount:'}</span>
-            <span className="font-mono font-semibold">₹{totalTaxableValue.toFixed(2)}</span>
+            <span className="font-mono font-semibold">₹{totalTaxableValue.toFixed(decimalPlaces)}</span>
           </div>
 
           {invoice.discount > 0 && (
             <div className="flex justify-between py-1 border-b border-slate-100 text-emerald-700 font-semibold">
               <span>{labels.discountLabel || 'Special Discount:'}</span>
-              <span className="font-mono">-₹{Number(invoice.discount).toFixed(2)}</span>
+              <span className="font-mono">-₹{Number(invoice.discount).toFixed(decimalPlaces)}</span>
             </div>
           )}
 
           {totalTaxAmt > 0 && (
             <div className="flex justify-between py-1 border-b border-slate-100">
               <span className="text-slate-600">{labels.taxLabel || 'Total GST:'}</span>
-              <span className="font-mono font-semibold">₹{totalTaxAmt.toFixed(2)}</span>
+              <span className="font-mono font-semibold">₹{totalTaxAmt.toFixed(decimalPlaces)}</span>
             </div>
           )}
 
           {invoice.roundOff !== undefined && invoice.roundOff !== 0 && (
             <div className="flex justify-between py-1 border-b border-slate-100 text-slate-500">
               <span>Round Off:</span>
-              <span className="font-mono">{invoice.roundOff > 0 ? `+₹${invoice.roundOff.toFixed(2)}` : `-₹${Math.abs(invoice.roundOff).toFixed(2)}`}</span>
+              <span className="font-mono">{invoice.roundOff > 0 ? `+₹${invoice.roundOff.toFixed(decimalPlaces)}` : `-₹${Math.abs(invoice.roundOff).toFixed(decimalPlaces)}`}</span>
             </div>
           )}
 
           <div className={`flex justify-between py-2.5 border-t-2 border-b-2 font-black text-sm ${accent.border} ${accent.textMain}`}>
             <span>{labels.totalLabel || 'TOTAL INVOICE VALUE:'}</span>
-            <span className="text-base font-mono">₹{Number(invoice.total).toFixed(2)}</span>
+            <span className="text-base font-mono">₹{Number(invoice.total).toFixed(decimalPlaces)}</span>
           </div>
 
           {(paidAmt > 0 || dueAmt > 0) && (
             <div className="space-y-1 pt-1 font-mono text-xs">
               <div className="flex justify-between text-emerald-700 font-bold">
                 <span>Amount Paid:</span>
-                <span>₹{paidAmt.toFixed(2)}</span>
+                <span>₹{paidAmt.toFixed(decimalPlaces)}</span>
               </div>
               {dueAmt > 0 && (
                 <div className="flex justify-between text-rose-700 font-bold">
                   <span>Balance Due:</span>
-                  <span>₹{dueAmt.toFixed(2)}</span>
+                  <span>₹{dueAmt.toFixed(decimalPlaces)}</span>
                 </div>
               )}
             </div>
@@ -957,19 +975,19 @@ export function InvoiceDocumentView({
           {Object.entries(hsnSummary).map(([hsn, v]) => (
             <tr key={hsn}>
               <td className="py-1.5 px-2.5 border-r border-slate-100 font-bold">{hsn}</td>
-              <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.taxable.toFixed(2)}</td>
+              <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.taxable.toFixed(decimalPlaces)}</td>
               {billing.interState ? (
                 <>
                   <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.rate}%</td>
-                  <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.igst.toFixed(2)}</td>
+                  <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.igst.toFixed(decimalPlaces)}</td>
                 </>
               ) : (
                 <>
-                  <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.cgst.toFixed(2)}</td>
-                  <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.sgst.toFixed(2)}</td>
+                  <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.cgst.toFixed(decimalPlaces)}</td>
+                  <td className="py-1.5 px-2.5 border-r border-slate-100 text-right">{v.sgst.toFixed(decimalPlaces)}</td>
                 </>
               )}
-              <td className="py-1.5 px-2.5 text-right font-bold">{v.tax.toFixed(2)}</td>
+              <td className="py-1.5 px-2.5 text-right font-bold">{v.tax.toFixed(decimalPlaces)}</td>
             </tr>
           ))}
         </tbody>

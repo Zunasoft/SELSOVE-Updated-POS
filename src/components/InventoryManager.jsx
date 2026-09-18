@@ -3,7 +3,8 @@ import {
   Package, Plus, Edit3, Trash2, Upload, AlertTriangle, Barcode, Tag,
   Boxes, History, IndianRupee, Save, Printer, Layers, ScanLine, Building2,
   FileSpreadsheet, Download, RefreshCw, Eye, CheckCircle, ArrowRightLeft,
-  XCircle, Image as ImageIcon, Sliders, Scissors, FileText, Check, Search
+  XCircle, Image as ImageIcon, Sliders, Scissors, FileText, Check, Search,
+  ChevronLeft, ArrowRight
 } from 'lucide-react';
 
 import api, { money, API_BASE, fmtDateTime } from '../lib/api';
@@ -15,6 +16,7 @@ import { exportReport } from '../lib/exporters';
 import BarcodePrinterModal from './BarcodePrinterModal';
 import { getProductAutoVisual, getProductImageUrl, fetchRealProductPhoto, formatUnitBreakdown } from './POSTerminal';
 import { getCategoryTheme, AVAILABLE_CATEGORY_COLORS, getNextAvailableColor } from '../lib/categoryTheme';
+import { isWholeNumberUnit } from '../lib/units';
 
 const TABS = [
   { id: 'dashboard', label: 'Dashboard', icon: Package },
@@ -25,6 +27,7 @@ const TABS = [
   { id: 'adjust', label: 'Stock Adjustment', icon: Boxes },
   { id: 'history', label: 'Stock History', icon: History },
   { id: 'batches', label: 'Batch Tracking', icon: AlertTriangle },
+  { id: 'serials', label: 'Serial Tracking', icon: ScanLine },
   { id: 'pricesheet', label: 'Price Sheets', icon: IndianRupee },
   { id: 'importexport', label: 'Import / Export', icon: FileSpreadsheet }
 ];
@@ -162,7 +165,7 @@ export default function InventoryManager({ products, categories, onRefresh, show
       )}
 
       {tab === 'adjust' && (
-        <AdjustTab products={products} showToast={showToast} onRefresh={refreshAll} />
+        <AdjustTab products={products} warehouses={warehouses} showToast={showToast} onRefresh={refreshAll} />
       )}
 
       {tab === 'history' && <HistoryTab products={products} />}
@@ -175,6 +178,8 @@ export default function InventoryManager({ products, categories, onRefresh, show
           storeNearExpiryDays={posSettings.nearExpiryDays}
         />
       )}
+
+      {tab === 'serials' && <SerialsTab products={products} />}
 
       {tab === 'pricesheet' && (
         <PricesheetTab products={products} categories={categories} showToast={showToast} onRefresh={refreshAll} />
@@ -521,6 +526,9 @@ let rowKeySeq = 0;
 const genRowKey = () => `row_${Date.now()}_${rowKeySeq++}`;
 const randomBarcode = () => Math.floor(1000000000 + Math.random() * 9000000000).toString();
 
+// Mirrors DEFAULT_CUSTOM_LABELS in the backend's controllers/serials.js.
+const DEFAULT_SERIAL_CUSTOM_LABELS = ['Custom Field 1', 'Custom Field 2', 'Custom Field 3', 'Custom Field 4'];
+
 const blankProduct = (categories) => ({
   name: '',
   regionalName: '',
@@ -563,7 +571,21 @@ const blankProduct = (categories) => ({
   altUnits: [],
   trackBatches: false,
   batches: [],
-  nearExpiryDays: ''
+  nearExpiryDays: '',
+  // Legacy single-string serial list, still used by the Stock Adjustment
+  // screen's quick "type comma-separated serials" flow — left untouched.
+  trackSerial: false,
+  serialNumbers: [],
+  // Per-unit serial sheet (Serial No + IMEI + 4 custom fields), managed from
+  // the popup this screen opens once "Track Serial Numbers" is checked.
+  trackSerials: false,
+  serials: [],
+  serialCustomLabels: [...DEFAULT_SERIAL_CUSTOM_LABELS],
+  // Warranty — the clock starts at the sale, not when the product was added
+  // to the catalogue (see markSerialSold on the backend).
+  hasWarranty: false,
+  warrantyDurationValue: '12',
+  warrantyDurationUnit: 'months'
 });
 
 /**
@@ -594,6 +616,340 @@ function computeRecipeTotals(ingredients, products) {
 }
 
 /**
+ * Serial Number Sheet — one row per physical unit of stock. Opened from the
+ * Add Product screen once "Track by Serial / IMEI Number" is checked; the
+ * row count always matches the product's current Opening Stock quantity, so
+ * checking a product with 10 units in stock gets exactly 10 rows here.
+ */
+function SerialSheetModal({ open, qty, serials, customLabels, onClose, onSave }) {
+  const [rows, setRows] = useState([]);
+  const [labels, setLabels] = useState(DEFAULT_SERIAL_CUSTOM_LABELS);
+
+  useEffect(() => {
+    if (!open) return;
+    // Keep existing rows by position (so re-opening the sheet doesn't lose
+    // what's already been entered), pad with blank rows if stock went up,
+    // and drop from the end if stock came back down.
+    const base = Array.from({ length: qty }, (_, i) => {
+      const existing = serials[i];
+      return existing
+        ? { ...existing, customFields: Array.isArray(existing.customFields) ? [...existing.customFields] : ['', '', '', ''] }
+        : {
+            id: `new_serial_${Date.now()}_${i}_${Math.floor(Math.random() * 1000)}`,
+            serialNo: '',
+            imei: '',
+            customFields: ['', '', '', ''],
+            status: 'IN_STOCK'
+          };
+    });
+    setRows(base);
+    setLabels(Array.isArray(customLabels) && customLabels.length === 4 ? [...customLabels] : [...DEFAULT_SERIAL_CUSTOM_LABELS]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, qty]);
+
+  const updateRow = (idx, patch) => {
+    setRows((prev) => {
+      const next = [...prev];
+      next[idx] = { ...next[idx], ...patch };
+      return next;
+    });
+  };
+
+  const autoFillAll = () => {
+    setRows((prev) => {
+      const used = new Set(prev.map((r) => (r.serialNo || '').trim()).filter(Boolean));
+      let seq = 0;
+      prev.forEach((r) => {
+        const n = parseInt(r.serialNo, 10);
+        if (!isNaN(n) && String(n) === String(r.serialNo).trim() && n > seq) seq = n;
+      });
+      return prev.map((r) => {
+        if ((r.serialNo || '').trim()) return r;
+        let candidate;
+        do {
+          seq += 1;
+          candidate = String(seq);
+        } while (used.has(candidate));
+        used.add(candidate);
+        return { ...r, serialNo: candidate };
+      });
+    });
+  };
+
+  const duplicateSerials = useMemo(() => {
+    const counts = new Map();
+    rows.forEach((r) => {
+      const v = (r.serialNo || '').trim();
+      if (!v) return;
+      counts.set(v, (counts.get(v) || 0) + 1);
+    });
+    return new Set([...counts.entries()].filter(([, n]) => n > 1).map(([v]) => v));
+  }, [rows]);
+
+  const filledCount = rows.filter((r) => (r.serialNo || '').trim()).length;
+
+  if (!open) return null;
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={`Serial Number Sheet — ${qty} unit${qty === 1 ? '' : 's'}`}
+      subtitle={`${filledCount} of ${qty} serial number(s) entered`}
+      size="xl"
+      footer={
+        <div className="flex items-center justify-between w-full gap-2">
+          <span className="text-[11px] text-[color:var(--text-muted)]">
+            Blank rows get an auto-generated number on save.
+          </span>
+          <div className="flex gap-2">
+            <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
+            <Button
+              type="button"
+              variant="primary"
+              disabled={duplicateSerials.size > 0}
+              onClick={() => onSave(rows, labels)}
+            >
+              Save Serial Sheet
+            </Button>
+          </div>
+        </div>
+      }
+    >
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          {labels.map((lbl, i) => (
+            <Field key={i} label={`Custom Field ${i + 1} Label`}>
+              <Input
+                value={lbl}
+                onChange={(e) => setLabels((prev) => prev.map((l, li) => (li === i ? e.target.value : l)))}
+                placeholder={DEFAULT_SERIAL_CUSTOM_LABELS[i]}
+              />
+            </Field>
+          ))}
+        </div>
+
+        <div className="flex items-center justify-between">
+          {duplicateSerials.size > 0 ? (
+            <span className="text-[11px] font-semibold text-rose-600">
+              Duplicate serial number(s): {[...duplicateSerials].join(', ')} — fix before saving.
+            </span>
+          ) : <span />}
+          <Button type="button" size="sm" variant="secondary" onClick={autoFillAll}>
+            Auto-fill blank Serial Numbers
+          </Button>
+        </div>
+
+        <div className="overflow-x-auto border border-[color:var(--border-subtle)] rounded-lg max-h-[50vh]">
+          <table className="w-full text-xs">
+            <thead className="sticky top-0 bg-[color:var(--bg-subtle)]">
+              <tr className="text-left">
+                <th className="p-2 w-10">#</th>
+                <th className="p-2 min-w-[140px]">Serial No. (max 10 digits)</th>
+                <th className="p-2 min-w-[140px]">IMEI</th>
+                {labels.map((lbl, i) => (
+                  <th key={i} className="p-2 min-w-[120px]">{lbl}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, idx) => {
+                const isDup = duplicateSerials.has((row.serialNo || '').trim());
+                return (
+                  <tr key={row.id || idx} className="border-t border-[color:var(--border-subtle)]">
+                    <td className="p-2 text-[color:var(--text-muted)]">{idx + 1}</td>
+                    <td className="p-2">
+                      <Input
+                        value={row.serialNo || ''}
+                        onChange={(e) => updateRow(idx, { serialNo: e.target.value.replace(/[^0-9A-Za-z]/g, '').slice(0, 10) })}
+                        placeholder="Auto if blank"
+                        className={isDup ? 'border-rose-500' : ''}
+                      />
+                      {isDup && <div className="text-[10px] text-rose-600 mt-0.5">Duplicate</div>}
+                    </td>
+                    <td className="p-2">
+                      <Input
+                        value={row.imei || ''}
+                        onChange={(e) => updateRow(idx, { imei: e.target.value.replace(/\D/g, '').slice(0, 17) })}
+                        placeholder="15–17 digit IMEI"
+                      />
+                    </td>
+                    {[0, 1, 2, 3].map((ci) => (
+                      <td className="p-2" key={ci}>
+                        <Input
+                          value={row.customFields?.[ci] || ''}
+                          onChange={(e) => {
+                            const cf = [...(row.customFields || ['', '', '', ''])];
+                            cf[ci] = e.target.value;
+                            updateRow(idx, { customFields: cf });
+                          }}
+                        />
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * Summary + trigger for the serial sheet, shown on the Add Product screen
+ * once "Track by Serial / IMEI Number" is checked — mirrors the batch table
+ * section's role for batch-tracked products.
+ */
+function SerialNumberSection({ form, setForm }) {
+  const [showSheet, setShowSheet] = useState(false);
+  const qty = Math.max(0, Math.floor(Number(form.stock) || 0));
+  const entered = (form.serials || []).filter((s) => (s.serialNo || '').trim()).length;
+
+  return (
+    <div className="p-3.5 rounded-xl border border-indigo-200 dark:border-indigo-800/80 bg-indigo-50/40 dark:bg-indigo-950/20 space-y-2">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+        <div>
+          <div className="text-xs font-bold text-indigo-700 dark:text-indigo-300 flex items-center gap-1.5">
+            <Tag className="h-3.5 w-3.5" /> Serial Number Sheet
+          </div>
+          <div className="text-[11px] text-[color:var(--text-muted)]">
+            {qty > 0
+              ? `${entered} of ${qty} unit(s) have a serial number recorded.`
+              : 'Set Opening Stock above first — one serial row is created per unit.'}
+          </div>
+        </div>
+        <Button type="button" size="sm" variant="secondary" icon={Tag} onClick={() => setShowSheet(true)} disabled={qty <= 0}>
+          {form.serials?.length ? 'Manage Serial Numbers' : 'Open Serial Number Sheet'}
+        </Button>
+      </div>
+
+      <SerialSheetModal
+        open={showSheet}
+        qty={qty}
+        serials={form.serials || []}
+        customLabels={form.serialCustomLabels || DEFAULT_SERIAL_CUSTOM_LABELS}
+        onClose={() => setShowSheet(false)}
+        onSave={(serials, serialCustomLabels) => {
+          setForm((f) => ({ ...f, serials, serialCustomLabels }));
+          setShowSheet(false);
+        }}
+      />
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Reusable Category Creation & Edit Modal
+ * ------------------------------------------------------------------ */
+
+export function CategoryFormModal({ open, editing = null, categories = [], showToast, onClose, onSaved }) {
+  const [form, setForm] = useState({ name: '', icon: '📦', description: '', kotPrinter: '', color: 'indigo' });
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    if (editing) {
+      const currentColor = editing.color || getCategoryTheme(editing)?.id || 'indigo';
+      setForm({
+        name: editing.name || '',
+        icon: editing.icon || '📦',
+        description: editing.description || '',
+        kotPrinter: editing.kotPrinter || '',
+        color: currentColor
+      });
+    } else {
+      const newColor = getNextAvailableColor(categories);
+      setForm({
+        name: '',
+        icon: '📦',
+        description: '',
+        kotPrinter: '',
+        color: newColor
+      });
+    }
+  }, [open, editing, categories]);
+
+  if (!open) return null;
+
+  const save = async (e) => {
+    e?.preventDefault();
+    if (!form.name?.trim()) {
+      showToast?.('Category name is required.', 'error');
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = editing
+        ? await api.put(`/categories/${editing.id}`, form)
+        : await api.post('/categories', form);
+
+      showToast?.(res.message || (editing ? 'Category updated.' : 'Category created.'));
+      const savedCategory = res.data || res;
+      onSaved?.(savedCategory);
+      onClose?.();
+    } catch (err) {
+      showToast?.(api.message(err, 'Failed to save category.'), 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal open={true} title={editing ? 'Edit Category' : 'Create Category'} icon={Layers} onClose={onClose}>
+      <form onSubmit={save} className="space-y-4">
+        <Field label="Category Name *">
+          <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required autoFocus />
+        </Field>
+        <Field label="Emoji Icon">
+          <Input value={form.icon} onChange={(e) => setForm({ ...form, icon: e.target.value })} placeholder="🍎" />
+        </Field>
+
+        <Field label="Category Color Theme">
+          <div className="grid grid-cols-4 sm:grid-cols-5 gap-2 pt-1 max-h-48 overflow-y-auto pr-1">
+            {AVAILABLE_CATEGORY_COLORS.map((col) => {
+              const isSelected = form.color === col.id;
+              return (
+                <button
+                  key={col.id}
+                  type="button"
+                  onClick={() => setForm({ ...form, color: col.id })}
+                  className={`group relative flex flex-col items-center gap-1 p-2 rounded-xl border transition-all cursor-pointer ${
+                    isSelected
+                      ? 'border-indigo-600 dark:border-indigo-400 bg-indigo-50/70 dark:bg-indigo-950/50 ring-2 ring-indigo-500/30'
+                      : 'border-[color:var(--border-subtle)] hover:border-[color:var(--border)] bg-[color:var(--bg-subtle)]/50'
+                  }`}
+                  title={col.label}
+                >
+                  <div
+                    className="h-6 w-6 rounded-full shadow-xs flex items-center justify-center text-white transition-transform group-hover:scale-110"
+                    style={{ backgroundColor: col.hex }}
+                  >
+                    {isSelected && <Check className="h-3.5 w-3.5 stroke-[3]" />}
+                  </div>
+                  <span className="text-[10px] font-bold text-[color:var(--text-secondary)] truncate max-w-full text-center">
+                    {col.label.split(' ')[0]}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </Field>
+
+        <Field label="Description">
+          <Textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+        </Field>
+        <div className="flex justify-end gap-2 pt-3 border-t border-[color:var(--border-subtle)]">
+          <Button variant="secondary" onClick={onClose} disabled={saving}>Cancel</Button>
+          <Button icon={Save} type="submit" loading={saving} disabled={saving}>Save Category</Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+/**
  * The full product create/edit form, as its own reusable modal — extracted
  * out of ProductsTab so any screen (not just Inventory > Products) can open
  * it, e.g. Purchases' "add an item not in the catalogue" flow. Visibility
@@ -613,15 +969,38 @@ export function ProductFormModal({
   showToast,
   onClose,
   onSaved,
+  onCategoryCreated,
   hideBatches = false
 }) {
   const [form, setForm] = useState(() => blankProduct(categories));
+  const [localCategories, setLocalCategories] = useState(categories || []);
+  const [showCategoryModal, setShowCategoryModal] = useState(false);
   const [saving, setSaving] = useState(false);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [findingPhoto, setFindingPhoto] = useState(false);
   const [writeOffTarget, setWriteOffTarget] = useState(null);
   const [writeOffForm, setWriteOffForm] = useState({ qty: '', reason: 'Expired' });
   const [writingOff, setWritingOff] = useState(false);
+
+  useEffect(() => {
+    setLocalCategories(categories || []);
+  }, [categories]);
+
+  const handleCategorySaved = (newCat) => {
+    if (!newCat || !newCat.id) return;
+    setLocalCategories((prev) => (prev.some((c) => c.id === newCat.id) ? prev : [...prev, newCat]));
+    setForm((prev) => {
+      const currentIds = Array.isArray(prev.categoryIds) ? prev.categoryIds : (prev.categoryId ? [prev.categoryId] : []);
+      const updatedIds = currentIds.includes(newCat.id) ? currentIds : [...currentIds, newCat.id];
+      return {
+        ...prev,
+        categoryIds: updatedIds,
+        categoryId: prev.categoryId || newCat.id
+      };
+    });
+    setShowCategoryModal(false);
+    onCategoryCreated?.(newCat);
+  };
 
   // Once a product carries real batch stock, "unbatching" it would strand
   // that stock outside the batch system it's tracked in — so the toggle
@@ -727,6 +1106,16 @@ export function ProductFormModal({
       trackBatches: Boolean(product.trackBatches),
       batches: Array.isArray(product.batches) ? product.batches.map((b) => ({ ...b })) : [],
       nearExpiryDays: product.nearExpiryDays ?? '',
+      trackSerial: Boolean(product.trackSerial || (Array.isArray(product.serialNumbers) && product.serialNumbers.length > 0)),
+      serialNumbers: Array.isArray(product.serialNumbers) ? [...product.serialNumbers] : [],
+      trackSerials: Boolean(product.trackSerials),
+      serials: Array.isArray(product.serials) ? product.serials.map((s) => ({ ...s })) : [],
+      serialCustomLabels: Array.isArray(product.serialCustomLabels) && product.serialCustomLabels.length === 4
+        ? [...product.serialCustomLabels]
+        : [...DEFAULT_SERIAL_CUSTOM_LABELS],
+      hasWarranty: Boolean(product.hasWarranty),
+      warrantyDurationValue: product.warrantyDurationValue ?? '12',
+      warrantyDurationUnit: product.warrantyDurationUnit || 'months',
       comboItems: Array.isArray(product.comboItems) ? product.comboItems.map((i) => ({ ...i, _key: genRowKey() })) : [],
       recipeItems: Array.isArray(product.recipeItems) && product.recipeItems.length > 0
         ? product.recipeItems.map((i) => ({ ...i, _key: genRowKey() }))
@@ -1127,7 +1516,7 @@ export function ProductFormModal({
 
     const payload = {
       ...form,
-      sku: form.sku ? String(form.sku).trim().toUpperCase() : '',
+      sku: form.sku ? String(form.sku).replace(/\D/g, '') : '',
       printName: form.regionalName || form.printName,
       barcode: primaryBarcode,
       barcodes: allBarcodes,
@@ -1232,17 +1621,28 @@ export function ProductFormModal({
             </div>
 
             <div className="grid grid-cols-3 gap-3">
-              <Field label="Categories">
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="label-eyebrow">Categories</span>
+                  <button
+                    type="button"
+                    onClick={() => setShowCategoryModal(true)}
+                    className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 hover:underline flex items-center gap-1 cursor-pointer transition-colors"
+                  >
+                    <Plus className="w-3 h-3 stroke-[2.5]" />
+                    <span>New Category</span>
+                  </button>
+                </div>
                 <MultiSelect
                   value={form.categoryIds}
                   onChange={(e) => setForm({ ...form, categoryIds: e.target.value, categoryId: e.target.value[0] || '' })}
                   placeholder="Select categories..."
                 >
-                  {categories.map((c) => (
+                  {localCategories.map((c) => (
                     <option key={c.id} value={c.id}>{c.name}</option>
                   ))}
                 </MultiSelect>
-              </Field>
+              </div>
 
               <Field label="Product Type">
                 <Select
@@ -1555,13 +1955,16 @@ export function ProductFormModal({
                 <button
                   type="button"
                   onClick={() => {
-                    if (!form.name) {
-                      showToast('Enter product name first to generate an SKU.', 'error');
-                      return;
-                    }
-                    const cleanName = String(form.name).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4).padEnd(3, 'X');
-                    const randCode = Math.floor(1000 + Math.random() * 9000);
-                    setForm((f) => ({ ...f, sku: `SKU-${cleanName}-${randCode}` }));
+                    // SKUs are numeric-only and sequential, so "next" is
+                    // whatever comes after the highest one already in use —
+                    // the backend re-derives the same value from the saved
+                    // catalogue at save time if this preview ever drifts.
+                    const highest = (products || []).reduce((max, p) => {
+                      const digits = String(p.sku || '').replace(/\D/g, '');
+                      const n = digits ? parseInt(digits, 10) : 0;
+                      return n > max ? n : max;
+                    }, 100000);
+                    setForm((f) => ({ ...f, sku: String(highest + 1) }));
                   }}
                   className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
                 >
@@ -1569,11 +1972,12 @@ export function ProductFormModal({
                 </button>
               </div>
 
-              <Field label="SKU Code" hint="Unique internal Stock Keeping Unit (e.g. SKU-APPL-1001)">
+              <Field label="SKU Code" hint="Numeric only — a unique internal Stock Keeping Unit number (e.g. 100001)">
                 <Input
+                  inputMode="numeric"
                   value={form.sku || ''}
-                  onChange={(e) => setForm({ ...form, sku: e.target.value.toUpperCase() })}
-                  placeholder="e.g. SKU-APP-101"
+                  onChange={(e) => setForm({ ...form, sku: e.target.value.replace(/\D/g, '') })}
+                  placeholder="e.g. 100001"
                 />
               </Field>
             </div>
@@ -1824,15 +2228,25 @@ export function ProductFormModal({
                       ))}
                     </Select>
                   </Field>
-                  <Field label="Stock in Selected Warehouse" hint={form.trackBatches ? 'Derived from batches below' : undefined}>
+                  <Field
+                    label="Stock in Selected Warehouse"
+                    hint={
+                      form.trackBatches
+                        ? 'Derived from batches below'
+                        : form.trackSerials
+                        ? 'Sets how many rows open in the Serial Number Sheet below'
+                        : (isWholeNumberUnit(form.unit) ? `Whole numbers only for ${form.unit}` : undefined)
+                    }
+                  >
                     <Input
                       type="number"
-                      step="any"
+                      step={isWholeNumberUnit(form.unit) ? '1' : 'any'}
                       value={form.trackBatches ? form.stock || 0 : (form.warehouses?.[form.primaryWarehouse || warehouses[0]?.id] ?? '')}
                       onChange={(e) => {
                         const whId = form.primaryWarehouse || warehouses[0]?.id;
                         if (!whId) return;
-                        const newStock = Number(e.target.value) || 0;
+                        const raw = isWholeNumberUnit(form.unit) ? e.target.value.replace(/\./g, '') : e.target.value;
+                        const newStock = Number(raw) || 0;
                         const newWarehouses = { ...form.warehouses, [whId]: newStock };
                         const totalStock = Object.values(newWarehouses).reduce((sum, val) => sum + (Number(val) || 0), 0);
                         setForm({ ...form, warehouses: newWarehouses, stock: totalStock });
@@ -1849,7 +2263,12 @@ export function ProductFormModal({
                     })()}
                   </Field>
                   <Field label="Minimum Alert Level">
-                    <Input type="number" value={form.minStock} onChange={(e) => setForm({ ...form, minStock: e.target.value })} />
+                    <Input
+                      type="number"
+                      step={isWholeNumberUnit(form.unit) ? '1' : 'any'}
+                      value={form.minStock}
+                      onChange={(e) => setForm({ ...form, minStock: isWholeNumberUnit(form.unit) ? e.target.value.replace(/\./g, '') : e.target.value })}
+                    />
                   </Field>
                 </div>
 
@@ -1865,7 +2284,10 @@ export function ProductFormModal({
                         type="checkbox"
                         checked={Boolean(form.trackBatches)}
                         disabled={lockTrackBatchesOff}
-                        onChange={(e) => setForm({ ...form, trackBatches: e.target.checked })}
+                        onChange={(e) => {
+                          const on = e.target.checked;
+                          setForm({ ...form, trackBatches: on, trackSerials: on ? false : form.trackSerials });
+                        }}
                         className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4 disabled:opacity-50"
                       />
                       Track by Batch (lot number, expiry date, batch-wise cost)
@@ -1879,6 +2301,68 @@ export function ProductFormModal({
                 ) : (
                   <div className="text-[10px] text-[color:var(--text-muted)] pt-2 border-t border-[color:var(--border-subtle)]">
                     Batch tracking is off for this store. Enable it under Settings → Billing & Tax → Inventory to use it here.
+                  </div>
+                )}
+
+                <div className="pt-2 border-t border-[color:var(--border-subtle)]">
+                  <label className="flex items-center gap-2 text-xs font-bold cursor-pointer text-indigo-600 dark:text-indigo-400">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(form.trackSerials)}
+                      onChange={(e) => {
+                        const on = e.target.checked;
+                        // Batch and serial are two answers to the same question
+                        // ("what identifies one unit of this product?") — a
+                        // product is tracked one way or the other, not both.
+                        setForm({ ...form, trackSerials: on, trackBatches: on ? false : form.trackBatches });
+                      }}
+                      className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+                    />
+                    Track by Serial / IMEI Number (one record per unit)
+                  </label>
+                </div>
+              </div>
+            )}
+
+            {form.trackSerials && form.productType !== 'service' && form.productType !== 'composite' && form.productType !== 'combo' && (
+              <SerialNumberSection form={form} setForm={setForm} />
+            )}
+
+            {form.productType !== 'composite' && form.productType !== 'combo' && (
+              <div className="p-3.5 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
+                <label className="flex items-center gap-2 text-xs font-bold cursor-pointer text-indigo-600 dark:text-indigo-400">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(form.hasWarranty)}
+                    onChange={(e) => setForm({ ...form, hasWarranty: e.target.checked })}
+                    className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+                  />
+                  Warranty-Enabled Product
+                </label>
+                {form.hasWarranty && (
+                  <div className="grid grid-cols-2 gap-3 pl-6">
+                    <Field label="Warranty Period">
+                      <Input
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={form.warrantyDurationValue}
+                        onChange={(e) => setForm({ ...form, warrantyDurationValue: e.target.value.replace(/\D/g, '') })}
+                      />
+                    </Field>
+                    <Field label="Unit">
+                      <Select
+                        value={form.warrantyDurationUnit}
+                        onChange={(e) => setForm({ ...form, warrantyDurationUnit: e.target.value })}
+                      >
+                        <option value="days">Day(s)</option>
+                        <option value="months">Month(s)</option>
+                        <option value="years">Year(s)</option>
+                      </Select>
+                    </Field>
+                    <p className="col-span-2 text-[10px] text-[color:var(--text-muted)] -mt-1">
+                      The warranty period starts counting from the day a unit is actually billed to a customer, not from today.
+                    </p>
                   </div>
                 )}
               </div>
@@ -2276,6 +2760,18 @@ export function ProductFormModal({
               </div>
             </form>
           </Modal>
+        )}
+
+        {/* Category Quick-Create Modal */}
+        {showCategoryModal && (
+          <CategoryFormModal
+            open={true}
+            editing={null}
+            categories={localCategories}
+            showToast={showToast}
+            onClose={() => setShowCategoryModal(false)}
+            onSaved={handleCategorySaved}
+          />
         )}
     </>
   );
@@ -2706,7 +3202,6 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
 
                           <td className="py-3 px-3 text-right text-xs">
                             <div className="text-[color:var(--text-secondary)]">WS: {money(p.wholesalePrice)}</div>
-                            {p.specialPrice && <div className="text-emerald-600 font-medium">VIP: {money(p.specialPrice)}</div>}
                           </td>
                         </>
                       )}
@@ -2787,6 +3282,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
           setShowForm(false);
           onRefresh();
         }}
+        onCategoryCreated={() => onRefresh?.()}
       />
 
       {/* Barcode Print Modal */}
@@ -2965,7 +3461,6 @@ function CategoriesTab({ categories, products, showToast, onRefresh }) {
   const [query, setQuery] = useState('');
   const [editing, setEditing] = useState(null);
   const [showModal, setShowModal] = useState(false);
-  const [form, setForm] = useState({ name: '', icon: '📦', description: '', kotPrinter: '' });
 
   const filtered = useMemo(() => {
     if (!query) return categories;
@@ -2988,32 +3483,12 @@ function CategoriesTab({ categories, products, showToast, onRefresh }) {
 
   const openAdd = () => {
     setEditing(null);
-    const newColor = getNextAvailableColor(categories);
-    setForm({ name: '', icon: '📦', description: '', kotPrinter: '', color: newColor });
     setShowModal(true);
   };
 
   const openEdit = (cat) => {
     setEditing(cat);
-    const currentColor = cat.color || getCategoryTheme(cat)?.id || 'indigo';
-    setForm({ name: cat.name, icon: cat.icon || '📦', description: cat.description || '', kotPrinter: cat.kotPrinter || '', color: currentColor });
     setShowModal(true);
-  };
-
-  const save = async (e) => {
-    e?.preventDefault();
-    if (!form.name) return showToast('Category name is required.', 'error');
-    try {
-      const res = editing
-        ? await api.put(`/categories/${editing.id}`, form)
-        : await api.post('/categories', form);
-
-      showToast(res.message || 'Category saved.');
-      setShowModal(false);
-      onRefresh();
-    } catch (err) {
-      showToast(api.message(err, 'Failed to save category.'), 'error');
-    }
   };
 
   const removeCategory = async (id) => {
@@ -3063,57 +3538,14 @@ function CategoriesTab({ categories, products, showToast, onRefresh }) {
         })}
       </div>
 
-      {showModal && (
-        <Modal open={true} title={editing ? 'Edit Category' : 'Create Category'} icon={Layers} onClose={() => setShowModal(false)}>
-          <form onSubmit={save} className="space-y-4">
-            <Field label="Category Name *">
-              <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
-            </Field>
-            <Field label="Emoji Icon">
-              <Input value={form.icon} onChange={(e) => setForm({ ...form, icon: e.target.value })} placeholder="🍎" />
-            </Field>
-
-            <Field label="Category Color Theme">
-              <div className="grid grid-cols-4 sm:grid-cols-5 gap-2 pt-1 max-h-48 overflow-y-auto pr-1">
-                {AVAILABLE_CATEGORY_COLORS.map((col) => {
-                  const isSelected = form.color === col.id;
-                  return (
-                    <button
-                      key={col.id}
-                      type="button"
-                      onClick={() => setForm({ ...form, color: col.id })}
-                      className={`group relative flex flex-col items-center gap-1 p-2 rounded-xl border transition-all cursor-pointer ${
-                        isSelected
-                          ? 'border-indigo-600 dark:border-indigo-400 bg-indigo-50/70 dark:bg-indigo-950/50 ring-2 ring-indigo-500/30'
-                          : 'border-[color:var(--border-subtle)] hover:border-[color:var(--border)] bg-[color:var(--bg-subtle)]/50'
-                      }`}
-                      title={col.label}
-                    >
-                      <div
-                        className="h-6 w-6 rounded-full shadow-xs flex items-center justify-center text-white transition-transform group-hover:scale-110"
-                        style={{ backgroundColor: col.hex }}
-                      >
-                        {isSelected && <Check className="h-3.5 w-3.5 stroke-[3]" />}
-                      </div>
-                      <span className="text-[10px] font-bold text-[color:var(--text-secondary)] truncate max-w-full text-center">
-                        {col.label.split(' ')[0]}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </Field>
-
-            <Field label="Description">
-              <Textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
-            </Field>
-            <div className="flex justify-end gap-2 pt-3 border-t border-[color:var(--border-subtle)]">
-              <Button variant="secondary" onClick={() => setShowModal(false)}>Cancel</Button>
-              <Button icon={Save} type="submit">Save Category</Button>
-            </div>
-          </form>
-        </Modal>
-      )}
+      <CategoryFormModal
+        open={showModal}
+        editing={editing}
+        categories={categories}
+        showToast={showToast}
+        onClose={() => setShowModal(false)}
+        onSaved={() => onRefresh?.()}
+      />
     </div>
   );
 }
@@ -3705,18 +4137,94 @@ function WarehousesTab({ warehouses, products, showToast, onRefresh }) {
  * Stock Adjustment Tab (Story 10)
  * ------------------------------------------------------------------ */
 
-function AdjustTab({ products, showToast, onRefresh }) {
+function AdjustTab({ products, warehouses = [], showToast, onRefresh }) {
   const [productId, setProductId] = useState('');
+  const [warehouseId, setWarehouseId] = useState('');
   const [mode, setMode] = useState('ADD');
   const [quantity, setQuantity] = useState('');
   const [reason, setReason] = useState('Stock Take Audit');
   const [password, setPassword] = useState('');
+  const [batchId, setBatchId] = useState('');
+  const [batchNo, setBatchNo] = useState('');
+  const [customBatch, setCustomBatch] = useState(false);
+  const [serial, setSerial] = useState('');
   const [saving, setSaving] = useState(false);
+  const [labelProduct, setLabelProduct] = useState(null);
 
   const adjustableProducts = useMemo(
     () => products.filter((p) => p.productType !== 'service'),
     [products]
   );
+
+  const availableWarehouses = useMemo(() => {
+    if (warehouses && warehouses.length > 0) return warehouses;
+    return [{ id: 'wh_shop', name: 'Main Godown / Shop', isDefault: true }];
+  }, [warehouses]);
+
+  // Default warehouse selection
+  useEffect(() => {
+    if (!warehouseId && availableWarehouses.length > 0) {
+      const def = availableWarehouses.find((w) => w.isDefault) || availableWarehouses[0];
+      if (def) setWarehouseId(def.id);
+    }
+  }, [availableWarehouses, warehouseId]);
+
+  const selectedProduct = adjustableProducts.find((p) => p.id === productId);
+  const isBatchedProduct = Boolean(
+    selectedProduct && (selectedProduct.trackBatches || (Array.isArray(selectedProduct.batches) && selectedProduct.batches.length > 0))
+  );
+  const isSerialProduct = Boolean(
+    selectedProduct && (
+      selectedProduct.trackSerial ||
+      selectedProduct.trackSerials ||
+      selectedProduct.isSerialized ||
+      (Array.isArray(selectedProduct.serialNumbers) && selectedProduct.serialNumbers.length > 0)
+    )
+  );
+  const wholeNumberOnly = isWholeNumberUnit(selectedProduct?.unit);
+  const productBatches = useMemo(() => {
+    return Array.isArray(selectedProduct?.batches) ? selectedProduct.batches : [];
+  }, [selectedProduct]);
+
+  // When product changes, reset batch & serial
+  useEffect(() => {
+    setBatchId('');
+    setBatchNo('');
+    setCustomBatch(false);
+    setSerial('');
+  }, [productId]);
+
+  const selectedWarehouse = availableWarehouses.find((w) => w.id === warehouseId) || availableWarehouses[0];
+  const currentWhStock = selectedProduct
+    ? (selectedProduct.warehouses && typeof selectedProduct.warehouses === 'object' && selectedProduct.warehouses[warehouseId] !== undefined
+        ? Number(selectedProduct.warehouses[warehouseId]) || 0
+        : (selectedWarehouse?.isDefault ? Number(selectedProduct.stock) || 0 : 0))
+    : 0;
+
+  const currentBatch = isBatchedProduct ? productBatches.find((b) => b.id === batchId) : null;
+
+  // Projected stock computation
+  const numericQty = Number(quantity) || 0;
+  const projectedWhStock = selectedProduct
+    ? (mode === 'SET' ? numericQty : mode === 'REMOVE' ? Math.max(0, currentWhStock - numericQty) : currentWhStock + numericQty)
+    : null;
+
+  const handleBatchSelect = (val) => {
+    if (val === 'CUSTOM') {
+      setBatchId('');
+      setCustomBatch(true);
+      setBatchNo('');
+    } else if (val === '') {
+      setBatchId('');
+      setCustomBatch(false);
+      setBatchNo('');
+    } else {
+      setBatchId(val);
+      setCustomBatch(false);
+      const b = productBatches.find((x) => x.id === val);
+      setBatchNo(b?.batchNo || '');
+    }
+  };
 
   const submit = async (e) => {
     e?.preventDefault();
@@ -3725,9 +4233,24 @@ function AdjustTab({ products, showToast, onRefresh }) {
 
     setSaving(true);
     try {
-      const res = await api.post('/inventory/adjust', { productId, mode, quantity, reason, password });
+      const res = await api.post('/inventory/adjust', {
+        productId,
+        mode,
+        quantity,
+        reason,
+        password,
+        warehouseId: warehouseId || undefined,
+        batchId: isBatchedProduct && batchId ? batchId : undefined,
+        batchNo: isBatchedProduct && (batchNo || '').trim() ? batchNo.trim() : undefined,
+        serial: isSerialProduct && (serial || '').trim() ? serial.trim() : undefined
+      });
       showToast(res.message || 'Stock adjusted.');
       setQuantity('');
+      setSerial('');
+      if (customBatch) {
+        setBatchNo('');
+        setCustomBatch(false);
+      }
       onRefresh();
     } catch (err) {
       showToast(api.message(err, 'Stock adjustment failed.'), 'error');
@@ -3740,15 +4263,60 @@ function AdjustTab({ products, showToast, onRefresh }) {
     <Panel title="Manual Stock Adjustment" icon={Boxes}>
       <form onSubmit={submit} className="space-y-4 max-w-xl">
         <Field label="Select Product">
-          <Select value={productId} onChange={(e) => setProductId(e.target.value)} required>
-            <option value="">-- Select Product --</option>
-            {adjustableProducts.map((p) => (
-              <option key={p.id} value={p.id}>{p.name} (Current Stock: {p.stock} {p.unit})</option>
-            ))}
-          </Select>
+          <div className="flex items-center gap-2">
+            <div className="flex-1">
+              <Select value={productId} onChange={(e) => setProductId(e.target.value)} required>
+                <option value="">-- Select Product --</option>
+                {adjustableProducts.map((p) => {
+                  const isBatched = Boolean(p.trackBatches || (Array.isArray(p.batches) && p.batches.length > 0));
+                  const isSerialized = Boolean(p.trackSerial || p.trackSerials || p.isSerialized || (Array.isArray(p.serialNumbers) && p.serialNumbers.length > 0));
+                  const tags = [];
+                  if (isBatched) tags.push('Batched');
+                  if (isSerialized) tags.push('Serialized');
+                  const tagStr = tags.length ? ` [${tags.join(', ')}]` : '';
+                  return (
+                    <option key={p.id} value={p.id}>
+                      {p.name} (Total Stock: {p.stock} {p.unit}){tagStr}
+                    </option>
+                  );
+                })}
+              </Select>
+            </div>
+            {selectedProduct && (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                icon={Barcode}
+                onClick={() => setLabelProduct(selectedProduct)}
+                title="Print a barcode/SKU label for this product right from here"
+              >
+                Print Barcode
+              </Button>
+            )}
+          </div>
         </Field>
 
-        <div className="grid grid-cols-2 gap-3">
+        {labelProduct && (
+          <BarcodePrinterModal product={labelProduct} onClose={() => setLabelProduct(null)} showToast={showToast} />
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <Field label="Godown / Warehouse">
+            <Select value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)} required>
+              {availableWarehouses.map((w) => {
+                const whStock = selectedProduct?.warehouses?.[w.id] !== undefined
+                  ? selectedProduct.warehouses[w.id]
+                  : (w.isDefault ? selectedProduct?.stock ?? 0 : 0);
+                return (
+                  <option key={w.id} value={w.id}>
+                    {w.name} {selectedProduct ? `(${whStock} ${selectedProduct.unit})` : ''} {w.isDefault ? '★ Default' : ''}
+                  </option>
+                );
+              })}
+            </Select>
+          </Field>
+
           <Field label="Adjustment Action">
             <Select value={mode} onChange={(e) => setMode(e.target.value)}>
               <option value="ADD">Increase Stock (+)</option>
@@ -3756,22 +4324,151 @@ function AdjustTab({ products, showToast, onRefresh }) {
               <option value="SET">Set Exact Stock (=)</option>
             </Select>
           </Field>
+        </div>
 
-          <Field label="Quantity">
-            <Input type="number" min="0" value={quantity} onChange={(e) => setQuantity(e.target.value)} required />
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <Field label="Quantity" hint={wholeNumberOnly ? `Whole numbers only for ${selectedProduct?.unit || 'unit'}` : undefined}>
+            <Input
+              type="number"
+              min="0"
+              step={wholeNumberOnly ? '1' : 'any'}
+              value={quantity}
+              onChange={(e) => setQuantity(wholeNumberOnly ? e.target.value.replace(/\./g, '') : e.target.value)}
+              placeholder="e.g. 10"
+              required
+            />
+          </Field>
+
+          <Field label="Adjustment Reason">
+            <Select value={reason} onChange={(e) => setReason(e.target.value)}>
+              <option value="Stock Take Audit">Stock Take Audit</option>
+              <option value="Damaged Goods">Damaged Goods</option>
+              <option value="Expired Item">Expired Item</option>
+              <option value="Theft / Loss">Theft / Loss</option>
+              <option value="Supplier Return">Supplier Return</option>
+              <option value="Initial Opening Stock">Initial Opening Stock</option>
+            </Select>
           </Field>
         </div>
 
-        <Field label="Adjustment Reason">
-          <Select value={reason} onChange={(e) => setReason(e.target.value)}>
-            <option value="Stock Take Audit">Stock Take Audit</option>
-            <option value="Damaged Goods">Damaged Goods</option>
-            <option value="Expired Item">Expired Item</option>
-            <option value="Theft / Loss">Theft / Loss</option>
-            <option value="Supplier Return">Supplier Return</option>
-            <option value="Initial Opening Stock">Initial Opening Stock</option>
-          </Select>
-        </Field>
+        {/* Batch Selection — ONLY displayed when a batched product is selected */}
+        {isBatchedProduct && (
+          <div className="p-3.5 rounded-xl border border-purple-200 dark:border-purple-900/40 bg-purple-50/30 dark:bg-purple-950/20 space-y-3">
+            <div className="text-xs font-bold text-purple-700 dark:text-purple-300 flex items-center gap-1.5">
+              <Layers className="w-3.5 h-3.5" />
+              <span>Batch Tracking ({selectedProduct?.name})</span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {productBatches.length > 0 ? (
+                <Field label="Select Batch">
+                  <Select
+                    value={customBatch ? 'CUSTOM' : batchId}
+                    onChange={(e) => handleBatchSelect(e.target.value)}
+                  >
+                    <option value="">-- Select Existing Batch --</option>
+                    {productBatches.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.batchNo} (Qty: {b.qty} {selectedProduct?.unit || ''}{b.expiryDate ? ` · Exp: ${b.expiryDate}` : ''})
+                      </option>
+                    ))}
+                    <option value="CUSTOM">+ Enter New / Custom Batch</option>
+                  </Select>
+                </Field>
+              ) : (
+                <Field label="Batch Number">
+                  <Input
+                    type="text"
+                    placeholder="e.g. BATCH-001"
+                    value={batchNo}
+                    onChange={(e) => setBatchNo(e.target.value)}
+                  />
+                </Field>
+              )}
+
+              {productBatches.length > 0 && customBatch && (
+                <Field label="New Batch Number">
+                  <Input
+                    type="text"
+                    placeholder="Enter batch number"
+                    value={batchNo}
+                    onChange={(e) => setBatchNo(e.target.value)}
+                    autoFocus
+                  />
+                </Field>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Serial / IMEI input — ONLY displayed when a serialized product is selected */}
+        {isSerialProduct && (
+          <div className="p-3.5 rounded-xl border border-amber-200 dark:border-amber-900/40 bg-amber-50/30 dark:bg-amber-950/20 space-y-3">
+            <div className="text-xs font-bold text-amber-700 dark:text-amber-300 flex items-center gap-1.5">
+              <Barcode className="w-3.5 h-3.5" />
+              <span>Serial / IMEI Tracking ({selectedProduct?.name})</span>
+            </div>
+            <Field label="Serial / IMEI Number(s)" hint="Single or comma-separated serials (e.g. SN1001, SN1002)">
+              <Input
+                type="text"
+                placeholder="e.g. SN1001, SN1002"
+                value={serial}
+                onChange={(e) => setSerial(e.target.value)}
+              />
+            </Field>
+            {Array.isArray(selectedProduct?.serialNumbers) && selectedProduct.serialNumbers.length > 0 && (
+              <div className="text-[11px] text-[color:var(--text-muted)]">
+                Existing Serials ({selectedProduct.serialNumbers.length}):{' '}
+                <span className="font-mono text-[color:var(--text-primary)]">
+                  {selectedProduct.serialNumbers.slice(0, 5).join(', ')}
+                  {selectedProduct.serialNumbers.length > 5 ? ` +${selectedProduct.serialNumbers.length - 5} more` : ''}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Live Stock Preview Card */}
+        {selectedProduct && (
+          <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] text-xs grid grid-cols-2 sm:grid-cols-3 gap-2">
+            <div>
+              <span className="text-[color:var(--text-muted)] block">Selected Godown:</span>
+              <span className="font-bold text-[color:var(--text-primary)]">
+                {selectedWarehouse?.name || 'Main'} ({currentWhStock} {selectedProduct.unit})
+              </span>
+            </div>
+            <div>
+              <span className="text-[color:var(--text-muted)] block">Total Stock:</span>
+              <span className="font-bold text-[color:var(--text-primary)]">
+                {selectedProduct.stock} {selectedProduct.unit}
+              </span>
+            </div>
+            {isBatchedProduct && currentBatch && (
+              <div>
+                <span className="text-[color:var(--text-muted)] block">Batch Stock:</span>
+                <span className="font-bold text-purple-600">
+                  {currentBatch.qty} {selectedProduct.unit}
+                </span>
+              </div>
+            )}
+            {isSerialProduct && Array.isArray(selectedProduct.serialNumbers) && selectedProduct.serialNumbers.length > 0 && (
+              <div>
+                <span className="text-[color:var(--text-muted)] block">Registered Serials:</span>
+                <span className="font-bold text-amber-600">
+                  {selectedProduct.serialNumbers.length} serial(s)
+                </span>
+              </div>
+            )}
+            {quantity && projectedWhStock !== null && (
+              <div className="col-span-2 sm:col-span-3 pt-1.5 border-t border-[color:var(--border-subtle)] flex items-center justify-between text-[color:var(--text-secondary)]">
+                <span>Godown stock after adjustment:</span>
+                <span className="font-bold text-indigo-600 text-sm">
+                  {projectedWhStock} {selectedProduct.unit}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
 
         <Field label="Authorization Password (only required if enabled in Settings)">
           <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Leave blank if not required" />
@@ -3850,7 +4547,28 @@ function HistoryTab({ products }) {
                     {m.qtyChange >= 0 ? `+${m.qtyChange}` : m.qtyChange} {m.unit}
                   </td>
                   <td className="py-2.5 px-3 text-right font-bold text-[color:var(--text-primary)]">{m.resultingStock ?? m.balanceAfter ?? '—'}</td>
-                  <td className="py-2.5 px-3 font-sans text-[color:var(--text-muted)]">{m.reason || '—'}</td>
+                  <td className="py-2.5 px-3 font-sans">
+                    <div className="text-[color:var(--text-primary)]">{m.reason || '—'}</div>
+                    {(m.warehouseName || m.batchNo || (Array.isArray(m.serials) && m.serials.length > 0)) && (
+                      <div className="flex flex-wrap gap-1 mt-1 font-mono text-[10px]">
+                        {m.warehouseName && (
+                          <span className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+                            Godown: {m.warehouseName}
+                          </span>
+                        )}
+                        {m.batchNo && (
+                          <span className="px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 dark:bg-purple-950/40 dark:text-purple-300 border border-purple-200 dark:border-purple-800">
+                            Batch: {m.batchNo}
+                          </span>
+                        )}
+                        {Array.isArray(m.serials) && m.serials.length > 0 && (
+                          <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
+                            SN: {m.serials.join(', ')}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </td>
                   <td className="py-2.5 px-3 font-sans text-[color:var(--text-secondary)]">{m.user || 'system'}</td>
                 </tr>
               ))}
@@ -3871,6 +4589,7 @@ function BatchesTab({ products, showToast, onRefresh, storeNearExpiryDays }) {
   const [view, setView] = useState('stock'); // 'stock' | 'sales'
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [productFilter, setProductFilter] = useState(''); // '' = all products, else a product id
   const [writeOffTarget, setWriteOffTarget] = useState(null); // { product, batch }
   const [writeOffForm, setWriteOffForm] = useState({ qty: '', reason: 'Expired' });
   const [writingOff, setWritingOff] = useState(false);
@@ -3889,6 +4608,14 @@ function BatchesTab({ products, showToast, onRefresh, storeNearExpiryDays }) {
       .finally(() => setLoadingReport(false));
   }, [view]);
 
+  // Only products that actually have batches get listed — picking one (e.g.
+  // "Keyboard") narrows the table to just that product's own batches.
+  const batchProducts = useMemo(() => {
+    return (products || [])
+      .filter((p) => p.trackBatches && Array.isArray(p.batches) && p.batches.length > 0)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [products]);
+
   const rows = useMemo(() => {
     const today = new Date();
     const needle = query.trim().toLowerCase();
@@ -3896,6 +4623,7 @@ function BatchesTab({ products, showToast, onRefresh, storeNearExpiryDays }) {
 
     (products || []).forEach((p) => {
       if (!p.trackBatches || !Array.isArray(p.batches)) return;
+      if (productFilter && p.id !== productFilter) return;
       const windowDays = resolveNearExpiryDays(p, storeNearExpiryDays);
       p.batches.forEach((b) => {
         let status = 'active';
@@ -3923,7 +4651,7 @@ function BatchesTab({ products, showToast, onRefresh, storeNearExpiryDays }) {
         if (b.batch.expiryDate) return 1;
         return new Date(b.batch.createdAt || 0) - new Date(a.batch.createdAt || 0);
       });
-  }, [products, query, statusFilter, storeNearExpiryDays]);
+  }, [products, query, statusFilter, storeNearExpiryDays, productFilter]);
 
   const valuation = useMemo(() => {
     return rows.reduce(
@@ -4020,12 +4748,22 @@ function BatchesTab({ products, showToast, onRefresh, storeNearExpiryDays }) {
         <>
           <div className="flex flex-wrap items-center justify-between gap-3 bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
             <SearchInput value={query} onChange={setQuery} placeholder="Search batch no. or product..." className="w-64" />
-            <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-44">
-              <option value="all">All Batches</option>
-              <option value="active">Active</option>
-              <option value="near">Near Expiry</option>
-              <option value="expired">Expired</option>
-            </Select>
+            <div className="flex items-center gap-2">
+              <Select value={productFilter} onChange={(e) => setProductFilter(e.target.value)} className="w-52">
+                <option value="">All Products</option>
+                {batchProducts.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name} ({(p.batches || []).length})
+                  </option>
+                ))}
+              </Select>
+              <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-44">
+                <option value="all">All Batches</option>
+                <option value="active">Active</option>
+                <option value="near">Near Expiry</option>
+                <option value="expired">Expired</option>
+              </Select>
+            </div>
           </div>
 
           <Panel title={`Batches (${rows.length})`} icon={AlertTriangle}>
@@ -4221,6 +4959,270 @@ function BatchesTab({ products, showToast, onRefresh, storeNearExpiryDays }) {
           </form>
         </Modal>
       )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Serial Tracking Tab — the Batch Tracking tab's counterpart for
+ * serial-tracked products. Default view is a normal product list (one row
+ * per serial-tracked product, with its total/in-stock/sold counts); picking
+ * a product ("Keyboard") drills into that product's own unit-by-unit table
+ * with all its qty details — same drill-down shape as any other product list
+ * in this app, rather than one giant flat table of every unit everywhere.
+ * "View" on a unit opens its full record (product info, serial no., IMEI,
+ * every configured custom field, status and warranty) in one place, since a
+ * single row can't show all of that for products that each define their own
+ * custom field labels.
+ * ------------------------------------------------------------------ */
+
+function SerialsTab({ products }) {
+  const [query, setQuery] = useState('');
+  const [selectedProductId, setSelectedProductId] = useState(null);
+  const [unitQuery, setUnitQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all'); // 'all' | 'in_stock' | 'sold'
+  const [detailTarget, setDetailTarget] = useState(null); // { product, serial }
+
+  const serialProducts = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return (products || [])
+      .filter((p) => p.trackSerials && Array.isArray(p.serials) && p.serials.length > 0)
+      .filter((p) => !needle || p.name.toLowerCase().includes(needle) || String(p.sku || '').toLowerCase().includes(needle))
+      .map((p) => ({
+        product: p,
+        total: p.serials.length,
+        inStock: p.serials.filter((s) => s.status !== 'SOLD').length,
+        sold: p.serials.filter((s) => s.status === 'SOLD').length
+      }))
+      .sort((a, b) => a.product.name.localeCompare(b.product.name));
+  }, [products, query]);
+
+  const selectedProduct = selectedProductId ? (products || []).find((p) => p.id === selectedProductId) : null;
+
+  // Unit-level filters are scoped to whichever product is open — switching
+  // products (or going back to the list) starts them fresh.
+  useEffect(() => {
+    setUnitQuery('');
+    setStatusFilter('all');
+  }, [selectedProductId]);
+
+  const unitRows = useMemo(() => {
+    if (!selectedProduct) return [];
+    const needle = unitQuery.trim().toLowerCase();
+    return (selectedProduct.serials || [])
+      .filter((s) => {
+        if (statusFilter === 'in_stock') return s.status !== 'SOLD';
+        if (statusFilter === 'sold') return s.status === 'SOLD';
+        return true;
+      })
+      .filter((s) => !needle || String(s.serialNo || '').toLowerCase().includes(needle) || String(s.imei || '').toLowerCase().includes(needle))
+      .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+  }, [selectedProduct, unitQuery, statusFilter]);
+
+  // Product-level drill-down: all of the selected product's units and qty details.
+  if (selectedProduct) {
+    const p = selectedProduct;
+    const totalUnits = (p.serials || []).length;
+    const inStockUnits = (p.serials || []).filter((s) => s.status !== 'SOLD').length;
+    const soldUnits = totalUnits - inStockUnits;
+
+    return (
+      <div className="space-y-4">
+        <button
+          type="button"
+          onClick={() => setSelectedProductId(null)}
+          className="inline-flex items-center gap-1.5 text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:underline"
+        >
+          <ChevronLeft className="h-3.5 w-3.5" /> Back to Products
+        </button>
+
+        <div className="flex items-center gap-2">
+          <ScanLine className="h-5 w-5 text-indigo-600" />
+          <h3 className="text-base font-bold text-[color:var(--text-primary)]">{p.name}</h3>
+          {p.sku && <span className="text-xs font-mono text-[color:var(--text-muted)]">SKU: {p.sku}</span>}
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
+          <StatTile label="Total Units" value={totalUnits} icon={ScanLine} />
+          <StatTile label="In Stock" value={inStockUnits} tone="success" />
+          <StatTile label="Sold" value={soldUnits} tone="accent" />
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
+          <SearchInput value={unitQuery} onChange={setUnitQuery} placeholder="Search serial no. or IMEI..." className="w-64" />
+          <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-44">
+            <option value="all">All Units</option>
+            <option value="in_stock">In Stock</option>
+            <option value="sold">Sold</option>
+          </Select>
+        </div>
+
+        <Panel title={`Units (${unitRows.length})`} icon={ScanLine}>
+          {unitRows.length === 0 ? (
+            <EmptyState icon={ScanLine} title="No units match" description="Try a different search or status filter." />
+          ) : (
+            <div className="overflow-x-auto max-h-[70vh]">
+              <table className="w-full text-xs text-left">
+                <thead className="bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-muted)] uppercase border-b border-[color:var(--border-subtle)] sticky top-0">
+                  <tr>
+                    <th className="py-2.5 px-3">Serial No.</th>
+                    <th className="py-2.5 px-3">IMEI</th>
+                    <th className="py-2.5 px-3">Status</th>
+                    <th className="py-2.5 px-3">Warranty Till</th>
+                    <th className="py-2.5 px-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                  {unitRows.map((s) => (
+                    <tr key={s.id}>
+                      <td className="py-2.5 px-3 font-mono font-bold text-[color:var(--text-primary)]">{s.serialNo}</td>
+                      <td className="py-2.5 px-3 font-mono text-[color:var(--text-secondary)]">{s.imei || '—'}</td>
+                      <td className="py-2.5 px-3">
+                        <Badge tone={s.status === 'SOLD' ? 'neutral' : 'success'}>
+                          {s.status === 'SOLD' ? 'Sold' : 'In Stock'}
+                        </Badge>
+                      </td>
+                      <td className="py-2.5 px-3 text-[color:var(--text-muted)]">
+                        {s.warrantyEndDate ? String(s.warrantyEndDate).slice(0, 10) : '—'}
+                      </td>
+                      <td className="py-2.5 px-3 text-right">
+                        <button
+                          type="button"
+                          onClick={() => setDetailTarget({ product: p, serial: s })}
+                          className="p-1.5 rounded-lg hover:bg-indigo-50 dark:hover:bg-indigo-950/40 text-[color:var(--text-muted)] hover:text-indigo-600"
+                          title="View full details"
+                        >
+                          <Eye className="h-3.5 w-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Panel>
+
+        {detailTarget && (() => {
+        const { product: p, serial: s } = detailTarget;
+        const labels = Array.isArray(p.serialCustomLabels) && p.serialCustomLabels.length === 4
+          ? p.serialCustomLabels
+          : DEFAULT_SERIAL_CUSTOM_LABELS;
+        const filledCustomFields = labels
+          .map((lbl, i) => ({ lbl, value: s.customFields?.[i] }))
+          .filter((f) => f.value);
+
+        const field = (label, value) => (
+          <div>
+            <div className="text-[10px] uppercase text-[color:var(--text-muted)] font-bold">{label}</div>
+            <div className="text-[color:var(--text-primary)]">{value ?? '—'}</div>
+          </div>
+        );
+
+        return (
+          <Modal
+            open={true}
+            onClose={() => setDetailTarget(null)}
+            title={`Serial Details — ${p.name}`}
+            icon={ScanLine}
+            size="md"
+          >
+            <div className="space-y-4 text-sm">
+              <div className="grid grid-cols-2 gap-3">
+                {field('Product', p.name)}
+                {field('SKU', p.sku)}
+                {field('Category', (p.categoryIds && p.categoryIds.length) ? p.categoryIds.join(', ') : p.categoryId)}
+                {field('Unit Price', money(p.price))}
+                {field('Serial No.', <span className="font-mono font-bold">{s.serialNo}</span>)}
+                {field('IMEI', s.imei ? <span className="font-mono">{s.imei}</span> : '—')}
+                {field('Status', <Badge tone={s.status === 'SOLD' ? 'neutral' : 'success'}>{s.status === 'SOLD' ? 'Sold' : 'In Stock'}</Badge>)}
+                {field('Received On', s.createdAt ? String(s.createdAt).slice(0, 10) : '—')}
+                {s.status === 'SOLD' && field('Sold On Order', s.soldOrderId || '—')}
+                {p.hasWarranty && field('Warranty Till', s.warrantyEndDate ? String(s.warrantyEndDate).slice(0, 10) : 'Not sold yet')}
+              </div>
+
+              {filledCustomFields.length > 0 && (
+                <div className="pt-3 border-t border-[color:var(--border-subtle)]">
+                  <div className="text-[10px] uppercase text-[color:var(--text-muted)] font-bold mb-2">Custom Fields</div>
+                  <div className="grid grid-cols-2 gap-3">
+                    {filledCustomFields.map((f, i) => <React.Fragment key={i}>{field(f.lbl, f.value)}</React.Fragment>)}
+                  </div>
+                </div>
+              )}
+            </div>
+          </Modal>
+        );
+      })()}
+      </div>
+    );
+  }
+
+  // Default view: a normal product list, one row per serial-tracked product
+  // with its qty summary — selecting a product drills into its own units.
+  const overallTotal = serialProducts.reduce((sum, r) => sum + r.total, 0);
+  const overallInStock = serialProducts.reduce((sum, r) => sum + r.inStock, 0);
+  const overallSold = serialProducts.reduce((sum, r) => sum + r.sold, 0);
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
+        <StatTile label="Total Units" value={overallTotal} icon={ScanLine} />
+        <StatTile label="In Stock" value={overallInStock} tone="success" />
+        <StatTile label="Sold" value={overallSold} tone="accent" />
+      </div>
+
+      <div className="bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
+        <SearchInput value={query} onChange={setQuery} placeholder="Search product or SKU..." className="w-72" />
+      </div>
+
+      <Panel title={`Serial-Tracked Products (${serialProducts.length})`} icon={ScanLine}>
+        {serialProducts.length === 0 ? (
+          <EmptyState
+            icon={ScanLine}
+            title="No serial-tracked products yet"
+            description="Products appear here once you turn on 'Track by Serial / IMEI Number' for them and fill in their Serial Number Sheet from Add Product."
+          />
+        ) : (
+          <div className="overflow-x-auto max-h-[75vh]">
+            <table className="w-full text-xs text-left">
+              <thead className="bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-muted)] uppercase border-b border-[color:var(--border-subtle)] sticky top-0">
+                <tr>
+                  <th className="py-2.5 px-3">Product</th>
+                  <th className="py-2.5 px-3">SKU</th>
+                  <th className="py-2.5 px-3 text-right">Total Units</th>
+                  <th className="py-2.5 px-3 text-right">In Stock</th>
+                  <th className="py-2.5 px-3 text-right">Sold</th>
+                  <th className="py-2.5 px-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                {serialProducts.map(({ product: p, total, inStock, sold }) => (
+                  <tr
+                    key={p.id}
+                    onClick={() => setSelectedProductId(p.id)}
+                    className="cursor-pointer hover:bg-[color:var(--bg-subtle)] transition-colors"
+                  >
+                    <td className="py-2.5 px-3 font-bold text-[color:var(--text-primary)]">{p.name}</td>
+                    <td className="py-2.5 px-3 font-mono text-[color:var(--text-secondary)]">{p.sku || '—'}</td>
+                    <td className="py-2.5 px-3 text-right font-mono">{total}</td>
+                    <td className="py-2.5 px-3 text-right font-mono text-emerald-600 dark:text-emerald-400">{inStock}</td>
+                    <td className="py-2.5 px-3 text-right font-mono text-[color:var(--text-muted)]">{sold}</td>
+                    <td className="py-2.5 px-3 text-right">
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); setSelectedProductId(p.id); }}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-bold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/40"
+                      >
+                        View Units <ArrowRight className="h-3 w-3" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Panel>
     </div>
   );
 }
@@ -4871,10 +5873,10 @@ function ImportExportTab({ products, categories, showToast, onRefresh }) {
   const downloadSampleCSV = () => {
     const csvContent =
       "Product Name,Regional Name,Category,Product Type,SKU Code,Unit,Barcode,Purchase Price,Selling Price,MRP,Wholesale Price,Current Stock,Min Stock,HSN,Tax Rate\n" +
-      "Organic Apples,ஆப்பிள்,Fruits,standard,SKU-APPL-1001,kg,89012345999,100,150,160,130,50,10,0808,5\n" +
-      "Raw Sugar (RM),சர்க்கரை,Raw Materials,raw,SKU-SUGA-1002,kg,89012345777,35,40,42,38,200,50,1701,5\n" +
-      "Amul Milk 1L,பால்,Dairy,standard,SKU-MILK-1003,ltr,89012345888,50,60,62,55,100,20,0401,0\n" +
-      "Hair Trim Service,ஹேர் கட்,Services,service,SKU-HAIR-1004,pcs,SERV001,0,100,100,100,0,0,,0\n";
+      "Organic Apples,ஆப்பிள்,Fruits,standard,100001,kg,89012345999,100,150,160,130,50,10,0808,5\n" +
+      "Raw Sugar (RM),சர்க்கரை,Raw Materials,raw,100002,kg,89012345777,35,40,42,38,200,50,1701,5\n" +
+      "Amul Milk 1L,பால்,Dairy,standard,100003,ltr,89012345888,50,60,62,55,100,20,0401,0\n" +
+      "Hair Trim Service,ஹேர் கட்,Services,service,100004,pcs,SERV001,0,100,100,100,0,0,,0\n";
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);

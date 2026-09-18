@@ -507,13 +507,13 @@ export function Badge({ tone = 'neutral', className = '', children }) {
 }
 
 /** Right-aligned, tabular, sign-aware currency cell. */
-export function Money({ value, className = '', colored = false, decimals = true, showZero = true, suffix }) {
+export function Money({ value, className = '', colored = false, decimals = true, fractionDigits, showZero = true, suffix }) {
   const n = Number(value) || 0;
   if (!showZero && n === 0) return <span className={cx('tabular text-[color:var(--text-muted)]', className)}>—</span>;
   const tone = !colored ? '' : n > 0 ? 'text-emerald-600 dark:text-emerald-400' : n < 0 ? 'text-rose-600 dark:text-rose-400' : '';
   return (
     <span className={cx('tabular', tone, className)}>
-      {money(n, { decimals })}
+      {money(n, { decimals, fractionDigits })}
       {suffix}
     </span>
   );

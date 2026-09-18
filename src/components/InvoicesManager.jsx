@@ -49,6 +49,7 @@ import { ThermalReceiptView, THERMAL_THEMES, BILLING_THERMAL_THEME_IDS } from '.
 import { InvoiceDocumentView, INVOICE_THEMES, ACCENT_COLORS } from './InvoiceDocumentTemplates';
 import { exportInvoiceToWord, exportBillToWord, exportReport } from '../lib/exporters';
 import { ProductFormModal } from './InventoryManager';
+import { PartyFormModal } from './CustomerVendorLedger';
 import InvoiceEditModal from './InvoiceEditModal';
 
 /** Converts number to Indian words (Rupees) */
@@ -1924,10 +1925,20 @@ function NewInvoiceModal({
   const [loading, setLoading] = useState(false);
   const [activePickerIndex, setActivePickerIndex] = useState(null);
   const [newProductLineIndex, setNewProductLineIndex] = useState(null);
+  // showCustomerForm opens the real "New Customer" form from Parties
+  // when "+ Create New Customer…" is picked in the dropdown.
+  const [showCustomerForm, setShowCustomerForm] = useState(false);
+  // Customers created from this form, ahead of whatever the parent's own
+  // customer list (the `customers` prop) has — that list only catches up on
+  // its next refetch, but the new customer needs to be selectable immediately.
+  const [addedCustomers, setAddedCustomers] = useState([]);
+  const allCustomers = useMemo(() => [...addedCustomers, ...customers], [addedCustomers, customers]);
   const batchTrackingEnabled = Boolean(settings?.pos?.enableBatchTracking);
   const storeNearExpiryDays = Number(settings?.pos?.nearExpiryDays) || 30;
 
-  // Customer fields
+  // Customer fields — every invoice created here must name a real customer
+  // (see the explicit check in save() below); no anonymous walk-in billing
+  // from this form.
   const [selectedCustomerId, setSelectedCustomerId] = useState(invoice?.customerId || '');
   const [customerName, setCustomerName] = useState(invoice?.customerName || '');
   const [customerPhone, setCustomerPhone] = useState(invoice?.customerPhone && invoice?.customerPhone !== 'N/A' ? invoice.customerPhone : '');
@@ -2032,29 +2043,41 @@ function NewInvoiceModal({
 
   const isSoftMoney = ['UPI', 'Card', 'Net Banking', 'Bank Transfer', 'Cheque'].includes(paymentMethod);
 
-  // Handle Customer Selection & Auto-fill
-  const handleCustomerChange = (id) => {
-    setSelectedCustomerId(id);
-    if (!id) {
-      setCustomerName('');
-      setCustomerPhone('');
-      setCustomerGstin('');
-      setCustomerPan('');
-      setCustomerAddress('');
-      setCustomerState('');
-      setCustomerStateCode('');
+  const handleSelectCustomer = (cust) => {
+    setSelectedCustomerId(cust.id);
+    setCustomerName(cust.name || '');
+    setCustomerPhone(cust.phone || '');
+    setCustomerGstin(cust.gstin || '');
+    setCustomerPan(cust.pan || '');
+    setCustomerAddress(cust.address || '');
+    setCustomerState(cust.state || '');
+    setCustomerStateCode(cust.stateCode || '');
+  };
+
+  const clearSelectedCustomer = () => {
+    setSelectedCustomerId('');
+    setCustomerName('');
+    setCustomerPhone('');
+    setCustomerGstin('');
+    setCustomerPan('');
+    setCustomerAddress('');
+    setCustomerState('');
+    setCustomerStateCode('');
+  };
+
+  // Dropdown onChange — the last option ("__new__") opens the real
+  // Parties create-customer form instead of selecting a party.
+  const handleCustomerDropdownChange = (value) => {
+    if (value === '__new__') {
+      setShowCustomerForm(true);
       return;
     }
-    const cust = (customers || []).find((c) => c.id === id);
-    if (cust) {
-      setCustomerName(cust.name || '');
-      setCustomerPhone(cust.phone || '');
-      setCustomerGstin(cust.gstin || '');
-      setCustomerPan(cust.pan || '');
-      setCustomerAddress(cust.address || '');
-      setCustomerState(cust.state || '');
-      setCustomerStateCode(cust.stateCode || '');
+    if (!value) {
+      clearSelectedCustomer();
+      return;
     }
+    const cust = allCustomers.find((c) => c.id === value);
+    if (cust) handleSelectCustomer(cust);
   };
 
   // When picking a product from the Solid Picker Modal
@@ -2192,8 +2215,8 @@ function NewInvoiceModal({
       return;
     }
 
-    if (paymentMethod === 'Credit (Udhar)' && !customerName.trim()) {
-      showToast('Customer name is required for credit / udhar sale.', 'error');
+    if (!customerName.trim()) {
+      showToast('Select or enter a customer — invoices created here need a named customer, not a walk-in.', 'error');
       return;
     }
 
@@ -2325,24 +2348,19 @@ function NewInvoiceModal({
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <Field label="Select Registered Customer">
-                <Select value={selectedCustomerId} onChange={(e) => handleCustomerChange(e.target.value)}>
-                  <option value="">— Walk-in / Custom Customer —</option>
-                  {(customers || []).map((c) => (
+              <Field label="Customer *" className="md:col-span-2">
+                <Select
+                  value={selectedCustomerId}
+                  onChange={(e) => handleCustomerDropdownChange(e.target.value)}
+                >
+                  <option value="">— Select a Customer —</option>
+                  <option value="__new__">+ Create New Customer…</option>
+                  {allCustomers.map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.name} {c.phone ? `(${c.phone})` : ''}
                     </option>
                   ))}
                 </Select>
-              </Field>
-
-              <Field label="Customer Name *">
-                <Input
-                  value={customerName}
-                  onChange={(e) => setCustomerName(e.target.value)}
-                  placeholder="Walk-in Customer / Client Name"
-                  required
-                />
               </Field>
 
               <Field label="Phone Number">
@@ -2857,6 +2875,22 @@ function NewInvoiceModal({
           onProductCreated?.(newProduct);
         }}
       />
+
+      <PartyFormModal
+        open={showCustomerForm}
+        isCustomer={true}
+        editing={null}
+        groups={[]}
+        onClose={() => setShowCustomerForm(false)}
+        showToast={showToast}
+        onSaved={(newCust) => {
+          setShowCustomerForm(false);
+          if (newCust) {
+            setAddedCustomers((prev) => [newCust, ...prev]);
+            handleSelectCustomer(newCust);
+          }
+        }}
+      />
     </>
   );
 }
@@ -2879,10 +2913,13 @@ function QuotationEditorModal({
   const [loading, setLoading] = useState(false);
   const [activePickerIndex, setActivePickerIndex] = useState(null);
   const [newProductLineIndex, setNewProductLineIndex] = useState(null);
+  const [showCustomerForm, setShowCustomerForm] = useState(false);
+  const [addedCustomers, setAddedCustomers] = useState([]);
+  const allCustomers = useMemo(() => [...addedCustomers, ...customers], [addedCustomers, customers]);
   const batchTrackingEnabled = Boolean(settings?.pos?.enableBatchTracking);
   const storeNearExpiryDays = Number(settings?.pos?.nearExpiryDays) || 30;
 
-  // Customer fields
+  // Customer fields — same "real customer required" rule as the invoice form above.
   const [selectedCustomerId, setSelectedCustomerId] = useState(quotation?.customerId || '');
   const [customerName, setCustomerName] = useState(quotation?.customerName || '');
   const [customerPhone, setCustomerPhone] = useState(quotation?.customerPhone || '');
@@ -2936,23 +2973,35 @@ function QuotationEditorModal({
     ];
   });
 
-  // Handle Customer Selection & Auto-fill
-  const handleCustomerChange = (id) => {
-    setSelectedCustomerId(id);
-    if (!id) {
-      setCustomerName('');
-      setCustomerPhone('');
-      setCustomerGstin('');
-      setCustomerAddress('');
+  const handleSelectCustomer = (cust) => {
+    setSelectedCustomerId(cust.id);
+    setCustomerName(cust.name || '');
+    setCustomerPhone(cust.phone || '');
+    setCustomerGstin(cust.gstin || '');
+    setCustomerAddress(cust.address || '');
+  };
+
+  const clearSelectedCustomer = () => {
+    setSelectedCustomerId('');
+    setCustomerName('');
+    setCustomerPhone('');
+    setCustomerGstin('');
+    setCustomerAddress('');
+  };
+
+  // Dropdown onChange — the last option ("__new__") opens the real
+  // Parties create-customer form instead of selecting a party.
+  const handleCustomerDropdownChange = (value) => {
+    if (value === '__new__') {
+      setShowCustomerForm(true);
       return;
     }
-    const cust = (customers || []).find((c) => c.id === id);
-    if (cust) {
-      setCustomerName(cust.name || '');
-      setCustomerPhone(cust.phone || '');
-      setCustomerGstin(cust.gstin || '');
-      setCustomerAddress(cust.address || '');
+    if (!value) {
+      clearSelectedCustomer();
+      return;
     }
+    const cust = allCustomers.find((c) => c.id === value);
+    if (cust) handleSelectCustomer(cust);
   };
 
   // When picking a product
@@ -3092,6 +3141,11 @@ function QuotationEditorModal({
       return;
     }
 
+    if (!customerName.trim()) {
+      showToast('Select or enter a customer — quotations created here need a named customer, not a walk-in.', 'error');
+      return;
+    }
+
     setLoading(true);
     try {
       const payload = {
@@ -3160,24 +3214,19 @@ function QuotationEditorModal({
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <Field label="Choose Existing Customer">
-                <Select value={selectedCustomerId} onChange={(e) => handleCustomerChange(e.target.value)}>
-                  <option value="">— Walk-in / One-off Customer —</option>
-                  {(customers || []).map((c) => (
+              <Field label="Customer *" className="md:col-span-2">
+                <Select
+                  value={selectedCustomerId}
+                  onChange={(e) => handleCustomerDropdownChange(e.target.value)}
+                >
+                  <option value="">— Select a Customer —</option>
+                  <option value="__new__">+ Create New Customer…</option>
+                  {allCustomers.map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.name} {c.phone ? `(${c.phone})` : ''}
                     </option>
                   ))}
                 </Select>
-              </Field>
-
-              <Field label="Customer Name *">
-                <Input
-                  value={customerName}
-                  onChange={(e) => setCustomerName(e.target.value)}
-                  placeholder="e.g. John Doe / Acme Corp"
-                  required
-                />
               </Field>
 
               <Field label="Phone Number">
@@ -3438,6 +3487,22 @@ function QuotationEditorModal({
           setNewProductLineIndex(null);
           if (newProduct && idx !== null) handleProductSelect(idx, newProduct);
           onProductCreated?.(newProduct);
+        }}
+      />
+
+      <PartyFormModal
+        open={showCustomerForm}
+        isCustomer={true}
+        editing={null}
+        groups={[]}
+        onClose={() => setShowCustomerForm(false)}
+        showToast={showToast}
+        onSaved={(newCust) => {
+          setShowCustomerForm(false);
+          if (newCust) {
+            setAddedCustomers((prev) => [newCust, ...prev]);
+            handleSelectCustomer(newCust);
+          }
         }}
       />
     </>

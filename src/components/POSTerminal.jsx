@@ -7,7 +7,7 @@ import {
   Flame, ArrowUpDown, Clock, History, Zap, FileCheck, CreditCard,
   Coins, Building2, Sparkles, PlusCircle, MinusCircle, AlertCircle, CheckCheck,
   TrendingUp, TrendingDown, Filter, ArrowRight, Users, Maximize2, Minimize2,
-  FileText, Download, ChevronLeft, ChevronRight, Edit3
+  FileText, Download, ChevronLeft, ChevronRight, Edit3, Tag
 } from 'lucide-react';
 
 import api, { money, fmtDateTime, fmtDate, API_BASE } from '../lib/api';
@@ -19,6 +19,7 @@ import { getCategoryTheme } from '../lib/categoryTheme';
 import { ThermalReceiptView, THERMAL_THEMES, BILLING_THERMAL_THEME_IDS } from './ThermalReceiptTemplates';
 import { InvoiceDocumentView, INVOICE_THEMES, ACCENT_COLORS } from './InvoiceDocumentTemplates';
 import { exportBillToWord, exportInvoiceToWord } from '../lib/exporters';
+import { isWholeNumberUnit, enforceQtyPrecision } from '../lib/units';
 import InvoiceEditModal from './InvoiceEditModal';
 
 const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Credit (Udhar)', 'Partial Payment', 'Multi Pay'];
@@ -433,6 +434,12 @@ export function getSellableBatches(product) {
   });
 }
 
+/** Serial-tracked units still in stock, oldest-received first (serials don't expire, so FIFO is the only ordering that makes sense without a cashier's own pick). */
+export function getSellableSerials(product) {
+  const serials = (product?.serials || []).filter((s) => s.status !== 'SOLD');
+  return [...serials].sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
+}
+
 export function getProductRemainingStock(product, cart = [], allProducts = [], depth = 0) {
   if (!product) return { remaining: 0, text: '0', isLow: false, isOut: true };
   if (product.productType === 'service') {
@@ -680,6 +687,12 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   const [scaleReading, setScaleReading] = useState(false);
   const [liveWeight, setLiveWeight] = useState(0);
   const [batchPickerTarget, setBatchPickerTarget] = useState(null); // { product, qty, pricing }
+  const [serialPickerTarget, setSerialPickerTarget] = useState(null); // { product, pricing }
+  const [selectedSerialIds, setSelectedSerialIds] = useState([]);
+
+  useEffect(() => {
+    setSelectedSerialIds([]);
+  }, [serialPickerTarget]);
 
   const [showCheckout, setShowCheckout] = useState(false);
   const [paymentMode, setPaymentMode] = useState('Cash');
@@ -777,6 +790,31 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   const taxInclusive = settings?.tax?.taxMode === 'INCLUSIVE';
   const gstEnabled = settings?.tax?.enableGst !== false;
 
+  const decimalPlaces = useMemo(() => {
+    const b = settings?.billing || {};
+    if (b.showMoreDecimals || Number(b.decimalPlaces) > 2) {
+      const dp = Number(b.decimalPlaces);
+      return dp >= 2 && dp <= 4 ? dp : 3;
+    }
+    return 2;
+  }, [settings?.billing]);
+
+  const showBillingImages = useMemo(() => {
+    const b = settings?.billing || {};
+    const pos = settings?.pos || {};
+    if (b.showProductImages !== undefined) return Boolean(b.showProductImages);
+    if (b.showImagesOrIcons !== undefined) return Boolean(b.showImagesOrIcons);
+    if (pos.showProductImages !== undefined) return Boolean(pos.showProductImages);
+    return true;
+  }, [settings?.billing, settings?.pos]);
+
+  const roundToDecimals = (val, dp = decimalPlaces) => {
+    const factor = Math.pow(10, dp);
+    return Math.round((Number(val) || 0) * factor) / factor;
+  };
+
+  const bMoney = (val, opts = {}) => money(val, { fractionDigits: decimalPlaces, ...opts });
+
   const isRoundOff = useMemo(() => {
     if (roundOffOverride !== null) return roundOffOverride;
     const b = settings?.billing || {};
@@ -805,19 +843,20 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
           return s + (taxable * discountFactor * (i.taxRate || 0)) / 100;
         }, 0);
 
+    const factor = Math.pow(10, decimalPlaces);
     const beforeRound = subtotal - discountAmount + tax;
-    const grand = isRoundOff ? Math.round(beforeRound) : Math.round(beforeRound * 100) / 100;
-    const roundOff = Math.round((grand - beforeRound) * 100) / 100;
+    const grand = isRoundOff ? Math.round(beforeRound) : Math.round(beforeRound * factor) / factor;
+    const roundOff = Math.round((grand - beforeRound) * factor) / factor;
 
     return {
-      subtotal: Math.round(subtotal * 100) / 100,
-      discountAmount: Math.round(discountAmount * 100) / 100,
-      tax: Math.round(tax * 100) / 100,
-      beforeRound: Math.round(beforeRound * 100) / 100,
+      subtotal: Math.round(subtotal * factor) / factor,
+      discountAmount: Math.round(discountAmount * factor) / factor,
+      tax: Math.round(tax * factor) / factor,
+      beforeRound: Math.round(beforeRound * factor) / factor,
       roundOff,
       grand
     };
-  }, [cart, discountPercent, taxInclusive, gstEnabled, isRoundOff]);
+  }, [cart, discountPercent, taxInclusive, gstEnabled, isRoundOff, decimalPlaces]);
 
   /* ------------------------- loyalty redemption ------------------------- */
   const loyalty = useMemo(() => {
@@ -897,14 +936,18 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   /* ------------------------- adding items ------------------------- */
 
   const commitAddToCart = useCallback(
-    (product, qty, pricing, batchId) => {
+    (product, qty, pricing, batchId, serialId) => {
       const batch = batchId ? (product.batches || []).find((b) => b.id === batchId) : null;
+      const serial = serialId ? (product.serials || []).find((s) => s.id === serialId) : null;
       // A batch can be priced differently from the product's normal rate (e.g.
       // an older lot sold at a clearance price) — that override becomes the
       // base price this line's unit conversions (kg/g, alt units) build from.
       const basePrice = batch && batch.sellPrice != null ? Number(batch.sellPrice) : pricing.price;
       const options = getProductUnitOptions({ ...product, price: basePrice });
       const defaultOpt = options[0] || { unit: product.unit || 'pcs', factor: 1, price: basePrice };
+      // A serial is one physical, individually-identified unit — there's no
+      // such thing as "2 of serial #4521", so a serial line is always qty 1.
+      const effectiveQty = serialId ? 1 : qty;
 
       // The toast fires after setCart returns, not from inside the updater —
       // React invokes functional updaters during the render phase, and calling
@@ -913,16 +956,22 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
       // component" and risks losing the toast under concurrent scheduling.
       let toastMsg = '';
       setCart((prev) => {
-        const idx = prev.findIndex((i) => i.id === product.id && i.unit === defaultOpt.unit && (i.batchId || null) === (batchId || null));
+        // A serial line never merges with another — even the same product's
+        // other units are each their own distinct, traceable cart row.
+        const idx = serialId
+          ? -1
+          : prev.findIndex((i) => i.id === product.id && i.unit === defaultOpt.unit && (i.batchId || null) === (batchId || null) && !i.serialId);
         if (idx >= 0) {
           const next = [...prev];
-          const mergedQty = Math.round((next[idx].qty + qty) * 1000) / 1000;
-          const merged = { ...next[idx], qty: mergedQty, total: Math.round(mergedQty * next[idx].price * 100) / 100 };
+          const mergedQty = Math.round((next[idx].qty + effectiveQty) * 1000) / 1000;
+          const merged = { ...next[idx], qty: mergedQty, total: roundToDecimals(mergedQty * next[idx].price) };
           next[idx] = merged;
           toastMsg = `Updated ${product.name} (qty: ${mergedQty})`;
           return next;
         }
-        toastMsg = `Added ${product.name} to bill (qty: ${qty})`;
+        toastMsg = serial
+          ? `Added ${product.name} (Serial: ${serial.serialNo}) to bill`
+          : `Added ${product.name} to bill (qty: ${effectiveQty})`;
         return [
           ...prev,
           {
@@ -931,17 +980,19 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
             name: product.name,
             printName: product.printName || product.name,
             barcode: product.barcode || '',
-            qty,
+            qty: effectiveQty,
             unit: defaultOpt.unit,
             saleUnit: defaultOpt.unit,
             unitFactor: defaultOpt.factor || 1,
             price: defaultOpt.price,
-            total: Math.round(qty * defaultOpt.price * 100) / 100,
+            total: roundToDecimals(effectiveQty * defaultOpt.price),
             taxRate: product.taxRate || 0,
             pricingRule: pricing.ruleSource,
             itemDiscountPercent: pricing.discountPercent,
             batchId: batchId || undefined,
-            batchNo: batch ? batch.batchNo : undefined
+            batchNo: batch ? batch.batchNo : undefined,
+            serialId: serialId || undefined,
+            serialNo: serial ? serial.serialNo : undefined
           }
         ];
       });
@@ -969,6 +1020,21 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         const defaultUnit = hasGrams ? 'g' : options[0]?.unit || product.unit || 'pcs';
         setWeightUnit(defaultUnit);
         setWeightInput(defaultUnit === 'g' ? '500' : '1');
+        return;
+      }
+
+      // Serial-tracked — every unit is its own physical item, so the cashier
+      // always confirms exactly which one is going out (there's no "silently
+      // pick the oldest" shortcut here the way there is for a single batch,
+      // since a serial/IMEI is customer-facing information, e.g. on the
+      // receipt or a warranty card).
+      if (product.trackSerials) {
+        const sellable = getSellableSerials(product);
+        if (sellable.length === 0) {
+          showToast(`${product.name} has no serial-tracked units left in stock.`, 'error');
+          return;
+        }
+        setSerialPickerTarget({ product, pricing });
         return;
       }
 
@@ -1018,6 +1084,18 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
     [batchPickerTarget, commitAddToCart]
   );
 
+  // Each picked serial becomes its own cart line (a serial is one physical
+  // unit — "select which item I sell" means one tap per unit, not a quantity).
+  const confirmSerialPick = useCallback(
+    (serialIds) => {
+      if (!serialPickerTarget) return;
+      const { product, pricing } = serialPickerTarget;
+      (serialIds || []).forEach((serialId) => commitAddToCart(product, 1, pricing, null, serialId));
+      setSerialPickerTarget(null);
+    },
+    [serialPickerTarget, commitAddToCart]
+  );
+
   const removeFromCart = useCallback((product, qty = 1) => {
     // Side effects (toast, sound) run after setCart returns — see commitAddToCart
     // above for why they can't live inside the updater itself.
@@ -1043,7 +1121,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
       next[idx] = {
         ...current,
         qty: newQty,
-        total: Math.round(newQty * current.price * 100) / 100
+        total: roundToDecimals(newQty * current.price)
       };
       toastMsg = `Decremented ${product.name} (qty: ${newQty})`;
       sound = 'remove';
@@ -1193,14 +1271,14 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
     const selectedOpt = options.find((o) => o.unit.toLowerCase() === weightUnit.toLowerCase()) || options[0];
     const unitPrice = selectedOpt.price;
     const unitFactor = selectedOpt.factor || 1;
-    const lineTotal = Math.round(value * unitPrice * 100) / 100;
+    const lineTotal = roundToDecimals(value * unitPrice);
 
     setCart((prev) => {
       const idx = prev.findIndex((i) => i.id === product.id && i.unit === selectedOpt.unit);
       if (idx >= 0) {
         const next = [...prev];
         const qty = Math.round((next[idx].qty + value) * 1000) / 1000;
-        next[idx] = { ...next[idx], qty, total: Math.round(qty * next[idx].price * 100) / 100 };
+        next[idx] = { ...next[idx], qty, total: roundToDecimals(qty * next[idx].price) };
         return next;
       }
       return [
@@ -1218,7 +1296,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
     });
 
     setWeightModal(null);
-    showToast(`${value} ${selectedOpt.unit} of ${product.name} added (${money(lineTotal)}).`);
+    showToast(`${value} ${selectedOpt.unit} of ${product.name} added (${bMoney(lineTotal)}).`);
   };
 
   const switchCartItemUnit = (cartItemId, fromUnit, batchId, targetUnit) => {
@@ -1235,11 +1313,12 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         // Switching into a bigger pack unit (e.g. bag, box, case) starts fresh at
         // 1 — carrying over a converted fraction (like 0.04 bag) isn't useful for
         // something sold as whole packs. Sub-units (g, ml) still convert normally.
-        const newQty = newOpt.isAlt
+        const convertedQty = newOpt.isAlt
           ? 1
           : newOpt.factor > 0
             ? Math.round((currentBaseQty / newOpt.factor) * 1000) / 1000
             : item.qty;
+        const newQty = enforceQtyPrecision(newOpt.unit, convertedQty);
         const newPrice = newOpt.price;
         const total = Math.round(newQty * newPrice * 100) / 100;
 
@@ -1257,20 +1336,29 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   };
 
   // A product can appear as more than one cart line — different units (kg vs
-  // g) or, now, different batches of the same product. `id` alone doesn't
-  // identify a single line, so every per-line edit below also matches on
-  // unit + batch (mirrors the check the remove button already used).
-  const isSameLine = (i, id, unit, batchId) =>
-    i.id === id && (unit === undefined || i.unit === unit) && (i.batchId || null) === (batchId || null);
+  // g), different batches, or now different serials of the same product.
+  // `id` alone doesn't identify a single line, so every per-line edit below
+  // also matches on unit + batch + serial (mirrors the check the remove
+  // button already used).
+  const isSameLine = (i, id, unit, batchId, serialId) =>
+    i.id === id &&
+    (unit === undefined || i.unit === unit) &&
+    (i.batchId || null) === (batchId || null) &&
+    (i.serialId || null) === (serialId || null);
 
-  const updateQty = (id, delta, unit, batchId) =>
+  const updateQty = (id, delta, unit, batchId, serialId) =>
     setCart((prev) =>
       prev
         .map((i) => {
-          if (!isSameLine(i, id, unit, batchId)) return i;
+          if (!isSameLine(i, id, unit, batchId, serialId)) return i;
+          if (i.serialId) return i; // one unit per serial line — remove the line instead of adjusting qty
           const step = i.unit === 'g' || i.unit === 'ml' ? 50 : 1;
-          const qty = Math.round(Math.max(0, i.qty + delta * step) * 1000) / 1000;
-          return { ...i, qty, total: Math.round(qty * i.price * 100) / 100 };
+          const rawQty = Math.max(0, i.qty + delta * step);
+          // Whole-number units (pcs, box, dozen, ...) never round to a
+          // fraction here regardless of step — g/ml keep their 3-decimal
+          // precision for weighed items.
+          const qty = isWholeNumberUnit(i.unit) ? Math.round(rawQty) : Math.round(rawQty * 1000) / 1000;
+          return { ...i, qty, total: roundToDecimals(qty * i.price) };
         })
         .filter((i) => i.qty > 0)
     );
@@ -1279,18 +1367,23 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   // sign before checkout — verified live that a negative qty slips straight
   // through to the backend, credits stock instead of debiting it, and posts a
   // negative "COMPLETED" sale. Clamp both to non-negative here, at the source.
-  const setLinePrice = (id, price, unit, batchId) =>
+  const setLinePrice = (id, price, unit, batchId, serialId) =>
     setCart((prev) =>
-      prev.map((i) => (isSameLine(i, id, unit, batchId) ? { ...i, price: Math.max(0, Number(price) || 0), total: Math.round(i.qty * Math.max(0, Number(price) || 0) * 100) / 100 } : i))
+      prev.map((i) => (isSameLine(i, id, unit, batchId, serialId) ? { ...i, price: Math.max(0, Number(price) || 0), total: roundToDecimals(i.qty * Math.max(0, Number(price) || 0)) } : i))
     );
 
-  const setLineQty = (id, val, unit, batchId) =>
+  const setLineQty = (id, val, unit, batchId, serialId) =>
     setCart((prev) =>
       prev.map((i) => {
-        if (!isSameLine(i, id, unit, batchId)) return i;
-        const newQty = val === '' ? '' : Math.max(0, Number(val) || 0);
+        if (!isSameLine(i, id, unit, batchId, serialId)) return i;
+        if (i.serialId) return i; // one unit per serial line — not editable
+        // Let the field go through '' / a trailing '.' while typing — only
+        // whole-number units get their decimal point stripped as-you-type
+        // (a weighed item in kg/g still gets to type "1.5").
+        const rawVal = isWholeNumberUnit(i.unit) ? String(val).replace(/\./g, '') : val;
+        const newQty = rawVal === '' ? '' : Math.max(0, Number(rawVal) || 0);
         const safeQty = Number(newQty) || 0;
-        return { ...i, qty: newQty, total: Math.round(safeQty * i.price * 100) / 100 };
+        return { ...i, qty: newQty, total: roundToDecimals(safeQty * i.price) };
       })
     );
 
@@ -1627,7 +1720,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
       const catTheme = getCategoryTheme(prodCat);
       return { product: p, stockInfo, out, isLow, pricing, isRecent, imgUrl, autoVisual, catTheme };
     });
-  }, [filtered, cart, products, currentCustomer, priceSheets, priceSheetId, recentBilledIdSet, selectedCategory, categories]);
+  }, [filtered, cart, products, currentCustomer, priceSheets, priceSheetId, recentBilledIdSet, selectedCategory, categories, showBillingImages]);
 
   if (initialLoading) return <Spinner label="Opening the billing terminal…" />;
 
@@ -1728,27 +1821,29 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                         className="flex items-center justify-between p-2 rounded-xl hover:bg-[color:var(--bg-subtle)] cursor-pointer text-xs transition-colors group"
                       >
                         <div className="flex items-center gap-2.5 min-w-0 pr-2">
-                          <div className="h-8 w-8 rounded-lg overflow-hidden border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] shrink-0 flex items-center justify-center">
-                            {imgUrl ? (
-                              <img
-                                src={imgUrl}
-                                alt={p.name}
-                                className="h-full w-full object-cover"
-                                onError={(e) => {
-                                  e.currentTarget.style.display = 'none';
-                                  if (e.currentTarget.nextSibling) {
-                                    e.currentTarget.nextSibling.style.display = 'flex';
-                                  }
-                                }}
-                              />
-                            ) : null}
-                            <div
-                              className={`h-full w-full bg-gradient-to-br ${autoVisual.gradient} flex items-center justify-center text-xs select-none`}
-                              style={{ display: imgUrl ? 'none' : 'flex' }}
-                            >
-                              <span>{autoVisual.icon}</span>
+                          {showBillingImages && (
+                            <div className="h-8 w-8 rounded-lg overflow-hidden border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] shrink-0 flex items-center justify-center">
+                              {imgUrl ? (
+                                <img
+                                  src={imgUrl}
+                                  alt={p.name}
+                                  className="h-full w-full object-cover"
+                                  onError={(e) => {
+                                    e.currentTarget.style.display = 'none';
+                                    if (e.currentTarget.nextSibling) {
+                                      e.currentTarget.nextSibling.style.display = 'flex';
+                                    }
+                                  }}
+                                />
+                              ) : null}
+                              <div
+                                className={`h-full w-full bg-gradient-to-br ${autoVisual.gradient} flex items-center justify-center text-xs select-none`}
+                                style={{ display: imgUrl ? 'none' : 'flex' }}
+                              >
+                                <span>{autoVisual.icon}</span>
+                              </div>
                             </div>
-                          </div>
+                          )}
                           <div className="min-w-0">
                             <div className="flex items-center gap-1.5 min-w-0">
                               <div className="font-bold text-[color:var(--text-primary)] group-hover:text-indigo-600 dark:group-hover:text-indigo-400 truncate">
@@ -1775,7 +1870,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                           </div>
                         </div>
                         <div className="text-right shrink-0">
-                          <Money value={pricing.price} decimals={false} className="font-bold text-[13px]" />
+                          <Money value={pricing.price} fractionDigits={decimalPlaces} className="font-bold text-[13px]" />
                           <span className="block text-[10px] font-bold text-indigo-600 dark:text-indigo-400">
                             + Add
                           </span>
@@ -1940,46 +2035,80 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                   <div className={`absolute top-0 left-0 right-0 h-[3.5px] ${catTheme.topBar}`} />
 
                   {/* Product Image Card (Compact 4-per-row) */}
-                  <div className="relative w-full h-22 sm:h-24 rounded-lg overflow-hidden bg-[color:var(--bg-subtle)] border border-[color:var(--border-subtle)] mt-0.5 mb-1.5 flex items-center justify-center shrink-0">
-                    {imgUrl ? (
-                      <img
-                        src={imgUrl}
-                        alt={p.name}
-                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                        loading="lazy"
-                        onError={(e) => {
-                          e.currentTarget.style.display = 'none';
-                          if (e.currentTarget.nextSibling) {
-                            e.currentTarget.nextSibling.style.display = 'flex';
-                          }
-                        }}
-                      />
-                    ) : null}
-                    <div
-                      className={`w-full h-full bg-gradient-to-br ${autoVisual.gradient} flex flex-col items-center justify-center relative overflow-hidden transition-transform duration-300 group-hover:scale-105 select-none`}
-                      style={{ display: imgUrl ? 'none' : 'flex' }}
-                    >
-                      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,255,255,0.25),transparent_60%)] pointer-events-none" />
-                      {autoVisual.isEmoji ? (
-                        <span className="text-3xl sm:text-4xl filter drop-shadow-md select-none transform transition-transform group-hover:scale-110 duration-200">
-                          {autoVisual.icon}
-                        </span>
-                      ) : (
-                        <div className="h-9 w-9 rounded-xl bg-white/20 backdrop-blur-xs border border-white/30 flex items-center justify-center text-white font-black text-sm shadow-md tracking-wider uppercase">
-                          {autoVisual.icon}
-                        </div>
-                      )}
-                    </div>
+                  {showBillingImages ? (
+                    <div className="relative w-full h-22 sm:h-24 rounded-lg overflow-hidden bg-[color:var(--bg-subtle)] border border-[color:var(--border-subtle)] mt-0.5 mb-1.5 flex items-center justify-center shrink-0">
+                      {imgUrl ? (
+                        <img
+                          src={imgUrl}
+                          alt={p.name}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                          loading="lazy"
+                          onError={(e) => {
+                            e.currentTarget.style.display = 'none';
+                            if (e.currentTarget.nextSibling) {
+                              e.currentTarget.nextSibling.style.display = 'flex';
+                            }
+                          }}
+                        />
+                      ) : null}
+                      <div
+                        className={`w-full h-full bg-gradient-to-br ${autoVisual.gradient} flex flex-col items-center justify-center relative overflow-hidden transition-transform duration-300 group-hover:scale-105 select-none`}
+                        style={{ display: imgUrl ? 'none' : 'flex' }}
+                      >
+                        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,255,255,0.25),transparent_60%)] pointer-events-none" />
+                        {autoVisual.isEmoji ? (
+                          <span className="text-3xl sm:text-4xl filter drop-shadow-md select-none transform transition-transform group-hover:scale-110 duration-200">
+                            {autoVisual.icon}
+                          </span>
+                        ) : (
+                          <div className="h-9 w-9 rounded-xl bg-white/20 backdrop-blur-xs border border-white/30 flex items-center justify-center text-white font-black text-sm shadow-md tracking-wider uppercase">
+                            {autoVisual.icon}
+                          </div>
+                        )}
+                      </div>
 
-                    {/* Overlay Badges */}
-                    <div className="absolute top-1 left-1 right-1 flex items-center justify-between gap-0.5 pointer-events-none">
-                      <div className="flex items-center gap-0.5 max-w-[70%] truncate">
+                      {/* Overlay Badges */}
+                      <div className="absolute top-1 left-1 right-1 flex items-center justify-between gap-0.5 pointer-events-none">
+                        <div className="flex items-center gap-0.5 max-w-[70%] truncate">
+                          {p.sku ? (
+                            <span className="tabular truncate text-[8px] font-mono font-bold px-1 py-0.2 rounded bg-indigo-950/90 text-indigo-200 border border-indigo-500/30 backdrop-blur-xs shadow-xs" title={`SKU: ${p.sku}`}>
+                              {p.sku}
+                            </span>
+                          ) : p.barcode ? (
+                            <span className="tabular truncate text-[8px] font-mono font-bold px-1 py-0.2 rounded bg-slate-950/80 text-white backdrop-blur-xs shadow-xs" title={`Barcode: ${p.barcode}`}>
+                              {p.barcode}
+                            </span>
+                          ) : null}
+                        </div>
+
+                        <div className="flex items-center gap-0.5 shrink-0">
+                          {isRecent && (
+                            <span
+                              className="flex items-center gap-0.5 rounded px-1 py-0.2 text-[7.5px] font-bold bg-amber-500 text-white shadow-xs"
+                              title="Recently billed product"
+                            >
+                              <Clock className="h-2 w-2" />
+                              Recent
+                            </span>
+                          )}
+                          {p.requiresWeight && (
+                            <span className="rounded p-0.5 bg-cyan-600 text-white shadow-xs" title="Weighing Scale Required">
+                              <Scale className="h-2 w-2" />
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    /* Compact Text-Only Header with Badges when Images are Turned Off */
+                    <div className="flex items-center justify-between gap-1 mt-0.5 mb-1.5 min-h-[1.25rem]">
+                      <div className="flex items-center gap-1 max-w-[70%] truncate">
                         {p.sku ? (
-                          <span className="tabular truncate text-[8px] font-mono font-bold px-1 py-0.2 rounded bg-indigo-950/90 text-indigo-200 border border-indigo-500/30 backdrop-blur-xs shadow-xs" title={`SKU: ${p.sku}`}>
+                          <span className="tabular truncate text-[8px] font-mono font-bold px-1 py-0.2 rounded bg-indigo-50 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800/60" title={`SKU: ${p.sku}`}>
                             {p.sku}
                           </span>
                         ) : p.barcode ? (
-                          <span className="tabular truncate text-[8px] font-mono font-bold px-1 py-0.2 rounded bg-slate-950/80 text-white backdrop-blur-xs shadow-xs" title={`Barcode: ${p.barcode}`}>
+                          <span className="tabular truncate text-[8px] font-mono font-bold px-1 py-0.2 rounded bg-[color:var(--bg-subtle)] text-[color:var(--text-secondary)] border border-[color:var(--border-subtle)]" title={`Barcode: ${p.barcode}`}>
                             {p.barcode}
                           </span>
                         ) : null}
@@ -2002,7 +2131,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                         )}
                       </div>
                     </div>
-                  </div>
+                  )}
 
                   {/* Product Info */}
                   <div className="min-w-0 flex-1 flex flex-col justify-between">
@@ -2018,7 +2147,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                     </div>
 
                     <div className="mt-1.5 flex items-center justify-between gap-1 border-t pt-1.5" style={{ borderColor: 'var(--border)' }}>
-                      <Money value={pricing.price} decimals={false} className="text-[12px] sm:text-[12.5px] font-bold text-[color:var(--text-primary)]" />
+                      <Money value={pricing.price} fractionDigits={decimalPlaces} className="text-[12px] sm:text-[12.5px] font-bold text-[color:var(--text-primary)]" />
                       <span
                         className={`tabular rounded px-1 py-0.2 text-[8px] sm:text-[8.5px] font-bold shrink-0 ${
                           out
@@ -2203,33 +2332,35 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
                 return (
                   <div
-                    key={`${item.id}_${item.unit}_${item.batchId || ''}`}
+                    key={`${item.id}_${item.unit}_${item.batchId || ''}_${item.serialId || ''}`}
                     className="flex flex-col gap-1.5 rounded-xl p-2 sm:p-2.5 transition-colors"
                     style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}
                   >
                     <div className="flex items-center gap-2">
                       {/* Product Image Card in Cart / Billing */}
-                      <div className="h-10 w-10 shrink-0 rounded-lg overflow-hidden border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] flex items-center justify-center shadow-2xs">
-                        {imgUrl ? (
-                          <img
-                            src={imgUrl}
-                            alt={item.name}
-                            className="h-full w-full object-cover"
-                            onError={(e) => {
-                              e.currentTarget.style.display = 'none';
-                              if (e.currentTarget.nextSibling) {
-                                e.currentTarget.nextSibling.style.display = 'flex';
-                              }
-                            }}
-                          />
-                        ) : null}
-                        <div
-                          className={`h-full w-full bg-gradient-to-br ${autoVisual.gradient} flex items-center justify-center text-[13px] shadow-inner select-none font-bold text-white`}
-                          style={{ display: imgUrl ? 'none' : 'flex' }}
-                        >
-                          <span>{autoVisual.icon}</span>
+                      {showBillingImages && (
+                        <div className="h-10 w-10 shrink-0 rounded-lg overflow-hidden border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] flex items-center justify-center shadow-2xs">
+                          {imgUrl ? (
+                            <img
+                              src={imgUrl}
+                              alt={item.name}
+                              className="h-full w-full object-cover"
+                              onError={(e) => {
+                                e.currentTarget.style.display = 'none';
+                                if (e.currentTarget.nextSibling) {
+                                  e.currentTarget.nextSibling.style.display = 'flex';
+                                }
+                              }}
+                            />
+                          ) : null}
+                          <div
+                            className={`h-full w-full bg-gradient-to-br ${autoVisual.gradient} flex items-center justify-center text-[13px] shadow-inner select-none font-bold text-white`}
+                            style={{ display: imgUrl ? 'none' : 'flex' }}
+                          >
+                            <span>{autoVisual.icon}</span>
+                          </div>
                         </div>
-                      </div>
+                      )}
 
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5 min-w-0">
@@ -2253,32 +2384,39 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                               Batch: {item.batchNo}
                             </span>
                           )}
+                          {item.serialNo && (
+                            <span className="ml-1.5 inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-extrabold bg-indigo-500/10 text-indigo-600">
+                              S/N: {item.serialNo}
+                            </span>
+                          )}
                         </div>
                       </div>
 
                       <div className="flex shrink-0 items-center gap-1">
                         <button
                           type="button"
-                          onClick={() => updateQty(item.id, -1, item.unit, item.batchId)}
-                          className="rounded-md p-1 text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-muted)] transition-colors"
+                          onClick={() => updateQty(item.id, -1, item.unit, item.batchId, item.serialId)}
+                          disabled={Boolean(item.serialId)}
+                          className="rounded-md p-1 text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-muted)] transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                           style={{ background: 'var(--surface)' }}
-                          title="Decrease quantity"
+                          title={item.serialId ? 'Serial-tracked units are one per line — remove the line instead' : 'Decrease quantity'}
                         >
                           <Minus className="h-3 w-3" />
                         </button>
                         <button
                           type="button"
-                          onClick={() => updateQty(item.id, 1, item.unit, item.batchId)}
-                          className="rounded-md p-1 text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-muted)] transition-colors"
+                          onClick={() => updateQty(item.id, 1, item.unit, item.batchId, item.serialId)}
+                          disabled={Boolean(item.serialId)}
+                          className="rounded-md p-1 text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-muted)] transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                           style={{ background: 'var(--surface)' }}
-                          title="Increase quantity"
+                          title={item.serialId ? 'Serial-tracked units are one per line — pick another unit instead' : 'Increase quantity'}
                         >
                           <Plus className="h-3 w-3" />
                         </button>
-                        <Money value={item.total} decimals={false} className="w-14 text-right text-[12px] font-bold" />
+                        <Money value={item.total} fractionDigits={decimalPlaces} className="min-w-[4rem] text-right text-[12px] font-bold" />
                         <button
                           type="button"
-                          onClick={() => setCart(cart.filter((i) => !(i.id === item.id && i.unit === item.unit && (i.batchId || null) === (item.batchId || null))))}
+                          onClick={() => setCart(cart.filter((i) => !(i.id === item.id && i.unit === item.unit && (i.batchId || null) === (item.batchId || null) && (i.serialId || null) === (item.serialId || null))))}
                           className="p-1 text-rose-500 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-md transition-colors"
                           title="Remove item"
                         >
@@ -2293,30 +2431,33 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                         type="number"
                         step="0.0001"
                         value={item.price}
-                        onChange={(e) => setLinePrice(item.id, e.target.value, item.unit, item.batchId)}
-                        className="tabular w-16 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold"
+                        onChange={(e) => setLinePrice(item.id, e.target.value, item.unit, item.batchId, item.serialId)}
+                        className="tabular w-20 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold"
                         style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
                       />
                       <span className="text-[10px] text-[color:var(--text-muted)]">×</span>
                       <input
                         type="number"
-                        step="any"
+                        step={isWholeNumberUnit(item.unit) ? '1' : 'any'}
+                        inputMode={isWholeNumberUnit(item.unit) ? 'numeric' : 'decimal'}
                         value={item.qty}
-                        onChange={(e) => setLineQty(item.id, e.target.value, item.unit, item.batchId)}
-                        className="tabular w-12 rounded-md px-1 py-0.5 text-[10.5px] font-bold text-center"
+                        onChange={(e) => setLineQty(item.id, e.target.value, item.unit, item.batchId, item.serialId)}
+                        disabled={Boolean(item.serialId)}
+                        className="tabular w-12 rounded-md px-1 py-0.5 text-[10.5px] font-bold text-center disabled:opacity-60"
                         style={
                           stockInfo.isOversold
                             ? { background: 'var(--surface)', border: '1px solid #e11d48', color: '#e11d48' }
                             : { background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text-primary)' }
                         }
-                        title={stockInfo.isOversold ? 'Quantity exceeds available stock' : undefined}
+                        title={item.serialId ? 'Serial-tracked units are always one each' : (stockInfo.isOversold ? 'Quantity exceeds available stock' : undefined)}
                       />
 
                       {unitOpts.length > 1 ? (
                         <select
                           value={item.unit}
+                          disabled={Boolean(item.serialId)}
                           onChange={(e) => switchCartItemUnit(item.id, item.unit, item.batchId, e.target.value)}
-                          className="tabular rounded-md px-1 py-0.5 text-[10px] font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 cursor-pointer"
+                          className="tabular rounded-md px-1 py-0.5 text-[10px] font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
                         >
                           {unitOpts.map((opt) => (
                             <option key={opt.unit} value={opt.unit}>
@@ -2339,11 +2480,11 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
           </div>
 
           <div className="space-y-1 border-t pt-2.5 text-[12px]" style={{ borderColor: 'var(--border)' }}>
-            <Row label={`Subtotal${taxInclusive ? ' (tax extracted)' : ''}`} value={totals.subtotal} />
+            <Row label={`Subtotal${taxInclusive ? ' (tax extracted)' : ''}`} value={totals.subtotal} decimalPlaces={decimalPlaces} />
             {totals.discountAmount > 0 && (
-              <Row label={`Discount (${discountPercent}%)`} value={-totals.discountAmount} tone="success" />
+              <Row label={`Discount (${discountPercent}%)`} value={-totals.discountAmount} tone="success" decimalPlaces={decimalPlaces} />
             )}
-            {gstEnabled && <Row label="GST" value={totals.tax} />}
+            {gstEnabled && <Row label="GST" value={totals.tax} decimalPlaces={decimalPlaces} />}
 
             <div className="flex items-center justify-between py-1 border-y border-[color:var(--border-subtle)] my-1">
               <label className="flex items-center gap-2 cursor-pointer select-none text-[11.5px] font-bold text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]">
@@ -2357,16 +2498,16 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
               </label>
               {isRoundOff && totals.roundOff !== 0 ? (
                 <span className={`font-mono font-bold text-[11.5px] ${totals.roundOff > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
-                  {totals.roundOff > 0 ? `+₹${totals.roundOff.toFixed(2)}` : `-₹${Math.abs(totals.roundOff).toFixed(2)}`}
+                  {totals.roundOff > 0 ? `+₹${totals.roundOff.toFixed(decimalPlaces)}` : `-₹${Math.abs(totals.roundOff).toFixed(decimalPlaces)}`}
                 </span>
               ) : (
-                <span className="font-mono text-[11px] text-[color:var(--text-muted)]">₹0.00</span>
+                <span className="font-mono text-[11px] text-[color:var(--text-muted)]">₹{(0).toFixed(decimalPlaces)}</span>
               )}
             </div>
 
             <div className="flex items-center justify-between pt-1" style={{ borderColor: 'var(--border)' }}>
               <span className="text-[13px] font-bold text-[color:var(--text-primary)]">Grand Total</span>
-              <Money value={totals.grand} className="text-[20px] font-bold text-[color:var(--accent)]" />
+              <Money value={totals.grand} fractionDigits={decimalPlaces} className="text-[20px] font-bold text-[color:var(--accent)]" />
             </div>
           </div>
 
@@ -2446,7 +2587,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                   <div className="flex items-center gap-2 shrink-0">
                     <div className="text-right">
                       <div className="font-mono font-bold text-[12px] text-[color:var(--text-primary)]">
-                        {money(inv.total)}
+                        {bMoney(inv.total)}
                       </div>
                       <span className={`text-[9.5px] font-bold px-1.5 py-0.5 rounded-md ${
                         inv.status === 'VOID'
@@ -2483,7 +2624,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         open={Boolean(weightModal)}
         onClose={() => setWeightModal(null)}
         title={weightModal ? `Quantity & Weight — ${weightModal.name}` : ''}
-        subtitle={weightModal ? `Base Price: ${money(weightModal.price)} per ${weightModal.unit}` : ''}
+        subtitle={weightModal ? `Base Price: ${bMoney(weightModal.price)} per ${weightModal.unit}` : ''}
         icon={Scale}
         size="sm"
         footer={
@@ -2581,13 +2722,13 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                 <div className="flex items-center justify-between">
                   <span className="text-[color:var(--text-secondary)] font-medium">Unit Rate:</span>
                   <span className="font-bold text-[color:var(--text-primary)]">
-                    {money(currentOpt.price)} / {weightUnit}
+                    {bMoney(currentOpt.price)} / {weightUnit}
                   </span>
                 </div>
 
                 <div className="flex items-center justify-between">
                   <span className="text-[color:var(--text-secondary)] font-medium">Line Amount:</span>
-                  <Money value={lineAmount} className="text-[17px] font-bold text-emerald-600 dark:text-emerald-400" />
+                  <Money value={lineAmount} fractionDigits={decimalPlaces} className="text-[17px] font-bold text-emerald-600 dark:text-emerald-400" />
                 </div>
 
                 <div className="pt-2 border-t border-[color:var(--border-subtle)] flex items-center justify-between text-[11px]">
@@ -2633,7 +2774,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                       )}
                       {b.sellPrice != null && (
                         <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600">
-                          {money(b.sellPrice)}/{batchPickerTarget.product.unit}
+                          {bMoney(b.sellPrice)}/{batchPickerTarget.product.unit}
                         </span>
                       )}
                     </div>
@@ -2654,10 +2795,77 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         </Modal>
       )}
 
+      {serialPickerTarget && (
+        <Modal
+          open={true}
+          onClose={() => setSerialPickerTarget(null)}
+          title={`Select Unit — ${serialPickerTarget.product.name}`}
+          subtitle="Tap each physical unit you're selling — oldest-received is suggested first."
+          icon={Tag}
+          size="md"
+          footer={
+            <div className="flex items-center justify-between w-full gap-2">
+              <span className="text-xs text-[color:var(--text-muted)]">
+                {selectedSerialIds.length} unit(s) selected
+              </span>
+              <Button
+                type="button"
+                variant="primary"
+                disabled={selectedSerialIds.length === 0}
+                onClick={() => confirmSerialPick(selectedSerialIds)}
+              >
+                Add {selectedSerialIds.length || ''} to Bill
+              </Button>
+            </div>
+          }
+        >
+          <div className="space-y-2 max-h-[55vh] overflow-y-auto">
+            {getSellableSerials(serialPickerTarget.product).map((s, idx) => {
+              const picked = selectedSerialIds.includes(s.id);
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() =>
+                    setSelectedSerialIds((prev) =>
+                      prev.includes(s.id) ? prev.filter((id) => id !== s.id) : [...prev, s.id]
+                    )
+                  }
+                  className={`w-full flex items-center justify-between gap-3 p-3 rounded-xl border text-left transition-colors ${
+                    picked
+                      ? 'border-emerald-500 bg-emerald-50/60 dark:bg-emerald-950/30'
+                      : idx === 0
+                      ? 'border-indigo-400 bg-indigo-50/60 dark:bg-indigo-950/30 hover:bg-indigo-100/60 dark:hover:bg-indigo-900/40'
+                      : 'border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] hover:bg-[color:var(--bg-subtle)]'
+                  }`}
+                >
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-bold text-[color:var(--text-primary)]">S/N: {s.serialNo}</span>
+                      {idx === 0 && !picked && (
+                        <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded-full bg-indigo-600 text-white">Suggested</span>
+                      )}
+                    </div>
+                    {s.imei && (
+                      <div className="text-xs text-[color:var(--text-muted)] mt-0.5">IMEI: {s.imei}</div>
+                    )}
+                  </div>
+                  {picked ? (
+                    <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0" />
+                  ) : (
+                    <ArrowRight className="h-4 w-4 text-[color:var(--text-muted)] shrink-0" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </Modal>
+      )}
+
       <Modal
         open={showCheckout}
         onClose={() => setShowCheckout(false)}
-        title={`Collect ${money(payable)}`}
+        title={`Collect ${bMoney(payable)}`}
         subtitle={customer ? `From ${customer.name}` : 'Walk-in customer'}
         icon={Wallet}
         size="md"
@@ -2770,7 +2978,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                     Deducted from Pending Advance
                   </span>
                   <span className="tabular text-[12.5px] font-bold text-emerald-600 dark:text-emerald-400">
-                    −{money(advanceCredit.applied)}
+                    −{bMoney(advanceCredit.applied)}
                   </span>
                 </div>
               )}
@@ -2794,11 +3002,11 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
           {(loyalty.amount > 0 || advanceCredit.applied > 0) && (
             <div className="flex items-center justify-between rounded-xl px-3 py-2.5" style={{ background: 'var(--bg-subtle)' }}>
               <div className="text-[11.5px] font-semibold text-[color:var(--text-secondary)]">
-                Bill {money(totals.grand)}
-                {loyalty.amount > 0 && ` − pts ${money(loyalty.amount)}`}
-                {advanceCredit.applied > 0 && ` − advance ${money(advanceCredit.applied)}`}
+                Bill {bMoney(totals.grand)}
+                {loyalty.amount > 0 && ` − pts ${bMoney(loyalty.amount)}`}
+                {advanceCredit.applied > 0 && ` − advance ${bMoney(advanceCredit.applied)}`}
               </div>
-              <Money value={payable} className="text-[18px] font-bold text-[color:var(--accent)]" />
+              <Money value={payable} fractionDigits={decimalPlaces} className="text-[18px] font-bold text-[color:var(--accent)]" />
             </div>
           )}
 
@@ -2843,14 +3051,14 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
               <div className="flex gap-1.5">
                 {[payable, ...(settings?.pos?.quickAmountPills || [500, 1000, 2000])].map((amount, i) => (
                   <Button key={i} size="sm" onClick={() => setCashTendered(String(amount))}>
-                    {money(amount, { decimals: false })}
+                    {i === 0 ? bMoney(amount) : money(amount, { decimals: false })}
                   </Button>
                 ))}
               </div>
               {parseFloat(cashTendered) > payable && (
                 <div className="flex items-center justify-between rounded-xl bg-emerald-50 px-3 py-2.5 dark:bg-emerald-950/40">
                   <span className="text-[12px] font-bold text-emerald-700 dark:text-emerald-300">Change due</span>
-                  <Money value={changeDue} className="text-[19px] font-bold text-emerald-700 dark:text-emerald-300" />
+                  <Money value={changeDue} fractionDigits={decimalPlaces} className="text-[19px] font-bold text-emerald-700 dark:text-emerald-300" />
                 </div>
               )}
             </>
@@ -2860,7 +3068,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
             <div className="rounded-2xl px-4 py-5 text-center" style={{ background: 'var(--bg-subtle)' }}>
               <QrCode className="mx-auto h-16 w-16 text-[color:var(--accent)]" />
               <div className="tabular mt-2 text-[13px] font-bold text-[color:var(--text-primary)]">
-                Scan to pay {money(payable)}
+                Scan to pay {bMoney(payable)}
               </div>
               <div className="text-[10.5px] text-[color:var(--text-muted)]">
                 {settings?.company?.name} · confirm once the customer's app shows success
@@ -2877,7 +3085,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
               }`}
             >
               {customer
-                ? `${customer.name}'s balance will rise from ${money(customer.outstanding || 0)} to ${money((customer.outstanding || 0) + payable)}.`
+                ? `${customer.name}'s balance will rise from ${bMoney(customer.outstanding || 0)} to ${bMoney((customer.outstanding || 0) + payable)}.`
                 : 'Select a customer above — a credit sale needs a named party.'}
             </div>
           )}
@@ -2889,7 +3097,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                   <CreditCard className="w-4 h-4 text-amber-600" />
                   Partial / Advance Split
                 </span>
-                <span>Payable: {money(payable)}</span>
+                <span>Payable: {bMoney(payable)}</span>
               </div>
 
               {!customer && (
@@ -2939,12 +3147,12 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                 <div className="flex justify-between text-[11px] text-[color:var(--text-secondary)]">
                   <span>Paid Upfront Now:</span>
                   <span className="font-bold font-mono text-emerald-600 dark:text-emerald-400">
-                    {money(Number(partialPaidAmount) || 0)}
+                    {bMoney(Number(partialPaidAmount) || 0)}
                   </span>
                 </div>
                 <div className="flex justify-between font-bold text-amber-800 dark:text-amber-300 border-t border-amber-100 dark:border-amber-900/60 pt-1">
                   <span>Added to Customer Udhar (Due):</span>
-                  <span className="font-mono">{money(Math.max(0, payable - (Number(partialPaidAmount) || 0)))}</span>
+                  <span className="font-mono">{bMoney(Math.max(0, payable - (Number(partialPaidAmount) || 0)))}</span>
                 </div>
               </div>
             </div>
@@ -2957,7 +3165,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                   <Wallet className="w-4 h-4 text-indigo-600" />
                   Split Across Payment Methods
                 </span>
-                <span>Payable: {money(payable)}</span>
+                <span>Payable: {bMoney(payable)}</span>
               </div>
 
               {!customer && splitRemaining > 0.01 && (
@@ -3003,7 +3211,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
               <div className="rounded-xl p-2.5 bg-white/80 dark:bg-slate-900/80 border border-indigo-200 dark:border-indigo-800 text-xs space-y-1">
                 <div className="flex justify-between text-[11px] text-[color:var(--text-secondary)]">
                   <span>Entered so far:</span>
-                  <span className="font-bold font-mono">{money(splitTotal)}</span>
+                  <span className="font-bold font-mono">{bMoney(splitTotal)}</span>
                 </div>
                 <div
                   className={`flex justify-between font-bold border-t pt-1 ${
@@ -3017,7 +3225,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                   <span>
                     {splitRemaining > 0.01 ? 'Remaining (→ Customer Udhar)' : splitRemaining < -0.01 ? 'Over by' : 'Fully covered'}
                   </span>
-                  <span className="font-mono">{money(Math.abs(splitRemaining))}</span>
+                  <span className="font-mono">{bMoney(Math.abs(splitRemaining))}</span>
                 </div>
               </div>
             </div>
@@ -3057,7 +3265,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  <Money value={bill.total} className="font-bold" />
+                  <Money value={bill.total} fractionDigits={decimalPlaces} className="font-bold" />
                   <Button size="sm" variant="primary" onClick={() => resumeBill(bill)}>
                     Resume
                   </Button>
@@ -3108,12 +3316,13 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   );
 }
 
-function Row({ label, value, tone }) {
+function Row({ label, value, tone, decimalPlaces = 2 }) {
   return (
     <div className="flex items-center justify-between">
       <span className="text-[color:var(--text-secondary)]">{label}</span>
       <Money
         value={value}
+        fractionDigits={decimalPlaces}
         className={tone === 'success' ? 'font-semibold text-emerald-600 dark:text-emerald-400' : 'font-semibold'}
       />
     </div>
@@ -3485,7 +3694,6 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
     phone: '',
     address: '',
     purpose: '',
-    classification: 'OFFICIAL', // 'OFFICIAL' | 'UNOFFICIAL'
     expenseCategory: EXPENSE_CATEGORIES[0]
   });
 
@@ -3585,10 +3793,6 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
 
     const isCust = entry.partyType === 'CUSTOMER';
     const isVend = entry.partyType === 'VENDOR';
-    const finalClassification =
-      activeTab === 'EXPENSE'
-        ? 'EXPENSE'
-        : entry.classification;
 
     await act(() =>
       api.post('/session/cash-entry', {
@@ -3608,7 +3812,7 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
           activeTab === 'EXPENSE'
             ? `Internal Expense: ${entry.expenseCategory}`
             : entry.purpose || (isCust ? `Customer ${activeTab === 'CASH_IN' ? 'Receipt' : 'Refund'}` : isVend ? `Vendor ${activeTab === 'CASH_IN' ? 'Repayment' : 'Payment'}` : `Cash ${activeTab === 'CASH_IN' ? 'In' : 'Out'}`),
-        classification: finalClassification,
+        classification: activeTab === 'EXPENSE' ? 'EXPENSE' : undefined,
         expenseCategory: activeTab === 'EXPENSE' ? entry.expenseCategory : undefined
       })
     );
@@ -3623,7 +3827,6 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
       phone: '',
       address: '',
       purpose: '',
-      classification: 'OFFICIAL',
       expenseCategory: EXPENSE_CATEGORIES[0]
     });
   };
@@ -4008,16 +4211,6 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
                     Receive cash into drawer from a customer, vendor debt repayment/refund, float top-up, or other source.
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
-                  <SegmentedControl
-                    value={entry.classification}
-                    onChange={(cls) => setEntry({ ...entry, classification: cls })}
-                    options={[
-                      { value: 'OFFICIAL', label: 'Official Inflow' },
-                      { value: 'UNOFFICIAL', label: 'Unofficial Inflow' }
-                    ]}
-                  />
-                </div>
               </div>
 
               {/* Party Selection (Customer / Vendor / Other) */}
@@ -4059,7 +4252,7 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
                           : 'text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
                       }`}
                     >
-                      Other / Custom
+                      New Customer
                     </button>
                   </div>
                 </div>
@@ -4154,19 +4347,25 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
                   </div>
                 )}
 
-                {/* Other / Custom Text Input */}
+                {/* New / Unknown Party — every rupee needs a real party behind it, so
+                    this always registers a Customer from these details rather than
+                    logging a free-text, unlookupable name. */}
                 {entry.partyType === 'OTHER' && (
                   <div className="space-y-3 pt-1">
+                    <div className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-500/10 border border-emerald-500/25 rounded-xl px-3 py-2">
+                      Not in the directory yet? These details will create a new Customer
+                      automatically (or match an existing one by phone number).
+                    </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <Field label="Received From (Full Name)" required>
                         <Input
                           value={entry.person}
                           onChange={(e) => setEntry({ ...entry, person: e.target.value })}
-                          placeholder="e.g. Cashier / Owner / Partner / Customer"
+                          placeholder="e.g. Customer's full name"
                         />
                       </Field>
 
-                      <Field label="Phone Number" required>
+                      <Field label="Phone Number" required hint="Used to create/match the customer record">
                         <Input
                           type="tel"
                           value={entry.phone || ''}
@@ -4334,16 +4533,6 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
                   <p className="text-xs text-[color:var(--text-muted)]">
                     Record cash withdrawn for vendor payout, customer refund, bank deposit, or owner drawing.
                   </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <SegmentedControl
-                    value={entry.classification}
-                    onChange={(cls) => setEntry({ ...entry, classification: cls })}
-                    options={[
-                      { value: 'OFFICIAL', label: 'Official Outflow' },
-                      { value: 'UNOFFICIAL', label: 'Unofficial Outflow' }
-                    ]}
-                  />
                 </div>
               </div>
 
@@ -4924,16 +5113,20 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
                             tone={
                               e.classification === 'VENDOR_REPAY' || e.classification === 'VENDOR_PAYMENT'
                                 ? 'accent'
-                                : e.classification === 'CUSTOMER_ENTRY'
+                                : e.classification === 'CUSTOMER_ENTRY' || e.classification === 'NEW_CUSTOMER_ENTRY'
                                 ? 'primary'
                                 : e.classification === 'EXPENSE'
                                 ? 'warning'
-                                : e.classification === 'UNOFFICIAL'
-                                ? 'neutral'
                                 : 'success'
                             }
                           >
-                            {e.classification === 'VENDOR_REPAY' ? 'VENDOR REPAY' : e.classification === 'CUSTOMER_ENTRY' ? 'CUSTOMER' : e.classification || 'OFFICIAL'}
+                            {e.classification === 'VENDOR_REPAY'
+                              ? 'VENDOR REPAY'
+                              : e.classification === 'NEW_CUSTOMER_ENTRY'
+                              ? 'NEW CUSTOMER'
+                              : e.classification === 'CUSTOMER_ENTRY'
+                              ? 'CUSTOMER'
+                              : e.classification || 'OFFICIAL'}
                           </Badge>
                         )
                       },
@@ -5240,7 +5433,7 @@ function TablesModal({ open, tables, selectedId, onSelect, onClose, showToast, o
 
                 {table.bill && (
                   <div className="mt-2 border-t pt-1.5" style={{ borderColor: 'var(--border)' }}>
-                    <Money value={table.bill.total} className="text-[13px] font-bold" />
+                    <Money value={table.bill.total} fractionDigits={decimalPlaces} className="text-[13px] font-bold" />
                     <div className="text-[10px] text-[color:var(--text-muted)]">
                       {table.bill.items.length} items running
                     </div>
@@ -5388,7 +5581,7 @@ function RecentBillsModal({ open, onClose, onReprint, showToast }) {
                 }
               },
               { key: 'paymentMethod', label: 'Mode', width: 100, render: (o) => <Badge>{o.paymentMethod}</Badge> },
-              { key: 'total', label: 'Total', align: 'right', width: 110, render: (o) => <Money value={o.total} className="font-bold" /> },
+              { key: 'total', label: 'Total', align: 'right', width: 110, render: (o) => <Money value={o.total} fractionDigits={decimalPlaces} className="font-bold" /> },
               {
                 key: 'status',
                 label: 'Status',
@@ -5442,7 +5635,7 @@ function RecentBillsModal({ open, onClose, onReprint, showToast }) {
   );
 }
 
-function QuickCustomerModal({ open, onClose, onCreated, priceSheets = [], showToast }) {
+export function QuickCustomerModal({ open, onClose, onCreated, priceSheets = [], showToast }) {
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');

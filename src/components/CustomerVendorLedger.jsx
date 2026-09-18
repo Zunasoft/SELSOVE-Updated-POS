@@ -677,7 +677,7 @@ export default function CustomerVendorLedger({ showToast }) {
 }
 
 /** Structured Add/Edit Party Modal with Clean Row Sections */
-function PartyFormModal({ open, isCustomer, editing, groups, onClose, showToast, onSaved }) {
+export function PartyFormModal({ open, isCustomer, editing, groups, onClose, showToast, onSaved }) {
   const blank = {
     name: '',
     phone: '',
@@ -749,14 +749,20 @@ function PartyFormModal({ open, isCustomer, editing, groups, onClose, showToast,
         if (String(form.outstandingPayable ?? '') === originalPayable) delete payload.outstandingPayable;
       }
 
+      let saved;
       if (editing) {
-        await api.put(`${base}/${editing.id}`, payload);
+        const res = await api.put(`${base}/${editing.id}`, payload);
+        saved = res.data;
         showToast(`${form.name} updated.`);
       } else {
-        await api.post(base, payload);
+        const res = await api.post(base, payload);
+        saved = res.data;
         showToast(`${form.name} added.`);
       }
-      onSaved();
+      // Passing the saved record along lets a caller that opened this form
+      // to quick-create a party (rather than manage the Parties list) select
+      // it immediately, without waiting on its own list to refetch.
+      onSaved(saved);
     } catch (err) {
       showToast(api.message(err, 'Could not save party.'), 'error');
     } finally {
@@ -1024,6 +1030,120 @@ function PartyFormModal({ open, isCustomer, editing, groups, onClose, showToast,
           </div>
         </div>
       </form>
+    </Modal>
+  );
+}
+
+/**
+ * Search-and-select party picker — the customer/vendor equivalent of
+ * PurchaseProductPickerModal's "search products, or add a new one" pattern.
+ * Reused from Invoices (customers) and Purchases (vendors) so those screens
+ * offer the exact same "click to select, or create new from the same popup"
+ * experience as picking a product does, rather than a plain <select>.
+ */
+export function PartyPickerModal({ open, onClose, parties = [], isCustomer, onSelectParty, onCreateNew }) {
+  const [search, setSearch] = useState('');
+
+  useEffect(() => {
+    if (open) setSearch('');
+  }, [open]);
+
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase().trim();
+    if (!q) return parties;
+    return parties.filter(
+      (p) =>
+        (p.name && p.name.toLowerCase().includes(q)) ||
+        (p.phone && String(p.phone).includes(q)) ||
+        (p.gstin && p.gstin.toLowerCase().includes(q))
+    );
+  }, [parties, search]);
+
+  if (!open) return null;
+
+  const label = isCustomer ? 'Customer' : 'Vendor';
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={`Select ${label}`}
+      subtitle={`Choose from ${parties.length} registered ${isCustomer ? 'customers' : 'vendors'}, or add a new one.`}
+      icon={isCustomer ? Users : Truck}
+      size="lg"
+      footer={
+        <div className="flex items-center justify-between w-full">
+          <button
+            type="button"
+            onClick={() => {
+              onCreateNew();
+              onClose();
+            }}
+            className="text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:underline"
+          >
+            + Create new {label.toLowerCase()} (not registered yet)
+          </button>
+          <Button onClick={onClose}>Close</Button>
+        </div>
+      }
+    >
+      <div className="space-y-3">
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[color:var(--text-muted)]" />
+          <input
+            type="text"
+            placeholder={`Search by name, phone${isCustomer ? '' : ' or GSTIN'}…`}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="field-input text-xs pl-8 pr-8 w-full rounded-xl"
+            autoFocus
+          />
+          {search && (
+            <button
+              type="button"
+              onClick={() => setSearch('')}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+
+        <div className="max-h-[55vh] overflow-y-auto space-y-1.5">
+          {filtered.length === 0 ? (
+            <EmptyState
+              icon={isCustomer ? Users : Truck}
+              title={`No ${isCustomer ? 'customers' : 'vendors'} found`}
+              description={search ? 'Try a different search, or create a new one below.' : `No registered ${isCustomer ? 'customers' : 'vendors'} yet.`}
+            />
+          ) : (
+            filtered.map((p) => {
+              const balance = isCustomer ? Number(p.outstanding) || 0 : Number(p.outstandingPayable) || 0;
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => {
+                    onSelectParty(p);
+                    onClose();
+                  }}
+                  className="w-full text-left p-2.5 rounded-xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/50 hover:border-indigo-400 hover:bg-indigo-50/40 dark:hover:bg-indigo-950/20 transition-colors"
+                >
+                  <div className="font-bold text-sm text-[color:var(--text-primary)]">{p.name}</div>
+                  <div className="text-[11px] text-[color:var(--text-muted)] flex items-center gap-2">
+                    {p.phone && <span>{p.phone}</span>}
+                    {balance > 0 && (
+                      <span className="font-semibold text-amber-600 dark:text-amber-400">
+                        {isCustomer ? 'Due' : 'Payable'}: {money(balance)}
+                      </span>
+                    )}
+                  </div>
+                </button>
+              );
+            })
+          )}
+        </div>
+      </div>
     </Modal>
   );
 }

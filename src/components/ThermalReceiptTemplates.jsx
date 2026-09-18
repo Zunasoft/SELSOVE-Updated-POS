@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import QRCode from 'qrcode';
 import { renderCustomDocumentHtml } from '../lib/exporters';
+import { resolveAssetUrl } from '../lib/api';
 
 export const DEFAULT_THERMAL_SECTIONS = [
   { id: 'header_branding', name: 'Store Header & Branding', enabled: true },
@@ -26,6 +27,7 @@ export const THERMAL_THEMES = [
     tagline: 'Complete tax invoice with GSTIN, HSN, item tax rates, slab summary, and FSSAI.',
     description: 'Perfect for retail stores, supermarkets, and B2C/B2B businesses requiring full statutory compliance on bill rolls.',
     defaults: {
+      showLogo: true,
       showGstin: true,
       showFssai: true,
       showStoreAddress: true,
@@ -37,6 +39,7 @@ export const THERMAL_THEMES = [
       showHsn: true,
       showItemTaxRate: true,
       showItemDiscount: true,
+      showWarranty: true,
       showGstBreakup: true,
       showSavings: true,
       showPaymentBreakup: true,
@@ -80,6 +83,7 @@ export const THERMAL_THEMES = [
     tagline: 'Clean, balanced POS bill for fast daily cash-counter billing.',
     description: 'Classic format with store contact, bill meta, itemized pricing, subtotal, discount, totals, and payment info.',
     defaults: {
+      showLogo: true,
       showGstin: true,
       showFssai: false,
       showStoreAddress: true,
@@ -91,6 +95,7 @@ export const THERMAL_THEMES = [
       showHsn: false,
       showItemTaxRate: false,
       showItemDiscount: true,
+      showWarranty: true,
       showGstBreakup: true,
       showSavings: true,
       showPaymentBreakup: true,
@@ -134,6 +139,7 @@ export const THERMAL_THEMES = [
     tagline: 'A regular, readable thermal bill without the statutory GST slab matrix.',
     description: 'Same store details, items and totals as a normal receipt — just without the CGST/SGST/IGST slab-wise breakdown table.',
     defaults: {
+      showLogo: true,
       showGstin: true,
       showFssai: false,
       showStoreAddress: true,
@@ -145,6 +151,7 @@ export const THERMAL_THEMES = [
       showHsn: false,
       showItemTaxRate: false,
       showItemDiscount: true,
+      showWarranty: true,
       showGstBreakup: false,
       showSavings: true,
       showPaymentBreakup: true,
@@ -188,6 +195,7 @@ export const THERMAL_THEMES = [
     tagline: 'Space-saving, fast-printing compact bill for 58mm / 80mm rolls.',
     description: 'Stripped of non-essential tables for rapid queue-busting counters and small 2-inch roll printers.',
     defaults: {
+      showLogo: true,
       showGstin: false,
       showFssai: false,
       showStoreAddress: false,
@@ -199,6 +207,7 @@ export const THERMAL_THEMES = [
       showHsn: false,
       showItemTaxRate: false,
       showItemDiscount: false,
+      showWarranty: false,
       showGstBreakup: false,
       showSavings: false,
       showPaymentBreakup: false,
@@ -242,6 +251,7 @@ export const THERMAL_THEMES = [
     tagline: 'Modern layout with customer savings badges, item discount details, and QR payment.',
     description: 'Ideal for grocery stores, apparel outlets, and supermarkets focused on customer savings and instant UPI scan.',
     defaults: {
+      showLogo: true,
       showGstin: true,
       showFssai: true,
       showStoreAddress: true,
@@ -253,6 +263,7 @@ export const THERMAL_THEMES = [
       showHsn: true,
       showItemTaxRate: true,
       showItemDiscount: true,
+      showWarranty: true,
       showGstBreakup: true,
       showSavings: true,
       showPaymentBreakup: true,
@@ -296,6 +307,7 @@ export const THERMAL_THEMES = [
     tagline: 'Food & beverage bill with Table No, Token No, Captain, Steward, and Service details.',
     description: 'Specialized for cafes, QSR counters, bakeries, and dine-in restaurants.',
     defaults: {
+      showLogo: true,
       showGstin: true,
       showFssai: true,
       showStoreAddress: true,
@@ -307,6 +319,7 @@ export const THERMAL_THEMES = [
       showHsn: false,
       showItemTaxRate: true,
       showItemDiscount: true,
+      showWarranty: false,
       showGstBreakup: true,
       showSavings: true,
       showPaymentBreakup: true,
@@ -388,6 +401,18 @@ export const SAMPLE_RECEIPT_DATA = {
       discount: 10.00,
       taxRate: 5,
       total: 100.00
+    },
+    {
+      name: 'Bluetooth Kitchen Weighing Scale',
+      printName: 'BT Kitchen Scale',
+      hsn: '8423',
+      qty: 1,
+      price: 899.00,
+      discount: 0,
+      taxRate: 18,
+      total: 1061.00,
+      serialNo: '7714209983',
+      warrantyEndDate: new Date(Date.now() + 365 * 86400000).toISOString()
     },
     {
       name: 'Farm Fresh Pure Butter 500g',
@@ -484,6 +509,9 @@ export function ThermalReceiptView({
   };
 
   const billing = settings?.billing || {};
+  const decimalPlaces = billing.showMoreDecimals || Number(billing.decimalPlaces) > 2
+    ? Math.min(4, Math.max(2, Number(billing.decimalPlaces) || 3))
+    : 2;
   const currentThemeId = activeTheme || customConfig?.activeThermalTemplate || billing.activeThermalTemplate || 'detailed_gst';
   const customTemplates = (billing.customTemplates || []).filter((t) => t.type === 'thermal');
   const selectedCustom = customTemplates.find((t) => t.id === currentThemeId);
@@ -666,7 +694,15 @@ export function ThermalReceiptView({
     <div className="text-center space-y-0.5 mb-1.5">
       {cfg.showLogo && company.logoUrl && (
         <div className="flex justify-center mb-1">
-          <img src={company.logoUrl} alt="Logo" className="h-10 w-10 object-contain" />
+          {/* Thermal printers only have one ink color — a color/photo logo just
+              gets dithered into a muddy blob on the roll. Rendering it
+              grayscale first, with a contrast boost to push midtones toward
+              pure black/white, prints far more legibly. */}
+          <img
+            src={resolveAssetUrl(company.logoUrl)}
+            alt="Logo"
+            className="h-10 w-10 object-contain grayscale contrast-125"
+          />
         </div>
       )}
       <div className="font-black text-sm uppercase tracking-tight">{company.name}</div>
@@ -772,7 +808,18 @@ export function ThermalReceiptView({
                     <div className="truncate font-bold">{it.printName || it.name}</div>
                     {cfg.showItemDiscount && discount > 0 && (
                       <div className="text-[9px] text-slate-600 font-normal truncate">
-                        (Disc: -₹{discount.toFixed(2)})
+                        (Disc: -₹{discount.toFixed(decimalPlaces)})
+                      </div>
+                    )}
+                    {cfg.showWarranty && (it.serialNo || it.warrantyEndDate) && (
+                      <div className="text-[9px] text-slate-600 font-normal leading-tight">
+                        {/* Serial and warranty date each get their own line — combined
+                            on one line with `truncate`, the pair was too long for the
+                            narrow item column and the date got cut off. */}
+                        {it.serialNo && <div className="truncate">S/N: {it.serialNo}</div>}
+                        {it.warrantyEndDate && (
+                          <div className="truncate">Warranty till {new Date(it.warrantyEndDate).toLocaleDateString('en-IN')}</div>
+                        )}
                       </div>
                     )}
                   </td>
@@ -782,11 +829,11 @@ export function ThermalReceiptView({
                     </td>
                   )}
                   <td className="py-0.5 text-right font-bold">{qty}</td>
-                  <td className="py-0.5 text-right">{price.toFixed(2)}</td>
+                  <td className="py-0.5 text-right">{price.toFixed(decimalPlaces)}</td>
                   {cfg.showItemTaxRate && (
                     <td className="py-0.5 text-right text-[9px]">{taxRate}%</td>
                   )}
-                  <td className="py-0.5 text-right font-bold">{lineTotal.toFixed(2)}</td>
+                  <td className="py-0.5 text-right font-bold">{lineTotal.toFixed(decimalPlaces)}</td>
                 </tr>
               );
             })}
@@ -801,34 +848,34 @@ export function ThermalReceiptView({
     <div className="space-y-0.5 text-[11px]">
       <div className="flex justify-between">
         <span>{labels.subtotalLabel || 'Subtotal'}:</span>
-        <span className="font-bold">₹{Number(receipt.subtotal ?? receipt.total).toFixed(2)}</span>
+        <span className="font-bold">₹{Number(receipt.subtotal ?? receipt.total).toFixed(decimalPlaces)}</span>
       </div>
 
       {receipt.discount > 0 && (
         <div className="flex justify-between">
           <span>Bill Discount:</span>
-          <span>-₹{Number(receipt.discount).toFixed(2)}</span>
+          <span>-₹{Number(receipt.discount).toFixed(decimalPlaces)}</span>
         </div>
       )}
 
       {receipt.tax > 0 && (
         <div className="flex justify-between">
           <span>{labels.taxLabel || 'Total GST'}:</span>
-          <span>₹{Number(receipt.tax).toFixed(2)}</span>
+          <span>₹{Number(receipt.tax).toFixed(decimalPlaces)}</span>
         </div>
       )}
 
       {receipt.roundOff !== undefined && receipt.roundOff !== 0 && (
         <div className="flex justify-between text-[10px]">
           <span>Round Off:</span>
-          <span>{receipt.roundOff > 0 ? `+₹${receipt.roundOff.toFixed(2)}` : `-₹${Math.abs(receipt.roundOff).toFixed(2)}`}</span>
+          <span>{receipt.roundOff > 0 ? `+₹${receipt.roundOff.toFixed(decimalPlaces)}` : `-₹${Math.abs(receipt.roundOff).toFixed(decimalPlaces)}`}</span>
         </div>
       )}
 
       {/* Grand Total */}
       <div className="flex justify-between font-black text-sm pt-1 border-t border-b border-black my-1">
         <span>{labels.totalLabel || 'NET TOTAL'}:</span>
-        <span>₹{Number(receipt.total).toFixed(2)}</span>
+        <span>₹{Number(receipt.total).toFixed(decimalPlaces)}</span>
       </div>
 
       {cfg.showWordsTotal && (
@@ -855,16 +902,16 @@ export function ThermalReceiptView({
           {Object.entries(gstSlabs).map(([rate, v]) => (
             <tr key={rate}>
               <td className="text-left">{rate}%</td>
-              <td>{v.taxable.toFixed(2)}</td>
+              <td>{v.taxable.toFixed(decimalPlaces)}</td>
               {billing.interState ? (
-                <td>{v.igst.toFixed(2)}</td>
+                <td>{v.igst.toFixed(decimalPlaces)}</td>
               ) : (
                 <>
-                  <td>{v.cgst.toFixed(2)}</td>
-                  <td>{v.sgst.toFixed(2)}</td>
+                  <td>{v.cgst.toFixed(decimalPlaces)}</td>
+                  <td>{v.sgst.toFixed(decimalPlaces)}</td>
                 </>
               )}
-              <td className="font-bold">{v.tax.toFixed(2)}</td>
+              <td className="font-bold">{v.tax.toFixed(decimalPlaces)}</td>
             </tr>
           ))}
         </tbody>

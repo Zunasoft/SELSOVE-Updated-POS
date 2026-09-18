@@ -6,7 +6,7 @@ import {
   Copy, RefreshCw, FileText, CheckCircle, ChevronRight, ChevronLeft, Layers, Maximize2, Minimize2, Type
 } from 'lucide-react';
 
-import api from '../lib/api';
+import api, { API_BASE } from '../lib/api';
 import {
   Panel, SectionHeader, Button, Modal, Field, Input, Select, Textarea,
   Badge, Money, Spinner, EmptyState, StatTile, DataTable, cx
@@ -151,12 +151,46 @@ function Toggle({ label, hint, checked, onChange }) {
 function CompanyTab({ company, saveSection, showToast }) {
   const [form, setForm] = useState(company || {});
   const [saving, setSaving] = useState(false);
+  const [uploadingLogo, setUploadingLogo] = useState(false);
 
   useEffect(() => {
     setForm(company || {});
   }, [company]);
 
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
+
+  // A bare "paste a URL" field only works if the logo is already hosted
+  // somewhere public — which most shops don't have. This uploads the file
+  // straight into the tenant's own database (same endpoint product photos
+  // use) and fills the URL field with the result, so "I have a logo image on
+  // my computer" is enough to get it printing on receipts and invoices.
+  const handleLogoUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('image', file);
+    setUploadingLogo(true);
+    try {
+      const res = await api.post('/upload', formData);
+      if (res.success) {
+        // The upload endpoint returns a path relative to the API server
+        // (e.g. /uploads/products/<shop>/<file>) — the receipt/invoice
+        // templates print `company.logoUrl` exactly as stored, with no
+        // resolver of their own, so it has to be a full URL here or the
+        // logo silently fails to load wherever it's printed.
+        const resolvedUrl = res.url.startsWith('/') ? `${API_BASE.replace('/api/pos', '')}${res.url}` : res.url;
+        setForm((prev) => ({ ...prev, logoUrl: resolvedUrl }));
+        showToast('Logo uploaded — click Save to apply it to your bills and invoices.');
+      } else {
+        showToast(res.message || 'Logo upload failed.', 'error');
+      }
+    } catch (err) {
+      showToast(api.message(err, 'Failed to upload logo.'), 'error');
+    } finally {
+      setUploadingLogo(false);
+      e.target.value = '';
+    }
+  };
 
   const save = async () => {
     setSaving(true);
@@ -210,8 +244,38 @@ function CompanyTab({ company, saveSection, showToast }) {
         <Field label="Website">
           <Input value={form.website || ''} onChange={set('website')} />
         </Field>
-        <Field label="Logo URL">
-          <Input value={form.logoUrl || ''} onChange={set('logoUrl')} />
+        <Field label="Logo" hint="Uploaded logo prints on thermal bills and invoices wherever 'Show Logo' is enabled in the Template Editor" className="sm:col-span-2">
+          <div className="flex items-center gap-3">
+            {form.logoUrl && (
+              <img
+                src={form.logoUrl}
+                alt="Logo preview"
+                className="h-12 w-12 object-contain rounded-lg border border-[color:var(--border-subtle)] bg-white shrink-0"
+                onError={(e) => { e.currentTarget.style.display = 'none'; }}
+              />
+            )}
+            <div className="flex-1 space-y-1.5">
+              <Input value={form.logoUrl || ''} onChange={set('logoUrl')} placeholder="https://... or upload a file below" />
+              <div className="flex items-center gap-2">
+                <input type="file" accept="image/*" onChange={handleLogoUpload} className="hidden" id="company-logo-upload" />
+                <label
+                  htmlFor="company-logo-upload"
+                  className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border border-[color:var(--border)] hover:bg-[color:var(--bg-subtle)]"
+                >
+                  {uploadingLogo ? 'Uploading...' : 'Upload Logo Image'}
+                </label>
+                {form.logoUrl && (
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, logoUrl: '' })}
+                    className="text-xs font-semibold text-rose-600 hover:text-rose-700"
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
         </Field>
         <Field label="Contact Name" hint="Person named on the invoice as point of contact">
           <Input value={form.contactName || ''} onChange={set('contactName')} />
@@ -260,7 +324,8 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
   const [tForm, setTForm] = useState(tax || {});
   const [iForm, setIForm] = useState({
     enableBatchTracking: Boolean(pos?.enableBatchTracking),
-    nearExpiryDays: pos?.nearExpiryDays ?? 30
+    nearExpiryDays: pos?.nearExpiryDays ?? 30,
+    allowNegativeStock: pos?.allowNegativeStock !== false
   });
   const [savingInventory, setSavingInventory] = useState(false);
   const [showLoyaltyModal, setShowLoyaltyModal] = useState(false);
@@ -291,7 +356,8 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
   useEffect(() => {
     setIForm({
       enableBatchTracking: Boolean(pos?.enableBatchTracking),
-      nearExpiryDays: pos?.nearExpiryDays ?? 30
+      nearExpiryDays: pos?.nearExpiryDays ?? 30,
+      allowNegativeStock: pos?.allowNegativeStock !== false
     });
   }, [pos]);
 
@@ -463,6 +529,84 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
           />
         </div>
 
+        <div className="pt-2 border-t space-y-3" style={{ borderColor: 'var(--border)' }}>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex-1">
+              <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={Boolean(bForm.showMoreDecimals || (Number(bForm.decimalPlaces) > 2))}
+                  onChange={(e) => {
+                    const isChecked = e.target.checked;
+                    setBForm({
+                      ...bForm,
+                      showMoreDecimals: isChecked,
+                      decimalPlaces: isChecked ? (Number(bForm.decimalPlaces) > 2 ? Number(bForm.decimalPlaces) : 3) : 2
+                    });
+                  }}
+                  className="mt-0.5 rounded border-[color:var(--border)] text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer accent-indigo-600"
+                />
+                <div>
+                  <span className="block text-[12px] font-semibold text-[color:var(--text-primary)]">
+                    Show decimal values more than 2 in billing
+                  </span>
+                  <span className="block text-[11px] text-[color:var(--text-muted)]">
+                    By default, billing displays 2 values after the dot (.). Enable to show more precision (3 or 4 decimal digits) for rates, item totals, and bills.
+                  </span>
+                </div>
+              </label>
+            </div>
+
+            <div className="w-full sm:w-64 shrink-0">
+              <Field label="Decimal places in billing" hint="Values shown after the dot (.)">
+                <Select
+                  value={
+                    bForm.showMoreDecimals || (Number(bForm.decimalPlaces) > 2)
+                      ? String(bForm.decimalPlaces || 3)
+                      : '2'
+                  }
+                  onChange={(e) => {
+                    const val = Number(e.target.value);
+                    setBForm({
+                      ...bForm,
+                      showMoreDecimals: val > 2,
+                      decimalPlaces: val
+                    });
+                  }}
+                >
+                  <option value="2">2 decimal places (Default — .00)</option>
+                  <option value="3">3 decimal places (.000)</option>
+                  <option value="4">4 decimal places (.0000)</option>
+                </Select>
+              </Field>
+            </div>
+          </div>
+        </div>
+
+        <div className="pt-2 border-t space-y-3" style={{ borderColor: 'var(--border)' }}>
+          <label className="flex items-start gap-2.5 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={bForm.showProductImages !== false}
+              onChange={(e) => {
+                setBForm({
+                  ...bForm,
+                  showProductImages: e.target.checked
+                });
+              }}
+              className="mt-0.5 rounded border-[color:var(--border)] text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer accent-indigo-600"
+            />
+            <div>
+              <span className="block text-[12px] font-semibold text-[color:var(--text-primary)]">
+                Show product images and icons in billing
+              </span>
+              <span className="block text-[11px] text-[color:var(--text-muted)]">
+                Turn on to display product photos, visual gradient tiles, and emoji icons in the billing catalog and current bill. Turn off for a clean, compact text-only layout.
+              </span>
+            </div>
+          </label>
+        </div>
+
         <div className="flex justify-end pt-2">
           <Button variant="primary" onClick={() => saveBilling()} loading={savingBilling}>
             Save Billing Rules
@@ -496,6 +640,13 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
             </Field>
           </div>
         )}
+
+        <Toggle
+          label="Allow Billing Below Zero Stock"
+          hint="On: a sale still goes through even if it takes a product's stock negative (you'll just see a low-stock warning). Off: billing is blocked for any item that doesn't have enough stock on hand — stock adjustment always remains available either way to correct counts."
+          checked={Boolean(iForm.allowNegativeStock)}
+          onChange={(v) => setIForm({ ...iForm, allowNegativeStock: v })}
+        />
 
         <div className="flex justify-end pt-2">
           <Button variant="primary" onClick={saveInventory} loading={savingInventory}>
@@ -1308,6 +1459,12 @@ function BillTemplateEditorModal({
                         checked={Boolean(form.showItemDiscount !== false)}
                         onChange={(v) => setForm({ ...form, showItemDiscount: v })}
                       />
+                      <Toggle
+                        label="Show Serial No. & Warranty"
+                        hint="Prints the sold serial/IMEI and warranty-till date under warranty-enabled products"
+                        checked={Boolean(form.showWarranty !== false)}
+                        onChange={(v) => setForm({ ...form, showWarranty: v })}
+                      />
                     </div>
                   </div>
 
@@ -2022,6 +2179,12 @@ function InvoiceTemplateEditorModal({
                         hint="Displays applicable GST slab percentage per item"
                         checked={Boolean(form.showItemTaxBreakup !== false)}
                         onChange={(v) => setForm({ ...form, showItemTaxBreakup: v })}
+                      />
+                      <Toggle
+                        label="Show Serial No. & Warranty"
+                        hint="Prints the sold serial/IMEI and warranty-till date under warranty-enabled products"
+                        checked={Boolean(form.showWarranty !== false)}
+                        onChange={(v) => setForm({ ...form, showWarranty: v })}
                       />
                     </div>
                   </div>
