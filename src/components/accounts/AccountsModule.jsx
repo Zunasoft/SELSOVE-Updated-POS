@@ -19,11 +19,7 @@ import OpeningBalances from './OpeningBalances';
 import Reconciliation from './Reconciliation';
 import AccountReports from './AccountReports';
 
-/**
- * The Accounts workspace. Grouped navigation mirrors how a bookkeeper actually
- * works — masters first, then parties, then day-to-day vouchers, then control
- * and reporting — rather than listing fifteen flat menu items.
- */
+/** Grouped navigation mirrors how a bookkeeper works: masters, then parties, then vouchers, then control/reporting. */
 const NAV = [
   {
     group: 'Overview',

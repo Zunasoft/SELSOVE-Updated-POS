@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, useDeferredValue } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import QRCode from 'qrcode';
 import {
   Search, ShoppingCart, Trash2, Plus, Minus, Printer, Scale, Barcode,
   QrCode, PauseCircle, X, Receipt, User, UserPlus, Lock, Unlock, ArrowDownToLine,
@@ -7,10 +8,10 @@ import {
   Flame, ArrowUpDown, Clock, History, Zap, FileCheck, CreditCard,
   Coins, Building2, Sparkles, PlusCircle, MinusCircle, AlertCircle, CheckCheck,
   TrendingUp, TrendingDown, Filter, ArrowRight, Users, Maximize2, Minimize2,
-  FileText, Download, ChevronLeft, ChevronRight, Edit3, Tag
+  FileText, Download, ChevronLeft, ChevronRight, Edit3, Tag, ChevronDown, Monitor
 } from 'lucide-react';
 
-import api, { money, fmtDateTime, fmtDate, API_BASE } from '../lib/api';
+import api, { money, fmtDateTime, fmtDate, API_BASE, resolveAssetUrl } from '../lib/api';
 import {
   Panel, Button, Modal, Field, Input, Select, Textarea, Badge, Money,
   Spinner, EmptyState, SegmentedControl, DataTable, StatTile
@@ -407,11 +408,7 @@ export function getProductUnitOptions(product) {
   return options;
 }
 
-/**
- * Renders a base-unit quantity in every other unit configured on the product
- * (sub-unit like g/ml, plus any bigger alt units like bag/box), e.g.
- * "50 kg" -> "50000 g · 2 bag". Returns '' when there's nothing to add.
- */
+/** Renders a base-unit quantity in every other configured unit, e.g. "50 kg" -> "50000 g · 2 bag". */
 export function formatUnitBreakdown(product, baseQty) {
   const qty = Number(baseQty) || 0;
   if (!(qty > 0)) return '';
@@ -436,7 +433,7 @@ export function getSellableBatches(product) {
 
 /** Serial-tracked units still in stock, oldest-received first (serials don't expire, so FIFO is the only ordering that makes sense without a cashier's own pick). */
 export function getSellableSerials(product) {
-  const serials = (product?.serials || []).filter((s) => s.status !== 'SOLD');
+  const serials = (product?.serials || []).filter((s) => s.status === 'IN_STOCK');
   return [...serials].sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
 }
 
@@ -631,16 +628,9 @@ export function resolveProductPricing(product, customer, priceSheets = [], overr
   return { price: finalPrice, discountPercent, ruleSource };
 }
 
-/**
- * The billing terminal — SOW Module 3.
- * Physical hardware is treated as a first-class input: the barcode scanner is a
- * keyboard wedge, so keystrokes are captured globally rather than requiring the
- * search box to hold focus, and weighed items pull a stable read from the scale.
- */
+/** The billing terminal (SOW Module 3) — barcode scanner is a keyboard wedge, so keystrokes are captured globally rather than requiring the search box to hold focus. */
 export default function POSTerminal({ tenant, showToast, settings: appSettings, onSaleCompleted, isFullscreen }) {
-  // App.jsx already tracks native fullscreen state (covering all vendor-prefixed
-  // fullscreenchange events) and passes it down — trust it instead of keeping a
-  // second, narrower listener set here that can desync from it.
+  // Trust App.jsx's fullscreen state rather than a second listener here that can desync from it.
   const isFs = Boolean(isFullscreen);
 
   const [categories, setCategories] = useState([]);
@@ -663,6 +653,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchDropdownOpen, setSearchDropdownOpen] = useState(false);
   const [sortBy, setSortBy] = useState('default');
   const [recentBilledIds, setRecentBilledIds] = useState([]);
   const [cart, setCart] = useState([]);
@@ -715,8 +706,20 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   const [recentInvoices, setRecentInvoices] = useState([]);
 
   const searchRef = useRef(null);
+  const searchBoxRef = useRef(null);
   const scanBuffer = useRef('');
   const scanTimer = useRef(null);
+
+  useEffect(() => {
+    if (!searchDropdownOpen) return undefined;
+    const closeIfOutside = (e) => {
+      if (searchBoxRef.current && !searchBoxRef.current.contains(e.target)) {
+        setSearchDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', closeIfOutside);
+    return () => document.removeEventListener('mousedown', closeIfOutside);
+  }, [searchDropdownOpen]);
 
   const load = useCallback(async (isInitial = false) => {
     if (isInitial) setInitialLoading(true);
@@ -907,10 +910,54 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
   const changeDue = Math.max(0, (parseFloat(cashTendered) || 0) - payable);
 
-  // Per-category product counts for the category tab bar — was previously a
-  // full products.filter() re-run for every category on every render (cart
-  // edits, search keystrokes, etc.), i.e. O(categories × products) each time
-  // instead of once per actual products/categories change.
+  /* Customer-facing display: a separate window kept in sync via BroadcastChannel, so every message carries what it needs to render rather than it fetching settings itself. */
+  const displayChannelRef = useRef(null);
+  const displayStateRef = useRef(null);
+
+  useEffect(() => {
+    if (typeof BroadcastChannel === 'undefined') return undefined;
+    const channel = new BroadcastChannel('pos_customer_display');
+    displayChannelRef.current = channel;
+    channel.onmessage = (e) => {
+      if (e.data?.type === 'REQUEST_STATE' && displayStateRef.current) {
+        channel.postMessage({ type: 'STATE', payload: displayStateRef.current });
+      }
+    };
+    return () => {
+      channel.close();
+      displayChannelRef.current = null;
+    };
+  }, []);
+
+  const customerDisplayEnabled = settings?.pos?.customerDisplayEnabled !== false;
+
+  const openCustomerDisplay = () => {
+    window.open(
+      `${window.location.pathname}?view=customer-display`,
+      'posCustomerDisplay',
+      'width=1000,height=750,menubar=no,toolbar=no,location=no'
+    );
+  };
+
+  // "Scan to pay" shows the shop's uploaded QR image, or generates a real UPI QR from the UPI ID, like the Customer Display does.
+  const [billingQrDataUrl, setBillingQrDataUrl] = useState('');
+  const qrImageUrl = settings?.billing?.qrImageUrl || '';
+  const upiId = settings?.billing?.upiId || settings?.company?.upiId || '';
+
+  useEffect(() => {
+    if (paymentMode !== 'UPI' || qrImageUrl || !upiId) {
+      setBillingQrDataUrl('');
+      return;
+    }
+    const payeeName = encodeURIComponent(settings?.company?.name || 'Store');
+    const amount = Number(payable || 0).toFixed(2);
+    const payload = `upi://pay?pa=${upiId}&pn=${payeeName}&am=${amount}&cu=INR&tn=Payment`;
+    QRCode.toDataURL(payload, { width: 220, margin: 1, color: { dark: '#000000', light: '#ffffff' } })
+      .then(setBillingQrDataUrl)
+      .catch(() => setBillingQrDataUrl(''));
+  }, [paymentMode, qrImageUrl, upiId, payable, settings?.company?.name]);
+
+  // Memoized to avoid an O(categories × products) filter() re-run on every cart edit or keystroke.
   const categoryProductCounts = useMemo(() => {
     const counts = new Map();
     products.forEach((p) => {
@@ -923,10 +970,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
     return counts;
   }, [products]);
 
-  // O(1) product-by-id lookup for the cart list render below, which previously
-  // ran a full products.find() per cart line on every render — O(cart size ×
-  // catalog size) each time, for a value that only actually changes when the
-  // catalog itself changes.
+  // O(1) product-by-id lookup for cart rendering, instead of a products.find() per cart line per render.
   const productsById = useMemo(() => {
     const map = new Map();
     products.forEach((p) => map.set(p.id, p));
@@ -939,25 +983,16 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
     (product, qty, pricing, batchId, serialId) => {
       const batch = batchId ? (product.batches || []).find((b) => b.id === batchId) : null;
       const serial = serialId ? (product.serials || []).find((s) => s.id === serialId) : null;
-      // A batch can be priced differently from the product's normal rate (e.g.
-      // an older lot sold at a clearance price) — that override becomes the
-      // base price this line's unit conversions (kg/g, alt units) build from.
+      // A batch can override the product's normal price (e.g. clearance lot) — unit conversions build from that.
       const basePrice = batch && batch.sellPrice != null ? Number(batch.sellPrice) : pricing.price;
       const options = getProductUnitOptions({ ...product, price: basePrice });
       const defaultOpt = options[0] || { unit: product.unit || 'pcs', factor: 1, price: basePrice };
-      // A serial is one physical, individually-identified unit — there's no
-      // such thing as "2 of serial #4521", so a serial line is always qty 1.
-      const effectiveQty = serialId ? 1 : qty;
+      const effectiveQty = serialId ? 1 : qty; // a serial is one physical unit, so it's always qty 1
 
-      // The toast fires after setCart returns, not from inside the updater —
-      // React invokes functional updaters during the render phase, and calling
-      // another component's setState (showToast -> App's setToast) from in
-      // there trips "Cannot update a component while rendering a different
-      // component" and risks losing the toast under concurrent scheduling.
+      // Toast fires after setCart returns, not inside the updater, to avoid a cross-component setState during render.
       let toastMsg = '';
       setCart((prev) => {
-        // A serial line never merges with another — even the same product's
-        // other units are each their own distinct, traceable cart row.
+        // A serial line never merges with another — each is its own distinct, traceable cart row.
         const idx = serialId
           ? -1
           : prev.findIndex((i) => i.id === product.id && i.unit === defaultOpt.unit && (i.batchId || null) === (batchId || null) && !i.serialId);
@@ -1023,11 +1058,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         return;
       }
 
-      // Serial-tracked — every unit is its own physical item, so the cashier
-      // always confirms exactly which one is going out (there's no "silently
-      // pick the oldest" shortcut here the way there is for a single batch,
-      // since a serial/IMEI is customer-facing information, e.g. on the
-      // receipt or a warranty card).
+      // Serial-tracked: cashier always confirms which unit, since the serial/IMEI is customer-facing (receipt, warranty).
       if (product.trackSerials) {
         const sellable = getSellableSerials(product);
         if (sellable.length === 0) {
@@ -1038,19 +1069,14 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         return;
       }
 
-      // Batch-tracked with a real choice to make — let the cashier confirm
-      // which batch to sell from (soonest-expiry pre-selected) instead of
-      // silently auto-picking. A single available batch needs no picker.
+      // Batch-tracked: let the cashier confirm which batch (soonest-expiry pre-selected); a single batch needs no picker.
       if (product.trackBatches) {
         const sellable = getSellableBatches(product);
         if (sellable.length > 1) {
           setBatchPickerTarget({ product, qty, pricing });
           return;
         }
-        // Exactly one batch — nothing to choose, but still honor its price
-        // override (if any) rather than silently falling back to the
-        // product's normal price. If it's already expired, confirm first
-        // rather than silently selling it.
+        // Exactly one batch — still honor its price override, and confirm before selling if already expired.
         const only = sellable[0];
         if (only?.expiryDate && new Date(only.expiryDate) < new Date()) {
           const expiredDays = Math.abs(Math.ceil((new Date(only.expiryDate) - new Date()) / 86400000));
@@ -1096,44 +1122,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
     [serialPickerTarget, commitAddToCart]
   );
 
-  const removeFromCart = useCallback((product, qty = 1) => {
-    // Side effects (toast, sound) run after setCart returns — see commitAddToCart
-    // above for why they can't live inside the updater itself.
-    let toastMsg = '';
-    let toastType = 'success';
-    let sound = null;
-    setCart((prev) => {
-      const idx = prev.findIndex((i) => i.id === product.id || i.name === product.name);
-      if (idx < 0) {
-        toastMsg = `${product.name} is not in the bill.`;
-        toastType = 'error';
-        sound = 'error';
-        return prev;
-      }
-      const current = prev[idx];
-      const newQty = Math.round((current.qty - qty) * 1000) / 1000;
-      if (newQty <= 0) {
-        toastMsg = `Removed ${product.name} from bill.`;
-        sound = 'remove';
-        return prev.filter((_, i) => i !== idx);
-      }
-      const next = [...prev];
-      next[idx] = {
-        ...current,
-        qty: newQty,
-        total: roundToDecimals(newQty * current.price)
-      };
-      toastMsg = `Decremented ${product.name} (qty: ${newQty})`;
-      sound = 'remove';
-      return next;
-    });
-    showToast(toastMsg, toastType);
-    if (sound) playScanSound(sound);
-  }, [showToast]);
-
-  /**
-   * Weight-embedded and standard barcode scanner handling
-   */
+  // Weight-embedded and standard barcode scanner handling
   const resolveScan = useCallback(
     async (code) => {
       const trimmed = code.trim();
@@ -1308,11 +1297,8 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         const currentOpt = options.find((o) => o.unit.toLowerCase() === String(item.unit).toLowerCase()) || { factor: item.unitFactor || 1, price: item.price };
         const newOpt = options.find((o) => o.unit.toLowerCase() === String(targetUnit).toLowerCase()) || options[0];
 
-        // Base quantity currently in cart:
         const currentBaseQty = (Number(item.qty) || 0) * (currentOpt.factor || 1);
-        // Switching into a bigger pack unit (e.g. bag, box, case) starts fresh at
-        // 1 — carrying over a converted fraction (like 0.04 bag) isn't useful for
-        // something sold as whole packs. Sub-units (g, ml) still convert normally.
+        // Switching to a bigger pack unit (bag/box/case) starts fresh at 1 rather than a useless fraction like 0.04 bag.
         const convertedQty = newOpt.isAlt
           ? 1
           : newOpt.factor > 0
@@ -1335,11 +1321,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
     );
   };
 
-  // A product can appear as more than one cart line — different units (kg vs
-  // g), different batches, or now different serials of the same product.
-  // `id` alone doesn't identify a single line, so every per-line edit below
-  // also matches on unit + batch + serial (mirrors the check the remove
-  // button already used).
+  // `id` alone doesn't identify a cart line (unit/batch/serial can differ), so per-line edits match on all of them.
   const isSameLine = (i, id, unit, batchId, serialId) =>
     i.id === id &&
     (unit === undefined || i.unit === unit) &&
@@ -1354,19 +1336,14 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
           if (i.serialId) return i; // one unit per serial line — remove the line instead of adjusting qty
           const step = i.unit === 'g' || i.unit === 'ml' ? 50 : 1;
           const rawQty = Math.max(0, i.qty + delta * step);
-          // Whole-number units (pcs, box, dozen, ...) never round to a
-          // fraction here regardless of step — g/ml keep their 3-decimal
-          // precision for weighed items.
+          // Whole-number units never round to a fraction; g/ml keep 3-decimal precision for weighed items.
           const qty = isWholeNumberUnit(i.unit) ? Math.round(rawQty) : Math.round(rawQty * 1000) / 1000;
           return { ...i, qty, total: roundToDecimals(qty * i.price) };
         })
         .filter((i) => i.qty > 0)
     );
 
-  // Rate/qty are free-typed in the cart, and nothing downstream re-checks their
-  // sign before checkout — verified live that a negative qty slips straight
-  // through to the backend, credits stock instead of debiting it, and posts a
-  // negative "COMPLETED" sale. Clamp both to non-negative here, at the source.
+  // Nothing downstream re-checks sign before checkout, so a negative qty/price would credit stock instead of debiting it — clamp to non-negative here, at the source.
   const setLinePrice = (id, price, unit, batchId, serialId) =>
     setCart((prev) =>
       prev.map((i) => (isSameLine(i, id, unit, batchId, serialId) ? { ...i, price: Math.max(0, Number(price) || 0), total: roundToDecimals(i.qty * Math.max(0, Number(price) || 0)) } : i))
@@ -1377,9 +1354,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
       prev.map((i) => {
         if (!isSameLine(i, id, unit, batchId, serialId)) return i;
         if (i.serialId) return i; // one unit per serial line — not editable
-        // Let the field go through '' / a trailing '.' while typing — only
-        // whole-number units get their decimal point stripped as-you-type
-        // (a weighed item in kg/g still gets to type "1.5").
+        // Allow '' / a trailing '.' while typing; only whole-number units strip the decimal point as-you-type.
         const rawVal = isWholeNumberUnit(i.unit) ? String(val).replace(/\./g, '') : val;
         const newQty = rawVal === '' ? '' : Math.max(0, Number(rawVal) || 0);
         const safeQty = Number(newQty) || 0;
@@ -1490,12 +1465,65 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   const splitTotal = useMemo(() => Math.round(splitEntries.reduce((s, r) => s + r.amount, 0) * 100) / 100, [splitEntries]);
   const splitRemaining = Math.round((payable - splitTotal) * 100) / 100;
 
+  useEffect(() => {
+    if (!customerDisplayEnabled) return;
+    // Partial Payment (UPI upfront) and Multi Pay (UPI split row) also need their own QR for just the UPI portion.
+    let showQr = false;
+    let qrAmount = 0;
+    if (cart.length > 0) {
+      if (paymentMode === 'UPI') {
+        showQr = true;
+        qrAmount = payable;
+      } else if (paymentMode === 'Partial Payment' && partialPaymentMethod === 'UPI') {
+        showQr = Number(partialPaidAmount) > 0;
+        qrAmount = Number(partialPaidAmount) || 0;
+      } else if (paymentMode === 'Multi Pay') {
+        const upiEntry = splitEntries.find((r) => r.method === 'UPI');
+        if (upiEntry) {
+          showQr = true;
+          qrAmount = upiEntry.amount;
+        }
+      }
+    }
+
+    const payload = {
+      items: cart.map((i) => ({
+        name: i.name,
+        qty: Number(i.qty) || 0,
+        price: Number(i.price) || 0,
+        total: (Number(i.qty) || 0) * (Number(i.price) || 0)
+      })),
+      subtotal: totals.subtotal,
+      discount: totals.discountAmount,
+      tax: totals.tax,
+      total: payable,
+      paymentMode: cart.length > 0 ? paymentMode : '',
+      showQr,
+      qrAmount,
+      upiId: settings?.billing?.upiId || settings?.company?.upiId || '',
+      qrImageUrl: settings?.billing?.qrImageUrl || '',
+      companyName: settings?.company?.name || '',
+      logoUrl: settings?.company?.logoUrl || ''
+    };
+    displayStateRef.current = payload;
+    displayChannelRef.current?.postMessage({ type: 'STATE', payload });
+  }, [
+    customerDisplayEnabled,
+    cart,
+    totals.subtotal,
+    totals.discountAmount,
+    totals.tax,
+    payable,
+    paymentMode,
+    partialPaymentMethod,
+    partialPaidAmount,
+    splitEntries,
+    settings
+  ]);
+
   const checkout = async () => {
     if (cart.length === 0) return;
-    // Guard against a double-tap/double-click firing two POST /orders for the
-    // same bill — verified live that nothing else stops this: two identical
-    // requests each create their own order, deduct stock and post accounting
-    // entries independently, since the backend has no dedup/idempotency check.
+    // Guards against a double-tap firing two POST /orders — the backend has no dedup/idempotency check of its own.
     if (checkingOut) return;
 
     const isMultiPay = paymentMode === 'Multi Pay';
@@ -1580,6 +1608,11 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         notes: note
       });
 
+      displayChannelRef.current?.postMessage({
+        type: 'COMPLETED',
+        payload: { total: res.data?.total ?? totals.grand, paymentMode: actualPaymentMode }
+      });
+
       setReceipt(res.data);
       setShowCheckout(false);
       clearCart();
@@ -1597,23 +1630,13 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
       }
 
       (res.warnings || []).forEach((w) => showToast(w, 'error'));
-      // The sale itself always succeeds even if posting it to the ledger
-      // failed (accounting is best-effort so a bookkeeping hiccup never blocks
-      // a customer at the counter) — but that divergence was previously
-      // recorded on the order and never shown anywhere. Surface it so it
-      // doesn't go unnoticed until a books-don't-balance review much later.
+      // Accounting is best-effort so a ledger failure never blocks the sale — but surface it so it isn't found much later.
       if (res.data?.accountingError) {
         showToast(`Bill saved, but the accounting entry failed: ${res.data.accountingError}. Check Accounts for order #${res.data.orderId}.`, 'error');
       }
       showToast(res.message);
 
-      // The tenant middleware now flushes every write to MongoDB before this
-      // request's response is sent (verified live: an immediate, zero-delay
-      // direct DB read and an immediate GET /orders both saw the new order
-      // right after the POST resolved) — so there is nothing left to wait
-      // out. Refresh right away: this also brings stock levels, the session
-      // drawer balance and held bills back in sync without the multi-second
-      // gap during which the grid used to show stale stock.
+      // Tenant middleware flushes every write before the response is sent, so it's safe to refresh right away.
       load();
       onSaleCompleted?.();
 
@@ -1701,12 +1724,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
   const currentCustomer = useMemo(() => customers.find((c) => c.id === customerId) || null, [customers, customerId]);
 
-  // Stock + pricing per product used to be recomputed inline in JSX for every
-  // visible card on every POSTerminal render — including renders triggered by
-  // wholly unrelated state (typing a cash amount, opening a modal). With ~150
-  // cards each doing a cart scan + price-sheet lookup, that was the "buffering"
-  // stutter on selection. Memoized here so it only recomputes when something
-  // that actually affects a card's stock/price/label changes.
+  // Memoized: recomputing stock/price for ~150 visible cards inline in JSX on every unrelated render was the selection stutter.
   const visibleProductCards = useMemo(() => {
     return filtered.slice(0, 150).map((p, index) => {
       const stockInfo = getProductRemainingStock(p, cart, products);
@@ -1774,12 +1792,12 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
               className="h-8 w-8 rounded-xl object-contain shadow-xs shrink-0"
             />
           )}
-          <div className="relative min-w-[220px] flex-1">
+          <div className="relative min-w-[220px] flex-1" ref={searchBoxRef}>
             <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[color:var(--text-muted)]" />
             <input
               ref={searchRef}
               className="field-input"
-              style={{ paddingLeft: '2.1rem' }}
+              style={{ paddingLeft: '2.1rem', paddingRight: '2.1rem' }}
               placeholder="Scan barcode or search items… (F2)"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
@@ -1788,12 +1806,23 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                   addToCart(filtered[0], 1);
                   playScanSound('add');
                   setSearchQuery('');
+                  setSearchDropdownOpen(false);
+                } else if (e.key === 'Escape') {
+                  setSearchDropdownOpen(false);
                 }
               }}
             />
+            <button
+              type="button"
+              onClick={() => setSearchDropdownOpen((o) => !o)}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[color:var(--text-muted)] hover:text-indigo-600 dark:hover:text-indigo-400"
+              title="Browse all items"
+            >
+              <ChevronDown className={`h-4 w-4 transition-transform ${searchDropdownOpen ? 'rotate-180' : ''}`} />
+            </button>
 
             {/* Search with Dropdown selection */}
-            {searchQuery.trim().length > 0 && (
+            {(searchQuery.trim().length > 0 || searchDropdownOpen) && (
               <div className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-2xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] p-2 shadow-2xl backdrop-blur-md max-h-72 overflow-y-auto">
                 <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[color:var(--text-muted)] flex justify-between items-center">
                   <span>Matching Items ({filtered.length})</span>
@@ -1817,6 +1846,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                           addToCart(p, 1);
                           playScanSound('add');
                           setSearchQuery('');
+                          setSearchDropdownOpen(false);
                         }}
                         className="flex items-center justify-between p-2 rounded-xl hover:bg-[color:var(--bg-subtle)] cursor-pointer text-xs transition-colors group"
                       >
@@ -1901,6 +1931,19 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
             <Barcode className="h-3 w-3" />
             {settings?.hardware?.barcodeScanner?.enabled !== false ? 'Scanner Armed' : 'Scanner Off'}
           </Badge>
+
+          {customerDisplayEnabled && (
+            <button
+              type="button"
+              onClick={openCustomerDisplay}
+              title="Open a customer-facing screen showing the live bill and payment QR"
+              className="flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-2 text-[11.5px] font-bold transition-colors cursor-pointer outline-none"
+              style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
+            >
+              <Monitor className="h-3.5 w-3.5" />
+              Customer Display
+            </button>
+          )}
 
           {/* Live weight display */}
           {settings?.hardware?.weighingScale?.enabled !== false && (
@@ -2297,9 +2340,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
               </Badge>
               {payable > 0 && payable >= (Number(settings?.loyalty?.loyaltyMinSpendToEarn ?? settings?.pos?.loyaltyMinSpendToEarn) || 0) && (
                 <Badge tone="success">
-                  {/* Matches the backend's earn formula exactly (routes/sales.js) — points
-                      accrue on what's actually paid (payable), not the gross bill total,
-                      and the spend unit is the tenant's configured value, not a hardcoded 100. */}
+                  {/* Matches backend's earn formula (routes/sales.js): accrues on payable, not gross total. */}
                   ✨ +{Math.floor((payable / Math.max(1, Number(settings?.loyalty?.loyaltySpendAmount ?? settings?.pos?.loyaltySpendAmount) || 100)) * (Number(settings?.loyalty?.loyaltyPointsPerSpend ?? settings?.pos?.loyaltyPointsPerSpend ?? settings?.pos?.loyaltyPointsPerHundred) || 1))} pts on this bill
                 </Badge>
               )}
@@ -2786,6 +2827,10 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                         </span>
                       )}
                     </div>
+                    <div className="text-[10.5px] text-[color:var(--text-muted)]/80 mt-0.5 flex items-center gap-2">
+                      {b.createdAt && <span>Incoming: {String(b.createdAt).slice(0, 10)}</span>}
+                      {b.mfgDate && <span>Mfg: {String(b.mfgDate).slice(0, 10)}</span>}
+                    </div>
                   </div>
                   <ArrowRight className="h-4 w-4 text-[color:var(--text-muted)] shrink-0" />
                 </button>
@@ -3066,7 +3111,20 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
           {paymentMode === 'UPI' && (
             <div className="rounded-2xl px-4 py-5 text-center" style={{ background: 'var(--bg-subtle)' }}>
-              <QrCode className="mx-auto h-16 w-16 text-[color:var(--accent)]" />
+              {qrImageUrl || billingQrDataUrl ? (
+                <img
+                  src={qrImageUrl ? resolveAssetUrl(qrImageUrl) : billingQrDataUrl}
+                  alt="UPI payment QR code"
+                  className="mx-auto h-40 w-40 object-contain rounded-xl bg-white p-2"
+                />
+              ) : (
+                <>
+                  <QrCode className="mx-auto h-16 w-16 text-[color:var(--accent)]" />
+                  <div className="text-[10.5px] text-[color:var(--text-muted)] mt-1">
+                    Add a UPI ID or upload a QR image in Settings → Billing to show a real scannable code here.
+                  </div>
+                </>
+              )}
               <div className="tabular mt-2 text-[13px] font-bold text-[color:var(--text-primary)]">
                 Scan to pay {bMoney(payable)}
               </div>
@@ -3297,9 +3355,10 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         onClose={() => setShowTables(false)}
         showToast={showToast}
         onChanged={load}
+        decimalPlaces={decimalPlaces}
       />
 
-      <RecentBillsModal open={showRecent} onClose={() => setShowRecent(false)} onReprint={setReceipt} showToast={showToast} />
+      <RecentBillsModal open={showRecent} onClose={() => setShowRecent(false)} onReprint={setReceipt} showToast={showToast} decimalPlaces={decimalPlaces} />
 
       <QuickCustomerModal
         open={showAddCustomer}
@@ -3329,19 +3388,10 @@ function Row({ label, value, tone, decimalPlaces = 2 }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Receipt
- * ------------------------------------------------------------------ */
+/* ------------------------------- Receipt ------------------------------- */
 
 function ReceiptModal({ receipt, settings, tenant, onClose, showToast, onUpdated }) {
-  // `receipt` toggles between null and populated on every checkout, but this
-  // component stays mounted the whole time (the parent always renders it) —
-  // so the early return used to sit before the hooks below, which meant the
-  // number of hooks called changed from render to render. React detects that
-  // mismatch and bails out of re-rendering the tree correctly, which is why
-  // a newly-selected bill template could appear to "stick" on the old one:
-  // the component silently stopped picking up fresh props. Every hook must
-  // run unconditionally on every render, so the guard is now after them all.
+  // Every hook must run unconditionally on every render (the null-receipt early return sits after them all) — otherwise React's hook-count mismatch made a newly-selected template silently "stick" on the old one.
   const company = receipt?.company || settings?.company || { name: tenant?.name || 'Selsolve Store' };
   const billing = receipt?.billing || settings?.billing || {};
 
@@ -3370,13 +3420,7 @@ function ReceiptModal({ receipt, settings, tenant, onClose, showToast, onUpdated
   const customInvoiceTemplates = (billing.customTemplates || []).filter((t) => t.type === 'invoice');
   const customThermalTemplates = (billing.customTemplates || []).filter((t) => t.type === 'thermal');
 
-  // This is passed as the highest-priority override into the renderer — it
-  // must never fall back to the raw `billing` object. `billing` accumulates
-  // fields from every past template edit, so using it as a fallback here
-  // means switching to a *different* built-in theme barely changes anything:
-  // whatever's sitting in `billing` wins over that theme's own defaults for
-  // almost every field. An empty object lets the newly-selected theme's
-  // defaults actually show through.
+  // Must never fall back to raw `billing` — it accumulates every past template edit, so it would drown out a newly-selected theme's own defaults.
   const selectedCustomInvoice = customInvoiceTemplates.find((t) => t.id === selectedInvoiceTheme);
   const activeInvoiceConfig = selectedCustomInvoice ? selectedCustomInvoice.config : {};
 
@@ -3625,9 +3669,7 @@ function ReceiptModal({ receipt, settings, tenant, onClose, showToast, onUpdated
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Session, tables, reprint
- * ------------------------------------------------------------------ */
+/* ------------------------------ Session, tables, reprint ------------------------------ */
 
 const CASH_REASONS = [
   'Change float added',
@@ -3676,7 +3718,12 @@ const EXPENSE_CATEGORY_ICONS = {
 
 function SessionModal({ open, session, customers = [], vendors = [], onClose, showToast, onChanged }) {
   const [openingMode, setOpeningMode] = useState('DENOMINATIONS'); // 'DENOMINATIONS' or 'LUMPSUM'
+  const [countingFor, setCountingFor] = useState('LOCKER'); // which bucket the note-counter grid is currently editing: 'LOCKER' | 'OWNER'
   const [openingCash, setOpeningCash] = useState('');
+  const [ownerCashInput, setOwnerCashInput] = useState('');
+  const [ownerDenominations, setOwnerDenominations] = useState({
+    '2000': 0, '500': 0, '200': 0, '100': 0, '50': 0, '20': 0, '10': 0, coins: 0
+  });
   const [denominations, setDenominations] = useState({
     '2000': 0, '500': 0, '200': 0, '100': 0, '50': 0, '20': 0, '10': 0, coins: 0
   });
@@ -3702,7 +3749,26 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
     '2000': 0, '500': 0, '200': 0, '100': 0, '50': 0, '20': 0, '10': 0, coins: 0
   });
   const [countedCash, setCountedCash] = useState('');
+  const [ownerCashTaken, setOwnerCashTaken] = useState('');
   const [busy, setBusy] = useState(false);
+
+  // Company Locker: the shop's own safe, separate from this counter's till — its denomination breakdown is only trustworthy right after a physical recount.
+  const [locker, setLocker] = useState(null);
+  const [lockerRecountDenoms, setLockerRecountDenoms] = useState({
+    '2000': 0, '500': 0, '200': 0, '100': 0, '50': 0, '20': 0, '10': 0, coins: 0
+  });
+  const [lockerNotes, setLockerNotes] = useState('');
+  const [lockerBusy, setLockerBusy] = useState(false);
+  const [lockerHistorySearch, setLockerHistorySearch] = useState('');
+
+  const loadLocker = async () => {
+    try {
+      const res = await api.get('/company-locker');
+      setLocker(res.data);
+    } catch (err) {
+      // Silent — the locker tile just stays hidden/blank if this fails.
+    }
+  };
 
   const isOpen = session?.status === 'open';
 
@@ -3711,13 +3777,18 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
       '2000': 0, '500': 0, '200': 0, '100': 0, '50': 0, '20': 0, '10': 0, coins: 0
     });
     setCountedCash('');
+    setOwnerCashTaken('');
   };
 
   const resetOpeningDenominations = () => {
     setDenominations({
       '2000': 0, '500': 0, '200': 0, '100': 0, '50': 0, '20': 0, '10': 0, coins: 0
     });
+    setOwnerDenominations({
+      '2000': 0, '500': 0, '200': 0, '100': 0, '50': 0, '20': 0, '10': 0, coins: 0
+    });
     setOpeningCash('');
+    setOwnerCashInput('');
   };
 
   // Auto-clear previous calculation and notes inputs whenever modal opens or session updates
@@ -3725,9 +3796,11 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
     if (open) {
       resetClosingDenominations();
       resetOpeningDenominations();
+      setCountingFor('LOCKER');
       setActiveTab('CASH_IN');
       setHistorySearch('');
       setHistoryFilter('ALL');
+      loadLocker();
     }
   }, [open, session?.id, session?.status]);
 
@@ -3738,6 +3811,14 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
       return sum + count * d.value;
     }, 0);
   }, [denominations]);
+
+  // Compute owner's cash contribution from its own denomination breakdown
+  const ownerDenominationTotal = useMemo(() => {
+    return CURRENCY_DENOMINATIONS.reduce((sum, d) => {
+      const count = Number(ownerDenominations[d.key]) || 0;
+      return sum + count * d.value;
+    }, 0);
+  }, [ownerDenominations]);
 
   // Compute closing cash sum from denominations
   const closingDenominationTotal = useMemo(() => {
@@ -3761,15 +3842,28 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
   };
 
   const handleOpenSession = async () => {
-    const finalAmount = openingMode === 'DENOMINATIONS' ? denominationTotal : Number(openingCash);
+    const lockerRaw = openingMode === 'DENOMINATIONS' ? denominationTotal : 0;
+    const ownerRaw = openingMode === 'DENOMINATIONS' ? ownerDenominationTotal : (Number(ownerCashInput) || 0);
+    const finalAmount = openingMode === 'DENOMINATIONS' ? Math.round((lockerRaw + ownerRaw) * 100) / 100 : Number(openingCash);
     if (!finalAmount || finalAmount < 0) {
       showToast('Please enter a valid opening cash float.', 'error');
+      return;
+    }
+    const ownerPart = Math.min(finalAmount, Math.max(0, ownerRaw));
+    const lockerPart = openingMode === 'DENOMINATIONS'
+      ? Math.round(lockerRaw * 100) / 100
+      : Math.round((finalAmount - ownerPart) * 100) / 100;
+    if (lockerPart > (Number(locker?.balance) || 0) + 0.009) {
+      showToast(`The Company Locker doesn't have enough to cover ₹${lockerPart.toFixed(2)} — increase Owner's Cash Input or reduce the float.`, 'error');
       return;
     }
     await act(() =>
       api.post('/session/open', {
         openingCash: finalAmount,
-        denominations: openingMode === 'DENOMINATIONS' ? denominations : undefined
+        denominations: openingMode === 'DENOMINATIONS' ? denominations : undefined,
+        ownerDenominations: openingMode === 'DENOMINATIONS' && ownerPart > 0 ? ownerDenominations : undefined,
+        ownerCashInput: ownerPart,
+        companyCashInput: lockerPart
       })
     );
     onClose();
@@ -3783,11 +3877,6 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
 
     if (!entry.person?.trim()) {
       showToast('Please enter or select a name / party.', 'error');
-      return;
-    }
-
-    if (entry.partyType === 'OTHER' && !entry.phone?.trim()) {
-      showToast('Phone number is required.', 'error');
       return;
     }
 
@@ -3836,7 +3925,8 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
     await act(() =>
       api.post('/session/close', {
         countedCash: finalCounted,
-        closingDenominations: closingMode === 'DENOMINATIONS' ? closingDenominations : undefined
+        closingDenominations: closingMode === 'DENOMINATIONS' ? closingDenominations : undefined,
+        ownerCashTaken: Math.max(0, Number(ownerCashTaken) || 0)
       })
     );
     onClose();
@@ -3897,6 +3987,47 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
   const addAmountPreset = (amt) => {
     const cur = Number(entry.amount) || 0;
     setEntry((prev) => ({ ...prev, amount: String(cur + amt) }));
+  };
+
+  // Company Locker — recount total from the physical note breakdown, and a
+  // searchable view of its deposit/withdrawal/recount history.
+  const lockerRecountTotal = useMemo(() => {
+    return CURRENCY_DENOMINATIONS.reduce((sum, d) => {
+      const count = Number(lockerRecountDenoms[d.key]) || 0;
+      return sum + count * d.value;
+    }, 0);
+  }, [lockerRecountDenoms]);
+
+  const lockerVariance = lockerRecountTotal - (Number(locker?.balance) || 0);
+
+  const filteredLockerHistory = useMemo(() => {
+    const entries = locker?.history || [];
+    if (!lockerHistorySearch.trim()) return entries;
+    const q = lockerHistorySearch.toLowerCase();
+    return entries.filter((e) =>
+      (e.type && e.type.toLowerCase().includes(q)) ||
+      (e.note && e.note.toLowerCase().includes(q)) ||
+      (e.user && e.user.toLowerCase().includes(q)) ||
+      (e.sessionId && e.sessionId.toLowerCase().includes(q))
+    );
+  }, [locker?.history, lockerHistorySearch]);
+
+  const handleLockerRecount = async () => {
+    setLockerBusy(true);
+    try {
+      const res = await api.post('/company-locker/recount', {
+        denominations: lockerRecountDenoms,
+        notes: lockerNotes
+      });
+      showToast(res.message || 'Company Locker recount saved.');
+      setLocker(res.data);
+      setLockerRecountDenoms({ '2000': 0, '500': 0, '200': 0, '100': 0, '50': 0, '20': 0, '10': 0, coins: 0 });
+      setLockerNotes('');
+    } catch (err) {
+      showToast(api.message(err, 'Could not save the locker recount.'), 'error');
+    } finally {
+      setLockerBusy(false);
+    }
   };
 
   return (
@@ -3972,99 +4103,189 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
 
           {openingMode === 'DENOMINATIONS' ? (
             <div className="space-y-4">
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                {CURRENCY_DENOMINATIONS.map((d) => {
-                  const count = denominations[d.key] || 0;
-                  const rowSum = count * d.value;
-                  return (
-                    <div
-                      key={d.key}
-                      className={`p-3.5 rounded-2xl border bg-[color:var(--bg-surface)] flex flex-col justify-between gap-2.5 transition-all shadow-xs hover:border-indigo-400 dark:hover:border-indigo-600 ${d.color}`}
-                    >
-                      <div className="flex items-center justify-between font-bold">
-                        <span className="font-mono text-sm">{d.label}</span>
-                        <span className="tabular text-xs opacity-90 font-mono">
-                          ₹{rowSum.toLocaleString('en-IN')}
+              {(() => {
+                const activeDenoms = countingFor === 'LOCKER' ? denominations : ownerDenominations;
+                const setActiveDenoms = countingFor === 'LOCKER' ? setDenominations : setOwnerDenominations;
+                const lockerAvailable = Number(locker?.balance) || 0;
+                const overLocker = denominationTotal > lockerAvailable + 0.009;
+                return (
+                  <>
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">
+                        Counting Notes For
+                      </div>
+                      <SegmentedControl
+                        value={countingFor}
+                        onChange={setCountingFor}
+                        options={[
+                          { value: 'LOCKER', label: 'Company Locker Cash' },
+                          { value: 'OWNER', label: "Owner's Cash Input" }
+                        ]}
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      {CURRENCY_DENOMINATIONS.map((d) => {
+                        const count = activeDenoms[d.key] || 0;
+                        const rowSum = count * d.value;
+                        return (
+                          <div
+                            key={d.key}
+                            className={`p-3.5 rounded-2xl border bg-[color:var(--bg-surface)] flex flex-col justify-between gap-2.5 transition-all shadow-xs hover:border-indigo-400 dark:hover:border-indigo-600 ${d.color}`}
+                          >
+                            <div className="flex items-center justify-between font-bold">
+                              <span className="font-mono text-sm">{d.label}</span>
+                              <span className="tabular text-xs opacity-90 font-mono">
+                                ₹{rowSum.toLocaleString('en-IN')}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="number"
+                                min="0"
+                                value={activeDenoms[d.key] === 0 ? '' : activeDenoms[d.key]}
+                                onChange={(e) => {
+                                  const val = e.target.value === '' ? 0 : Math.max(0, parseInt(e.target.value) || 0);
+                                  setActiveDenoms({ ...activeDenoms, [d.key]: val });
+                                }}
+                                placeholder="0 notes"
+                                className="tabular w-full px-2.5 py-1.5 text-xs font-bold rounded-xl border border-[color:var(--border)] bg-[color:var(--surface)] text-right"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setActiveDenoms({ ...activeDenoms, [d.key]: (Number(activeDenoms[d.key]) || 0) + 1 })}
+                                className="px-2 py-1.5 rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-[11px] font-bold hover:bg-indigo-500 hover:text-white transition-colors"
+                                title="Add 1 note"
+                              >
+                                +1
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setActiveDenoms({ ...activeDenoms, [d.key]: (Number(activeDenoms[d.key]) || 0) + 5 })}
+                                className="px-2 py-1.5 rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-[11px] font-bold hover:bg-indigo-500 hover:text-white transition-colors"
+                                title="Add 5 notes"
+                              >
+                                +5
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className={`flex items-center justify-between gap-4 rounded-2xl p-3.5 border-2 transition-all ${countingFor === 'LOCKER' ? 'border-indigo-500 bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg' : 'border-[color:var(--border)] bg-[color:var(--bg-surface)] text-[color:var(--text-primary)]'}`}>
+                        <div className="flex items-center gap-2.5">
+                          <Wallet className="h-5 w-5 opacity-90" />
+                          <div>
+                            <span className="text-xs font-bold opacity-90">Company Locker Cash</span>
+                            <p className="text-[10.5px] opacity-75">Available: {money(lockerAvailable, { decimals: false })}</p>
+                          </div>
+                        </div>
+                        <span className="text-lg font-black font-mono tracking-tight">
+                          ₹{denominationTotal.toLocaleString('en-IN')}
                         </span>
                       </div>
-
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          type="number"
-                          min="0"
-                          value={denominations[d.key] === 0 ? '' : denominations[d.key]}
-                          onChange={(e) => {
-                            const val = e.target.value === '' ? 0 : Math.max(0, parseInt(e.target.value) || 0);
-                            setDenominations({ ...denominations, [d.key]: val });
-                          }}
-                          placeholder="0 notes"
-                          className="tabular w-full px-2.5 py-1.5 text-xs font-bold rounded-xl border border-[color:var(--border)] bg-[color:var(--surface)] text-right"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setDenominations({ ...denominations, [d.key]: (Number(denominations[d.key]) || 0) + 1 })}
-                          className="px-2 py-1.5 rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-[11px] font-bold hover:bg-indigo-500 hover:text-white transition-colors"
-                          title="Add 1 note"
-                        >
-                          +1
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setDenominations({ ...denominations, [d.key]: (Number(denominations[d.key]) || 0) + 5 })}
-                          className="px-2 py-1.5 rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-[11px] font-bold hover:bg-indigo-500 hover:text-white transition-colors"
-                          title="Add 5 notes"
-                        >
-                          +5
-                        </button>
+                      <div className={`flex items-center justify-between gap-4 rounded-2xl p-3.5 border-2 transition-all ${countingFor === 'OWNER' ? 'border-emerald-500 bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-lg' : 'border-[color:var(--border)] bg-[color:var(--bg-surface)] text-[color:var(--text-primary)]'}`}>
+                        <div className="flex items-center gap-2.5">
+                          <Coins className="h-5 w-5 opacity-90" />
+                          <div>
+                            <span className="text-xs font-bold opacity-90">Owner's Cash Input</span>
+                            <p className="text-[10.5px] opacity-75">Owner's own contribution</p>
+                          </div>
+                        </div>
+                        <span className="text-lg font-black font-mono tracking-tight">
+                          ₹{ownerDenominationTotal.toLocaleString('en-IN')}
+                        </span>
                       </div>
                     </div>
-                  );
-                })}
-              </div>
 
-              {/* Total Calculation Card */}
-              <div className="flex flex-col sm:flex-row items-center justify-between gap-4 rounded-2xl p-4 bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-white/20 backdrop-blur-md">
-                    <Coins className="h-6 w-6" />
-                  </div>
-                  <div>
-                    <span className="text-sm font-bold opacity-90">Total Opening Cash Float</span>
-                    <p className="text-xs opacity-75">Calculated from note denominations breakdown</p>
-                  </div>
-                </div>
-                <div className="text-right">
-                  <span className="text-2xl sm:text-3xl font-black font-mono tracking-tight">
-                    ₹{denominationTotal.toLocaleString('en-IN')}
-                  </span>
-                </div>
-              </div>
+                    <div className="flex items-center justify-between rounded-2xl p-4 bg-[color:var(--bg-subtle)] border border-[color:var(--border)]">
+                      <span className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">
+                        Total Opening Cash Float
+                      </span>
+                      <span className="text-lg font-black font-mono text-[color:var(--text-primary)]">
+                        ₹{(denominationTotal + ownerDenominationTotal).toLocaleString('en-IN')}
+                      </span>
+                    </div>
+
+                    {overLocker && (
+                      <div className="text-[10.5px] font-bold text-rose-600 dark:text-rose-400">
+                        The locker doesn't have enough to cover this — reduce the notes counted for Company Locker Cash.
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </div>
           ) : (
-            <div className="rounded-2xl p-6 bg-[color:var(--bg-surface)] border border-[color:var(--border)] space-y-4 max-w-xl mx-auto">
-              <Field label="Opening cash float amount" required hint="Enter physical cash available in counter drawer">
-                <Input
-                  type="number"
-                  value={openingCash}
-                  onChange={(e) => setOpeningCash(e.target.value)}
-                  placeholder="e.g. 2000"
-                  className="tabular text-xl font-bold py-2.5"
-                  autoFocus
-                />
-              </Field>
-              <div className="flex flex-wrap gap-2">
-                {[500, 1000, 2000, 3000, 5000].map((amt) => (
-                  <button
-                    key={amt}
-                    type="button"
-                    onClick={() => setOpeningCash(String(amt))}
-                    className="px-3 py-1.5 rounded-xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-xs font-semibold hover:border-indigo-400 hover:text-indigo-600 transition-colors"
-                  >
-                    ₹{amt.toLocaleString('en-IN')}
-                  </button>
-                ))}
+            <>
+              <div className="rounded-2xl p-6 bg-[color:var(--bg-surface)] border border-[color:var(--border)] space-y-4 max-w-xl mx-auto">
+                <Field label="Opening cash float amount" required hint="Enter physical cash available in counter drawer">
+                  <Input
+                    type="number"
+                    value={openingCash}
+                    onChange={(e) => setOpeningCash(e.target.value)}
+                    placeholder="e.g. 2000"
+                    className="tabular text-xl font-bold py-2.5"
+                    autoFocus
+                  />
+                </Field>
+                <div className="flex flex-wrap gap-2">
+                  {[500, 1000, 2000, 3000, 5000].map((amt) => (
+                    <button
+                      key={amt}
+                      type="button"
+                      onClick={() => setOpeningCash(String(amt))}
+                      className="px-3 py-1.5 rounded-xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-xs font-semibold hover:border-indigo-400 hover:text-indigo-600 transition-colors"
+                    >
+                      ₹{amt.toLocaleString('en-IN')}
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
+
+              {(() => {
+                const floatTotal = Number(openingCash) || 0;
+                const ownerPart = Math.min(floatTotal, Math.max(0, Number(ownerCashInput) || 0));
+                const lockerPart = Math.max(0, floatTotal - ownerPart);
+                const lockerAvailable = Number(locker?.balance) || 0;
+                const overLocker = lockerPart > lockerAvailable + 0.009;
+                return (
+                  <div className="rounded-2xl p-4 bg-[color:var(--bg-surface)] border border-[color:var(--border)] max-w-xl mx-auto w-full space-y-3">
+                    <div className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">
+                      Owner's Cash Input
+                    </div>
+                    <Field label="Amount owner is personally putting in">
+                      <Input
+                        type="number"
+                        min="0"
+                        max={floatTotal}
+                        value={ownerCashInput}
+                        onChange={(e) => setOwnerCashInput(e.target.value)}
+                        placeholder="0"
+                        className="tabular"
+                      />
+                    </Field>
+                    <div className="flex items-center justify-between text-xs font-semibold pt-1 border-t border-[color:var(--border-subtle)]">
+                      <span className="text-[color:var(--text-muted)]">From Company Locker (remainder)</span>
+                      <span className={`font-mono font-bold ${overLocker ? 'text-rose-600 dark:text-rose-400' : 'text-[color:var(--text-primary)]'}`}>
+                        {money(lockerPart, { decimals: false })}
+                      </span>
+                    </div>
+                    <div className="text-[10.5px] text-[color:var(--text-muted)] pt-1 border-t border-[color:var(--border-subtle)]">
+                      Locker balance available: {money(lockerAvailable, { decimals: false })}
+                    </div>
+                    {overLocker && (
+                      <div className="text-[10.5px] font-bold text-rose-600 dark:text-rose-400">
+                        The locker doesn't have enough to cover this — increase Owner's Cash Input or reduce the opening float.
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </>
           )}
 
           <div className="flex justify-end pt-2">
@@ -4090,6 +4311,11 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
                 <div className="text-lg font-bold font-mono text-[color:var(--text-primary)] mt-0.5">
                   {money(session.openingCash, { decimals: false })}
                 </div>
+                {Number(session.ownerCashInput) > 0 && (
+                  <div className="text-[10px] text-[color:var(--text-muted)] mt-0.5">
+                    Company {money(session.companyCashInput, { decimals: false })} · Owner {money(session.ownerCashInput, { decimals: false })}
+                  </div>
+                )}
               </div>
               <div className="h-9 w-9 rounded-xl bg-blue-500/10 text-blue-600 dark:text-blue-400 flex items-center justify-center font-bold">
                 <Wallet className="h-4 w-4" />
@@ -4184,10 +4410,24 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
             </button>
             <button
               onClick={() => {
+                loadLocker();
+                setActiveTab('LOCKER');
+              }}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ml-auto ${
+                activeTab === 'LOCKER'
+                  ? 'bg-indigo-600 text-white shadow-md'
+                  : 'bg-[color:var(--bg-subtle)] text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)] hover:bg-[color:var(--surface)]'
+              }`}
+            >
+              <Wallet className="h-3.5 w-3.5" />
+              Company Locker
+            </button>
+            <button
+              onClick={() => {
                 resetClosingDenominations();
                 setActiveTab('CLOSE');
               }}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ml-auto ${
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
                 activeTab === 'CLOSE'
                   ? 'bg-red-700 text-white shadow-md'
                   : 'bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/40'
@@ -4347,17 +4587,14 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
                   </div>
                 )}
 
-                {/* New / Unknown Party — every rupee needs a real party behind it, so
-                    this always registers a Customer from these details rather than
-                    logging a free-text, unlookupable name. */}
+                {/* Every rupee needs a real party: always registers a Customer rather than logging a free-text name. */}
                 {entry.partyType === 'OTHER' && (
                   <div className="space-y-3 pt-1">
                     <div className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-500/10 border border-emerald-500/25 rounded-xl px-3 py-2">
-                      Not in the directory yet? These details will create a new Customer
-                      automatically (or match an existing one by phone number).
+                      Just need a name and amount. Add a phone number if you'd like this to create/match a Customer record — otherwise it's recorded as a general cash movement.
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <Field label="Received From (Full Name)" required>
+                      <Field label="Name" required>
                         <Input
                           value={entry.person}
                           onChange={(e) => setEntry({ ...entry, person: e.target.value })}
@@ -4365,7 +4602,7 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
                         />
                       </Field>
 
-                      <Field label="Phone Number" required hint="Used to create/match the customer record">
+                      <Field label="Phone Number (optional)" hint="Only needed if this should create/match a Customer record">
                         <Input
                           type="tel"
                           value={entry.phone || ''}
@@ -4374,14 +4611,6 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
                         />
                       </Field>
                     </div>
-
-                    <Field label="Address">
-                      <Input
-                        value={entry.address || ''}
-                        onChange={(e) => setEntry({ ...entry, address: e.target.value })}
-                        placeholder="e.g. Shop / Street / City address"
-                      />
-                    </Field>
                   </div>
                 )}
               </div>
@@ -4429,6 +4658,25 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
                 </button>
               </div>
 
+              {/* Quick Reason Chips */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-xs font-semibold text-[color:var(--text-muted)] mr-1">Quick Reason:</span>
+                {CASH_REASONS.map((r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    onClick={() => setEntry((prev) => ({ ...prev, purpose: r }))}
+                    className={`px-2.5 py-1 rounded-lg border text-xs font-semibold transition-colors ${
+                      entry.purpose === r
+                        ? 'border-emerald-500 bg-emerald-500/15 text-emerald-800 dark:text-emerald-200'
+                        : 'border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-[color:var(--text-secondary)] hover:border-emerald-400'
+                    }`}
+                  >
+                    {r}
+                  </button>
+                ))}
+              </div>
+
               <div className="flex justify-end pt-3">
                 <Button
                   variant="primary"
@@ -4438,8 +4686,7 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
                   disabled={
                     !entry.amount ||
                     Number(entry.amount) <= 0 ||
-                    !entry.person?.trim() ||
-                    (entry.partyType === 'OTHER' && !entry.phone?.trim())
+                    !entry.person?.trim()
                   }
                   onClick={handleRecordEntry}
                   className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-6 shadow-md"
@@ -4674,7 +4921,7 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
                 {entry.partyType === 'OTHER' && (
                   <div className="space-y-3 pt-1">
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <Field label="Paid To / Issued To (Full Name)" required>
+                      <Field label="Paid To / Issued To" required>
                         <Input
                           value={entry.person}
                           onChange={(e) => setEntry({ ...entry, person: e.target.value })}
@@ -4682,7 +4929,7 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
                         />
                       </Field>
 
-                      <Field label="Phone Number" required>
+                      <Field label="Phone Number (optional)">
                         <Input
                           type="tel"
                           value={entry.phone || ''}
@@ -4691,14 +4938,6 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
                         />
                       </Field>
                     </div>
-
-                    <Field label="Address">
-                      <Input
-                        value={entry.address || ''}
-                        onChange={(e) => setEntry({ ...entry, address: e.target.value })}
-                        placeholder="e.g. Shop / Street / City address"
-                      />
-                    </Field>
                   </div>
                 )}
               </div>
@@ -4755,8 +4994,7 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
                   disabled={
                     !entry.amount ||
                     Number(entry.amount) <= 0 ||
-                    !entry.person?.trim() ||
-                    (entry.partyType === 'OTHER' && !entry.phone?.trim())
+                    !entry.person?.trim()
                   }
                   onClick={handleRecordEntry}
                   className="bg-rose-600 hover:bg-rose-700 text-white font-bold px-6 shadow-md"
@@ -4863,12 +5101,13 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
                         key={cat}
                         type="button"
                         onClick={() => setEntry({ ...entry, expenseCategory: cat })}
-                        className={`flex items-center justify-center p-2.5 rounded-xl border text-xs font-bold text-center transition-all ${
+                        className={`flex items-center justify-center gap-1.5 p-2.5 rounded-xl border text-xs font-bold text-center transition-all ${
                           isSelected
                             ? 'border-amber-500 bg-amber-500/15 text-amber-900 dark:text-amber-100 shadow-xs'
                             : 'border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-[color:var(--text-secondary)] hover:border-amber-300'
                         }`}
                       >
+                        <span>{EXPENSE_CATEGORY_ICONS[cat]}</span>
                         <span className="truncate">{cat}</span>
                       </button>
                     );
@@ -4966,7 +5205,7 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
                         width: 160,
                         render: (e) => (
                           <Badge tone="warning">
-                            {e.expenseCategory || 'Expense'}
+                            {e.expenseCategory ? `${EXPENSE_CATEGORY_ICONS[e.expenseCategory] || ''} ${e.expenseCategory}` : 'Expense'}
                           </Badge>
                         )
                       },
@@ -5151,6 +5390,227 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
             </div>
           )}
 
+          {/* Tab: COMPANY LOCKER */}
+          {activeTab === 'LOCKER' && (
+            <div className="flex-1 overflow-y-auto space-y-4 rounded-2xl p-4 sm:p-6 bg-[color:var(--bg-surface)] border border-[color:var(--border)]">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[color:var(--border)]">
+                <div>
+                  <h4 className="text-sm font-bold text-[color:var(--text-primary)] flex items-center gap-2">
+                    <Wallet className="h-4 w-4 text-indigo-600" />
+                    Company Locker
+                  </h4>
+                  <p className="text-xs text-[color:var(--text-muted)]">
+                    The shop's own cash reserve — separate from this counter's drawer. Opening floats can draw from it, closing shifts can send cash back into it.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={loadLocker}
+                  className="px-3 py-1.5 rounded-xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-xs font-bold hover:border-indigo-400 hover:text-indigo-600 transition-colors self-start"
+                >
+                  Refresh
+                </button>
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-4 rounded-2xl p-4 bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-white/20 backdrop-blur-md">
+                    <Wallet className="h-6 w-6" />
+                  </div>
+                  <div>
+                    <span className="text-sm font-bold opacity-90">Current Locker Balance</span>
+                    <p className="text-xs opacity-75">Cash currently held in the company safe</p>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className="text-2xl sm:text-3xl font-black font-mono tracking-tight">
+                    {money(Number(locker?.balance) || 0, { decimals: false })}
+                  </span>
+                </div>
+              </div>
+
+              {/* Physical recount — notes & coins, same drawer design as the counter */}
+              <div className="space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">
+                    Physical Recount — Count Notes & Coins
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setLockerRecountDenoms({ '2000': 0, '500': 0, '200': 0, '100': 0, '50': 0, '20': 0, '10': 0, coins: 0 })}
+                    className="px-3 py-1.5 rounded-xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-xs font-bold hover:border-indigo-400 hover:text-indigo-600 transition-colors self-start"
+                  >
+                    Clear Breakdown
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {CURRENCY_DENOMINATIONS.map((d) => {
+                    const count = lockerRecountDenoms[d.key] || 0;
+                    const rowSum = count * d.value;
+                    return (
+                      <div
+                        key={d.key}
+                        className={`p-3.5 rounded-2xl border bg-[color:var(--bg-surface)] flex flex-col justify-between gap-2.5 transition-all shadow-xs hover:border-indigo-400 dark:hover:border-indigo-600 ${d.color}`}
+                      >
+                        <div className="flex items-center justify-between font-bold">
+                          <span className="font-mono text-sm">{d.label}</span>
+                          <span className="tabular text-xs opacity-90 font-mono">
+                            ₹{rowSum.toLocaleString('en-IN')}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="number"
+                            min="0"
+                            value={lockerRecountDenoms[d.key] === 0 ? '' : lockerRecountDenoms[d.key]}
+                            onChange={(e) => {
+                              const val = e.target.value === '' ? 0 : Math.max(0, parseInt(e.target.value) || 0);
+                              setLockerRecountDenoms({ ...lockerRecountDenoms, [d.key]: val });
+                            }}
+                            placeholder="0 notes"
+                            className="tabular w-full px-2.5 py-1.5 text-xs font-bold rounded-xl border border-[color:var(--border)] bg-[color:var(--surface)] text-right"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setLockerRecountDenoms({ ...lockerRecountDenoms, [d.key]: (Number(lockerRecountDenoms[d.key]) || 0) + 1 })}
+                            className="px-2 py-1.5 rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-[11px] font-bold hover:bg-indigo-500 hover:text-white transition-colors"
+                            title="Add 1 note"
+                          >
+                            +1
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setLockerRecountDenoms({ ...lockerRecountDenoms, [d.key]: (Number(lockerRecountDenoms[d.key]) || 0) + 5 })}
+                            className="px-2 py-1.5 rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-subtle)] text-[11px] font-bold hover:bg-indigo-500 hover:text-white transition-colors"
+                            title="Add 5 notes"
+                          >
+                            +5
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-4 rounded-2xl bg-gradient-to-r from-slate-500/5 via-slate-500/10 to-slate-500/5 border border-[color:var(--border)]">
+                  <div>
+                    <span className="text-[10px] uppercase font-bold text-[color:var(--text-muted)] tracking-wider">System Balance</span>
+                    <div className="text-xl font-bold font-mono text-[color:var(--text-primary)] mt-1">
+                      {money(Number(locker?.balance) || 0, { decimals: false })}
+                    </div>
+                  </div>
+                  <div>
+                    <span className="text-[10px] uppercase font-bold text-[color:var(--text-muted)] tracking-wider">Physically Counted</span>
+                    <div className="text-xl font-bold font-mono text-indigo-600 dark:text-indigo-400 mt-1">
+                      ₹{lockerRecountTotal.toLocaleString('en-IN')}
+                    </div>
+                  </div>
+                  <div>
+                    <span className="text-[10px] uppercase font-bold text-[color:var(--text-muted)] tracking-wider">Variance</span>
+                    <div className={`text-xl font-bold font-mono mt-1 ${lockerVariance === 0 ? 'text-emerald-600 dark:text-emerald-400' : lockerVariance > 0 ? 'text-blue-600 dark:text-blue-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                      {lockerVariance >= 0 ? `+₹${lockerVariance.toLocaleString('en-IN')}` : `−₹${Math.abs(lockerVariance).toLocaleString('en-IN')}`}
+                    </div>
+                  </div>
+                </div>
+
+                <Field label="Recount notes (optional)" hint="Reason for variance, who counted, etc.">
+                  <Input
+                    type="text"
+                    value={lockerNotes}
+                    onChange={(e) => setLockerNotes(e.target.value)}
+                    placeholder="e.g. Weekly physical audit"
+                  />
+                </Field>
+
+                <div className="flex justify-end pt-1">
+                  <Button
+                    variant="primary"
+                    icon={Wallet}
+                    loading={lockerBusy}
+                    onClick={handleLockerRecount}
+                    className="px-6 py-2.5 font-bold"
+                  >
+                    Save Locker Recount
+                  </Button>
+                </div>
+              </div>
+
+              {/* Locker transaction history */}
+              <div className="space-y-3 pt-2 border-t border-[color:var(--border)]">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <h4 className="text-sm font-bold text-[color:var(--text-primary)] flex items-center gap-2">
+                    <History className="h-4 w-4 text-indigo-600" />
+                    Locker Transaction History
+                  </h4>
+                  <div className="relative min-w-[200px]">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[color:var(--text-muted)]" />
+                    <input
+                      type="text"
+                      placeholder="Search history…"
+                      value={lockerHistorySearch}
+                      onChange={(e) => setLockerHistorySearch(e.target.value)}
+                      className="w-full pl-8 pr-3 py-1 rounded-xl border border-[color:var(--border)] bg-[color:var(--surface)] text-xs font-medium"
+                    />
+                  </div>
+                </div>
+
+                {filteredLockerHistory.length === 0 ? (
+                  <div className="py-12 text-center text-xs text-[color:var(--text-muted)]">
+                    {lockerHistorySearch ? 'No movements matching your search query.' : 'No locker movements recorded yet.'}
+                  </div>
+                ) : (
+                  <DataTable
+                    dense
+                    columns={[
+                      { key: 'date', label: 'Date', width: 150, render: (e) => fmtDateTime(e.date) },
+                      {
+                        key: 'type',
+                        label: 'Type',
+                        width: 110,
+                        render: (e) => (
+                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold ${
+                            e.type === 'DEPOSIT'
+                              ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                              : e.type === 'WITHDRAWAL'
+                              ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300'
+                              : 'bg-indigo-500/10 text-indigo-700 dark:text-indigo-300'
+                          }`}>
+                            {e.type === 'DEPOSIT' ? <ArrowDownToLine className="h-3 w-3" /> : e.type === 'WITHDRAWAL' ? <ArrowUpFromLine className="h-3 w-3" /> : <History className="h-3 w-3" />}
+                            {e.type}
+                          </span>
+                        )
+                      },
+                      { key: 'note', label: 'Note', render: (e) => e.note || '—' },
+                      { key: 'user', label: 'By', width: 120, render: (e) => e.user || '—' },
+                      {
+                        key: 'amount',
+                        label: 'Amount',
+                        align: 'right',
+                        width: 120,
+                        render: (e) => (
+                          <span className={`font-mono font-bold text-xs ${e.type === 'DEPOSIT' ? 'text-emerald-600 dark:text-emerald-400' : e.type === 'WITHDRAWAL' ? 'text-rose-600 dark:text-rose-400' : 'text-indigo-600 dark:text-indigo-400'}`}>
+                            {e.type === 'WITHDRAWAL' ? '−' : e.type === 'DEPOSIT' ? '+' : ''}₹{Number(e.amount).toLocaleString('en-IN')}
+                          </span>
+                        )
+                      },
+                      {
+                        key: 'balanceAfter',
+                        label: 'Balance After',
+                        align: 'right',
+                        width: 130,
+                        render: (e) => <span className="font-mono text-xs text-[color:var(--text-muted)]">₹{Number(e.balanceAfter).toLocaleString('en-IN')}</span>
+                      }
+                    ]}
+                    rows={filteredLockerHistory}
+                    rowKey={(e, i) => e.id || i}
+                  />
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Tab 5: CLOSE & RECONCILE */}
           {activeTab === 'CLOSE' && (
             <div className="flex-1 overflow-y-auto space-y-4 rounded-2xl p-4 sm:p-6 bg-[color:var(--bg-surface)] border border-red-200 dark:border-red-900/50">
@@ -5277,6 +5737,30 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
                 </div>
               </div>
 
+              {/* Where the counted cash goes at closing: to the owner, or back into the locker */}
+              <div className="rounded-2xl p-4 bg-[color:var(--bg-surface)] border border-[color:var(--border)] max-w-md space-y-3">
+                <div className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">
+                  Where Is This Cash Going?
+                </div>
+                <Field label="Cash Taken by Owner" hint="Amount the owner is withdrawing from the drawer at close — everything else is stored back in the Company Locker automatically">
+                  <Input
+                    type="number"
+                    min="0"
+                    max={effectiveCounted}
+                    value={ownerCashTaken}
+                    onChange={(e) => setOwnerCashTaken(e.target.value)}
+                    placeholder="0"
+                    className="tabular"
+                  />
+                </Field>
+                <div className="flex items-center justify-between text-xs font-semibold pt-1 border-t border-[color:var(--border-subtle)]">
+                  <span className="text-[color:var(--text-muted)]">Stored in Company Locker</span>
+                  <span className="font-mono font-bold text-[color:var(--text-primary)]">
+                    {money(Math.max(0, effectiveCounted - (Number(ownerCashTaken) || 0)), { decimals: false })}
+                  </span>
+                </div>
+              </div>
+
               <div className="flex justify-end pt-2">
                 <Button
                   variant="danger"
@@ -5297,15 +5781,8 @@ function SessionModal({ open, session, customers = [], vendors = [], onClose, sh
   );
 }
 
-/**
- * Table management — SOW Module 19.
- *
- * Three things happen on one grid, so the grid works in modes: normally a tap
- * assigns the current bill to a table; while a move is armed the next tap is the
- * destination. Transfer needs a free destination, merge needs a busy one, which
- * is why the armed mode dims the tables that cannot receive the action.
- */
-function TablesModal({ open, tables, selectedId, onSelect, onClose, showToast, onChanged }) {
+/** Table management (SOW Module 19): a tap assigns the bill to a table, but while a move is armed the next tap is the destination — dimmed tables cannot receive that action. */
+function TablesModal({ open, tables, selectedId, onSelect, onClose, showToast, onChanged, decimalPlaces = 2 }) {
   const [pending, setPending] = useState(null); // { mode: 'TRANSFER' | 'MERGE', tableId }
   const [busy, setBusy] = useState(false);
 
@@ -5478,7 +5955,7 @@ function TablesModal({ open, tables, selectedId, onSelect, onClose, showToast, o
   );
 }
 
-function RecentBillsModal({ open, onClose, onReprint, showToast }) {
+function RecentBillsModal({ open, onClose, onReprint, showToast, decimalPlaces = 2 }) {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');

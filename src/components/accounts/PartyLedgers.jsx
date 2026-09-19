@@ -42,10 +42,7 @@ function statusBadge(balance) {
   return <Badge tone="warning">Due</Badge>;
 }
 
-/**
- * One screen serves both Customers (Receivables) and Vendors (Payables) — the
- * shapes returned by the two list endpoints are identical apart from field names.
- */
+/** One screen serves both Customers (Receivables) and Vendors (Payables) — the two endpoints return identical shapes. */
 export default function PartyLedgers({ partyType, showToast, navigate }) {
   const cfg = CONFIG[partyType];
 
@@ -237,7 +234,7 @@ export default function PartyLedgers({ partyType, showToast, navigate }) {
               <Spinner />
             ) : (
               <>
-                <div className="grid grid-cols-4 gap-3">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   <Summary label="Opening" value={ledger.opening} />
                   <Summary label="Total debit" value={ledger.totalDebit} />
                   <Summary label="Total credit" value={ledger.totalCredit} />

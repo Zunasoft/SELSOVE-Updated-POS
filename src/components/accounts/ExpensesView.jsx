@@ -10,11 +10,7 @@ import {
 
 const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Cheque'];
 
-/**
- * Records business expenses — either paid immediately from cash/bank, or left
- * unpaid against a vendor to be settled later. Both paths post a balanced
- * voucher, which is why the modal always shows the resulting journal entry.
- */
+/** Either paid immediately or left unpaid against a vendor; both paths post a balanced voucher, shown in the modal. */
 export default function ExpensesView({ showToast }) {
   const [period, setPeriod] = useState({ from: monthStartISO(), to: todayISO() });
   const [entries, setEntries] = useState([]);

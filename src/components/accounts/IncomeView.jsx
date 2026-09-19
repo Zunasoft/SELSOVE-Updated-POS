@@ -9,11 +9,7 @@ import {
 
 const PAYMENT_MODES = ['Cash', 'UPI', 'Bank Transfer', 'Cheque'];
 
-/**
- * Records "other income" only — bank interest, commission, scrap sales and the
- * like. POS sales revenue posts to the Sales ledger automatically from billing,
- * so it is surfaced here purely for reference and is never entered manually.
- */
+/** "Other income" only (interest, commission, scrap sales); POS revenue posts to Sales automatically and is never entered here. */
 export default function IncomeView({ showToast }) {
   const [period, setPeriod] = useState({ from: monthStartISO(), to: todayISO() });
   const [entries, setEntries] = useState([]);

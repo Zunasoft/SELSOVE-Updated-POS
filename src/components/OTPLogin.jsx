@@ -1,13 +1,13 @@
 import React, { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  KeyRound, 
-  Mail, 
-  ShieldCheck, 
-  ArrowRight, 
+import {
+  KeyRound,
+  Mail,
+  ShieldCheck,
+  ArrowRight,
   ArrowLeft,
-  XCircle, 
+  XCircle,
   RefreshCw,
   Sparkles
 } from 'lucide-react';
@@ -99,11 +99,11 @@ export default function OTPLogin({ onLoginSuccess }) {
       {/* Left Column - Premium Hero Image */}
       <div className="hidden lg:flex lg:col-span-7 relative overflow-hidden bg-slate-950 border-r border-slate-800 flex-col justify-between p-12">
         {/* Background Generated Hero Artwork */}
-        <div 
+        <div
           className="absolute inset-0 bg-cover bg-center opacity-60 mix-blend-luminosity scale-105 transition-transform duration-1000"
           style={{ backgroundImage: `url('/selsolve_pos_hero.png')` }}
         />
-        
+
         {/* Gradient Overlay */}
         <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/40 to-slate-950/20" />
 
@@ -131,9 +131,9 @@ export default function OTPLogin({ onLoginSuccess }) {
         <div className="w-full max-w-sm space-y-7">
           {/* Header Logo & Title */}
           <div className="text-center space-y-3">
-            <img 
-              src="/Selsolve Logo.png" 
-              alt="SelSolve Logo" 
+            <img
+              src="/Selsolve Logo.png"
+              alt="SelSolve Logo"
               className="h-16 w-auto mx-auto object-contain"
             />
             <h1 className="text-2xl tracking-tight text-slate-900 dark:text-white">

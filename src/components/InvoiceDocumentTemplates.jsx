@@ -370,16 +370,11 @@ export function numberToWords(amount) {
     return inWords(Math.floor(n / 10000000)) + ' Crore ' + inWords(n % 10000000);
   }
 
-  // inWords() branches each already end in their own trailing space, and the
-  // ' Thousand '/' Lakh '/' Crore ' separators add a leading space too, which
-  // doubled up the space before those words on every printed amount ≥ 1,000.
-  // Collapsing runs of whitespace keeps this safe regardless of branch taken.
+  // Collapse whitespace: inWords()'s trailing spaces plus the separators' leading spaces would double up before Thousand/Lakh/Crore.
   return (inWords(num).trim() + ' Rupees Only').replace(/\s+/g, ' ');
 }
 
-/**
- * Main Full A4 / A5 Tax Invoice Document Renderer
- */
+/** Main Full A4 / A5 Tax Invoice Document Renderer */
 export function InvoiceDocumentView({
   invoice = SAMPLE_INVOICE_DATA,
   settings = {},
@@ -516,20 +511,14 @@ export function InvoiceDocumentView({
   DEFAULT_INVOICE_SECTIONS.forEach((s) => { sectionMap[s.id] = true; });
   sections.forEach((s) => { sectionMap[s.id] = s.enabled !== false; });
 
-  // Resolve the actual render order from the user-configured `sections` array
-  // (this used to be computed and then ignored — every section rendered in a
-  // fixed hardcoded order regardless of what was saved here). Any id missing
-  // from an older/incomplete saved config is appended in its default position
-  // so nothing silently disappears from render.
+  // Render order follows the user-configured `sections` array; any id missing from an older saved config is appended in its default spot.
   const orderedSectionIds = [
     ...sections.map((s) => s.id),
     ...DEFAULT_INVOICE_SECTIONS.map((s) => s.id).filter((id) => !sections.some((s2) => s2.id === id))
   ];
   const enabledOrder = orderedSectionIds.filter((id) => sectionMap[id]);
 
-  // buyer_shipping & transport_meta share a 2-column grid when adjacent (the
-  // default layout). If the user reorders them apart, each renders as its
-  // own full-width block instead.
+  // buyer_shipping & transport_meta share a 2-column grid when adjacent (default layout); reordered apart, each is full-width.
   const buyerIdx = enabledOrder.indexOf('buyer_shipping');
   const transportIdx = enabledOrder.indexOf('transport_meta');
   const pairAdjacent = buyerIdx !== -1 && transportIdx !== -1 && Math.abs(buyerIdx - transportIdx) === 1;
@@ -555,9 +544,7 @@ export function InvoiceDocumentView({
     );
   }
 
-  // Per-section content, built once and slotted into `enabledOrder` below so
-  // the visual order actually matches the user's configured section order
-  // (previously this order was computed and then ignored).
+  // Per-section content, built once and slotted into `enabledOrder` below so visual order matches the configured section order.
   const invoiceHeaderNode = (
     <div className={`p-4 sm:p-6 pb-4 border-b flex flex-col sm:flex-row sm:items-start justify-between gap-4 ${accent.border}`}>
       <div className="flex items-start gap-3.5">

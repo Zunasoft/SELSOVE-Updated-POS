@@ -1,13 +1,4 @@
-/**
- * Units that count discrete, indivisible items — as opposed to weight/volume/
- * length units (kg, g, litre, ml, metre) which are naturally fractional.
- * "1.5 pcs" or "2.3 boxes" doesn't mean anything on a shop floor, so these
- * stay whole numbers everywhere a quantity is entered: Add Product stock,
- * purchase receiving lines, stock adjustments and billing.
- *
- * Mirrors WHOLE_NUMBER_UNITS in the backend's controllers/unitConversion.js —
- * keep the two lists in sync if a new unit is added to either.
- */
+// Discrete, indivisible units ("1.5 pcs" means nothing) — mirrors WHOLE_NUMBER_UNITS in the backend's controllers/unitConversion.js.
 export const WHOLE_NUMBER_UNITS = new Set([
   'pcs', 'nos', 'pack', 'box', 'dozen', 'bundle', 'plate', 'set', 'pair', 'bag', 'carton'
 ]);

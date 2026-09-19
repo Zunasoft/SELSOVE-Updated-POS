@@ -1,13 +1,6 @@
 import React from 'react';
 
-/**
- * Without this, any uncaught render-time error (a null field from an API
- * response, a bad array access, etc.) anywhere in the tree unmounts the whole
- * app and leaves a blank white screen with no way back except a manual
- * refresh. This catches it, shows a recoverable message instead, and lets
- * "Try Again" re-mount just the boundary's children rather than losing the
- * whole session.
- */
+/** Without this, an uncaught render error anywhere unmounts the whole app to a blank screen; "Try Again" re-mounts just the children instead. */
 export default class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);

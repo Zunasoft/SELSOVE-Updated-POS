@@ -3,15 +3,7 @@ import { Printer, Tag, Check, X, Sliders } from 'lucide-react';
 import { Modal, Button, Field, Input, Select, Money } from '../lib/ui';
 import { money } from '../lib/api';
 
-/**
- * Simple SVG Code 128 barcode pattern generator.
- *
- * The bars are drawn left-to-right starting at 0, so a short code (which
- * doesn't fill the minimum 160-wide viewBox) used to leave its bars hugging
- * the left edge with empty space on the right — visually "tilted" instead of
- * centered. Fixed by measuring the actual bar width first, then centering
- * that block inside whichever is wider: the content itself, or the minimum.
- */
+/** SVG Code 128 barcode generator: centers the bar block within whichever is wider, the content or the minimum viewBox, rather than left-aligning short codes. */
 function BarcodeSVG({ value = '123456789012', height = 40 }) {
   const str = String(value || '000000000');
   // Simple deterministic pseudo-barcode pattern for preview and print
@@ -50,9 +42,7 @@ export default function BarcodePrinterModal({ product, companyName, onClose, sho
   const [showPrice, setShowPrice] = useState(true);
   const [selectedBatchId, setSelectedBatchId] = useState('');
   const [showBatchInfo, setShowBatchInfo] = useState(true);
-  // What the scannable pattern (and the printed code line) actually encodes —
-  // the product's barcode, or its SKU when there's no barcode worth scanning
-  // (a service item, or a shop that identifies stock by SKU internally).
+  // What the scannable pattern encodes: the product's barcode, or its SKU for a service item / SKU-only shop.
   const [codeSource, setCodeSource] = useState('barcode');
   const [showSkuLine, setShowSkuLine] = useState(false);
 
@@ -95,10 +85,7 @@ export default function BarcodePrinterModal({ product, companyName, onClose, sho
       return;
     }
 
-    // Same variable-width bar layout as the on-screen BarcodeSVG preview, so
-    // print output matches what was previewed — and centered the same way:
-    // measure the actual content width first, then center that block inside
-    // the (at-least-160-wide) viewBox instead of hugging the left edge.
+    // Same variable-width, centered bar layout as the on-screen BarcodeSVG preview, so print output matches the preview.
     const codeForSvg = activeCode || '123456';
     let barX = 0;
     const barRects = [];

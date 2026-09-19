@@ -72,260 +72,8 @@ function numberToWords(num) {
   return `${inWords(n)} Rupees Only`;
 }
 
-/** Search-as-you-type product picker modal */
-function ProductPickerModal({ open, onClose, products = [], onSelectProduct, onAddNew }) {
-  const [search, setSearch] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState('ALL');
-  const [customName, setCustomName] = useState('');
-  const [isCustomMode, setIsCustomMode] = useState(false);
-
-  useEffect(() => {
-    if (open) {
-      setSearch('');
-      setCategoryFilter('ALL');
-      setCustomName('');
-      setIsCustomMode(false);
-    }
-  }, [open]);
-
-  // Extract unique categories
-  const categories = useMemo(() => {
-    const cats = new Set();
-    (products || []).forEach((p) => {
-      if (p.category) cats.add(p.category);
-    });
-    return Array.from(cats);
-  }, [products]);
-
-  const filteredProducts = useMemo(() => {
-    const q = search.toLowerCase().trim();
-    return (products || []).filter((p) => {
-      if (categoryFilter !== 'ALL' && p.category !== categoryFilter) return false;
-      if (!q) return true;
-      const matchBarcodes = Array.isArray(p.barcodes) && p.barcodes.some((b) => String(b.code || b).toLowerCase().includes(q));
-      return (
-        (p.name && p.name.toLowerCase().includes(q)) ||
-        (p.barcode && String(p.barcode).toLowerCase().includes(q)) ||
-        (p.sku && String(p.sku).toLowerCase().includes(q)) ||
-        (p.regionalName && String(p.regionalName).toLowerCase().includes(q)) ||
-        (p.printName && String(p.printName).toLowerCase().includes(q)) ||
-        matchBarcodes ||
-        (p.hsn && String(p.hsn).toLowerCase().includes(q)) ||
-        (p.category && p.category.toLowerCase().includes(q))
-      );
-    });
-  }, [products, search, categoryFilter]);
-
-  if (!open) return null;
-
-  return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      title="Select Product"
-      subtitle={`Choose from ${products.length} catalog products, or enter a custom item / service.`}
-      icon={Boxes}
-      size="xl"
-      footer={
-        <div className="flex items-center justify-between w-full">
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setIsCustomMode(!isCustomMode)}
-              className="text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:underline"
-            >
-              {isCustomMode ? '← Back to Catalog Products' : '✍️ Switch to Custom Item / Service'}
-            </button>
-            {onAddNew && !isCustomMode && (
-              <button
-                type="button"
-                onClick={() => {
-                  onAddNew();
-                  onClose();
-                }}
-                className="text-xs font-bold text-emerald-600 dark:text-emerald-400 hover:underline"
-              >
-                + Add new product (not in catalogue)
-              </button>
-            )}
-          </div>
-          <Button onClick={onClose}>Close</Button>
-        </div>
-      }
-    >
-      <div className="space-y-3">
-        {isCustomMode ? (
-          <div className="p-4 rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/60 space-y-3">
-            <div className="font-bold text-xs text-[color:var(--text-primary)]">Custom Non-Inventory Item / Service</div>
-            <div className="text-[11px] text-[color:var(--text-muted)]">
-              Add non-catalog labor, custom consulting, delivery charges, or unlisted items directly to this invoice.
-            </div>
-            <div className="flex gap-2">
-              <Input
-                placeholder="Enter custom item or service description…"
-                value={customName}
-                onChange={(e) => setCustomName(e.target.value)}
-                autoFocus
-              />
-              <Button
-                variant="primary"
-                disabled={!customName.trim()}
-                onClick={() => {
-                  onSelectProduct({
-                    id: '',
-                    name: customName.trim(),
-                    price: 0,
-                    taxRate: 0,
-                    unit: 'pcs',
-                    isCustom: true
-                  });
-                  onClose();
-                }}
-              >
-                Add Custom Item
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <>
-            {/* Search & Category Filter Bar */}
-        <div className="flex flex-col sm:flex-row items-center gap-2">
-          <div className="relative w-full sm:w-[60%]">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[color:var(--text-muted)]" />
-            <input
-              type="text"
-              placeholder="Search by product name, barcode, SKU, HSN, category…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="field-input text-xs pl-8 pr-8 w-full rounded-xl"
-              autoFocus
-            />
-            {search && (
-              <button
-                type="button"
-                onClick={() => setSearch('')}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-
-          {categories.length > 0 && (
-            <select
-              value={categoryFilter}
-              onChange={(e) => setCategoryFilter(e.target.value)}
-              className="field-input text-xs py-2 px-3 rounded-xl font-semibold cursor-pointer w-full sm:w-[30%]"
-            >
-              <option value="ALL">All Categories</option>
-              {categories.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-
-        {/* Product List */}
-        <div className="max-h-80 overflow-y-auto rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-surface)] divide-y divide-[color:var(--border-subtle)]">
-          {filteredProducts.length === 0 ? (
-            <div className="p-8 text-center space-y-2">
-              <div className="text-xs font-bold text-[color:var(--text-secondary)]">No products match your search</div>
-              <div className="text-[11px] text-[color:var(--text-muted)]">
-                Try another keyword, add as a new product, or use custom item.
-              </div>
-              {search.trim() && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    onSelectProduct({
-                      id: '',
-                      name: search.trim(),
-                      price: 0,
-                      taxRate: 0,
-                      unit: 'pcs',
-                      isCustom: true
-                    });
-                    onClose();
-                  }}
-                  className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 transition-colors"
-                >
-                  ✍️ Use "{search.trim()}" as Custom Item
-                </button>
-              )}
-            </div>
-          ) : (
-            filteredProducts.map((p) => {
-              const stk = p.stock !== undefined ? p.stock : (p.inventory !== undefined ? p.inventory : '—');
-              const inStock = stk === '—' || Number(stk) > 0;
-
-              return (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => {
-                    onSelectProduct(p);
-                    onClose();
-                  }}
-                  className="w-full flex items-center justify-between gap-3 p-3 text-left hover:bg-[color:var(--bg-subtle)] transition-colors group cursor-pointer"
-                >
-                  <div className="min-w-0 pr-2">
-                    <div className="text-xs font-bold text-[color:var(--text-primary)] truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400">
-                      {p.name}
-                    </div>
-                    <div className="text-[10.5px] text-[color:var(--text-muted)] flex flex-wrap items-center gap-2 mt-1">
-                      {p.sku && (
-                        <span className="font-mono text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/50 px-1.5 py-0.5 rounded text-[10px] font-bold">
-                          SKU: {p.sku}
-                        </span>
-                      )}
-                      {p.barcode && (
-                        <span className="font-mono bg-[color:var(--bg-subtle)] px-1.5 py-0.5 rounded border border-[color:var(--border-subtle)]">
-                          {p.barcode}
-                        </span>
-                      )}
-                      {p.category && (
-                        <span className="text-[10px] font-semibold text-[color:var(--text-secondary)]">
-                          {p.category}
-                        </span>
-                      )}
-                      <span
-                        className={`font-bold text-[10.5px] px-1.5 py-0.2 rounded-full ${
-                          inStock
-                            ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-                            : 'bg-rose-500/10 text-rose-600 dark:text-rose-400'
-                        }`}
-                      >
-                        Stock: {stk} {p.unit || 'pcs'}
-                      </span>
-                      {p.hsn && <span>HSN: {p.hsn}</span>}
-                      {p.taxRate ? <span>GST {p.taxRate}%</span> : null}
-                    </div>
-                  </div>
-
-                  <div className="text-right shrink-0">
-                    <div className="font-mono font-extrabold text-sm text-[color:var(--text-primary)]">
-                      {money(p.price ?? 0)}
-                    </div>
-                    <div className="text-[10px] text-[color:var(--text-muted)]">
-                      per {p.unit || 'pcs'}
-                    </div>
-                  </div>
-                </button>
-              );
-            })
-          )}
-        </div>
-          </>
-        )}
-      </div>
-    </Modal>
-  );
-}
-
 /** Product Cell Display & Trigger Component */
-function ProductItemCell({ row, index, onOpenPicker, onUpdateName }) {
+function ProductItemCell({ row, index, products = [], onSelectProduct, onOpenNewProduct, onUpdateName, onSwitchToCustom, onSwitchToCatalog }) {
   if (row.isCustom) {
     return (
       <div className="flex items-center gap-1.5 w-full">
@@ -340,7 +88,7 @@ function ProductItemCell({ row, index, onOpenPicker, onUpdateName }) {
         />
         <button
           type="button"
-          onClick={() => onOpenPicker(index)}
+          onClick={() => onSwitchToCatalog(index)}
           className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 px-2 py-1.5 rounded-xl shrink-0 hover:bg-indigo-100 transition-colors"
           title="Pick from catalog instead"
         >
@@ -350,47 +98,26 @@ function ProductItemCell({ row, index, onOpenPicker, onUpdateName }) {
     );
   }
 
-  if (!row.name) {
-    return (
-      <button
-        type="button"
-        onClick={() => onOpenPicker(index)}
-        className="w-full py-2 px-3 rounded-xl border border-dashed border-indigo-400/60 bg-indigo-50/40 dark:bg-indigo-950/20 text-indigo-600 dark:text-indigo-400 text-xs font-bold hover:bg-indigo-50 dark:hover:bg-indigo-950/40 flex items-center justify-between transition-all"
-      >
-        <span className="flex items-center gap-1.5">
-          <Search className="w-3.5 h-3.5 opacity-80" /> Click to Select Product…
-        </span>
-        <ChevronDown className="w-3.5 h-3.5 opacity-60" />
-      </button>
-    );
-  }
-
   return (
-    <div
-      onClick={() => onOpenPicker(index)}
-      className="p-1.5 px-2.5 rounded-xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/50 hover:bg-[color:var(--bg-subtle)] cursor-pointer flex items-center justify-between gap-2 group transition-colors"
-      title="Click to change product"
+    <Select
+      value={row.productId || ''}
+      onChange={(e) => {
+        const val = e.target.value;
+        if (val === '__new__') return onOpenNewProduct(index);
+        if (val === '__custom__') return onSwitchToCustom(index);
+        const prod = products.find((p) => p.id === val);
+        if (prod) onSelectProduct(index, prod);
+      }}
     >
-      <div className="min-w-0 pr-1">
-        <div className="font-bold text-xs text-[color:var(--text-primary)] truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400">
-          {row.name}
-        </div>
-        <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
-          {row.sku && (
-            <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-mono font-bold bg-indigo-50 dark:bg-indigo-950/50 px-1 py-0.2 rounded">
-              SKU: {row.sku}
-            </span>
-          )}
-          {row.barcode && (
-            <span className="text-[10px] text-[color:var(--text-muted)] font-mono">{row.barcode}</span>
-          )}
-        </div>
-      </div>
-      <div className="flex items-center gap-1 shrink-0 text-[10.5px] font-bold text-indigo-600 dark:text-indigo-400 opacity-80 group-hover:opacity-100">
-        <span>Change</span>
-        <Edit3 className="w-3 h-3" />
-      </div>
-    </div>
+      <option value="">— Select Product —</option>
+      <option value="__new__">+ Create New Product…</option>
+      <option value="__custom__">+ Custom Item / Service…</option>
+      {products.map((p) => (
+        <option key={p.id} value={p.id}>
+          {p.name}{p.sku ? ` (SKU: ${p.sku})` : ''}
+        </option>
+      ))}
+    </Select>
   );
 }
 
@@ -1788,6 +1515,8 @@ export default function InvoicesManager({ tenant, showToast, settings: appSettin
       <SalesReturnModal
         invoice={returnTarget}
         creditNotes={creditNotes.filter((v) => v.orderId === returnTarget?.orderId)}
+        allowItemsAfterReturn={Boolean(settings?.pos?.allowItemsAfterReturn)}
+        onContinueToBilling={onNavigate ? () => onNavigate('pos') : null}
         showToast={showToast}
         onClose={() => setReturnTarget(null)}
         onSaved={() => {
@@ -1923,22 +1652,17 @@ function NewInvoiceModal({
   showToast
 }) {
   const [loading, setLoading] = useState(false);
-  const [activePickerIndex, setActivePickerIndex] = useState(null);
   const [newProductLineIndex, setNewProductLineIndex] = useState(null);
   // showCustomerForm opens the real "New Customer" form from Parties
   // when "+ Create New Customer…" is picked in the dropdown.
   const [showCustomerForm, setShowCustomerForm] = useState(false);
-  // Customers created from this form, ahead of whatever the parent's own
-  // customer list (the `customers` prop) has — that list only catches up on
-  // its next refetch, but the new customer needs to be selectable immediately.
+  // Customers created from this form, ahead of the parent's `customers` prop, which only catches up on its next refetch.
   const [addedCustomers, setAddedCustomers] = useState([]);
   const allCustomers = useMemo(() => [...addedCustomers, ...customers], [addedCustomers, customers]);
   const batchTrackingEnabled = Boolean(settings?.pos?.enableBatchTracking);
   const storeNearExpiryDays = Number(settings?.pos?.nearExpiryDays) || 30;
 
-  // Customer fields — every invoice created here must name a real customer
-  // (see the explicit check in save() below); no anonymous walk-in billing
-  // from this form.
+  // Every invoice created here must name a real customer (see the check in save() below); no anonymous walk-in billing from this form.
   const [selectedCustomerId, setSelectedCustomerId] = useState(invoice?.customerId || '');
   const [customerName, setCustomerName] = useState(invoice?.customerName || '');
   const [customerPhone, setCustomerPhone] = useState(invoice?.customerPhone && invoice?.customerPhone !== 'N/A' ? invoice.customerPhone : '');
@@ -1963,12 +1687,7 @@ function NewInvoiceModal({
   const [paymentRef, setPaymentRef] = useState(invoice?.paymentRef || '');
   const [notes, setNotes] = useState(invoice?.notes || '');
   const [isRoundOff, setIsRoundOff] = useState(() => {
-    // Whether rounding was applied isn't stored as its own flag — infer it
-    // from the saved total. If the un-rounded net (recomputed from the saved
-    // items) still carries the exact same fractional total that was saved,
-    // rounding must have been off; Math.round() would otherwise have landed
-    // on a whole-rupee figure. Ambiguous cases (already whole, or no items)
-    // fall back to the original default of on.
+    // Rounding isn't stored as its own flag; infer it by recomputing the un-rounded net and comparing to the saved total.
     if (!invoice?.items?.length) return true;
     const netBeforeRound = invoice.items.reduce((sum, i) => {
       const qty = Number(i.qty) || 0;
@@ -2643,8 +2362,18 @@ function NewInvoiceModal({
                         <ProductItemCell
                           row={item}
                           index={idx}
-                          onOpenPicker={(i) => setActivePickerIndex(i)}
+                          products={products}
+                          onSelectProduct={handleProductSelect}
+                          onOpenNewProduct={(i) => setNewProductLineIndex(i)}
                           onUpdateName={(i, name) => handleItemChange(i, 'name', name)}
+                          onSwitchToCustom={(i) => {
+                            handleItemChange(i, 'isCustom', true);
+                            handleItemChange(i, 'productId', '');
+                          }}
+                          onSwitchToCatalog={(i) => {
+                            handleItemChange(i, 'isCustom', false);
+                            handleItemChange(i, 'name', '');
+                          }}
                         />
                       </td>
 
@@ -2839,23 +2568,6 @@ function NewInvoiceModal({
         </form>
       </Modal>
 
-      {/* Search-as-you-type Product Picker Modal for Invoice Sheet */}
-      <ProductPickerModal
-        open={activePickerIndex !== null}
-        onClose={() => setActivePickerIndex(null)}
-        products={products}
-        onSelectProduct={(prod) => {
-          if (activePickerIndex !== null) {
-            handleProductSelect(activePickerIndex, prod);
-          }
-        }}
-        onAddNew={() => {
-          const idx = activePickerIndex;
-          setActivePickerIndex(null);
-          setNewProductLineIndex(idx !== null ? idx : items.length - 1);
-        }}
-      />
-
       <ProductFormModal
         open={newProductLineIndex !== null}
         editing={null}
@@ -2911,7 +2623,6 @@ function QuotationEditorModal({
 }) {
   const isEditing = !!quotation;
   const [loading, setLoading] = useState(false);
-  const [activePickerIndex, setActivePickerIndex] = useState(null);
   const [newProductLineIndex, setNewProductLineIndex] = useState(null);
   const [showCustomerForm, setShowCustomerForm] = useState(false);
   const [addedCustomers, setAddedCustomers] = useState([]);
@@ -3125,11 +2836,7 @@ function QuotationEditorModal({
   const handleSubmit = async (e) => {
     e.preventDefault();
 
-    // A row needs at least one of qty/price to be positive (the other can be
-    // left blank — qty defaults to 1, price to 0, below), but neither may be
-    // negative: `Number(i.qty) > 0 || Number(i.price) > 0` alone let a negative
-    // qty through whenever price was positive, and that negative value then
-    // went straight into the payload instead of being rejected.
+    // Needs at least one of qty/price positive, but neither may be negative — `qty > 0 || price > 0` alone let a negative qty slip through.
     const validItems = items.filter((i) => {
       if (!i.name || !i.name.trim()) return false;
       const qtyNum = Number(i.qty) || 0;
@@ -3299,8 +3006,18 @@ function QuotationEditorModal({
                         <ProductItemCell
                           row={row}
                           index={idx}
-                          onOpenPicker={(i) => setActivePickerIndex(i)}
+                          products={products}
+                          onSelectProduct={handleProductSelect}
+                          onOpenNewProduct={(i) => setNewProductLineIndex(i)}
                           onUpdateName={(i, name) => handleItemChange(i, 'name', name)}
+                          onSwitchToCustom={(i) => {
+                            handleItemChange(i, 'isCustom', true);
+                            handleItemChange(i, 'productId', '');
+                          }}
+                          onSwitchToCatalog={(i) => {
+                            handleItemChange(i, 'isCustom', false);
+                            handleItemChange(i, 'name', '');
+                          }}
                         />
                       </td>
 
@@ -3452,23 +3169,6 @@ function QuotationEditorModal({
           </div>
         </form>
       </Modal>
-
-      {/* Search-as-you-type Product Picker Modal for Quotation Sheet */}
-      <ProductPickerModal
-        open={activePickerIndex !== null}
-        onClose={() => setActivePickerIndex(null)}
-        products={products}
-        onSelectProduct={(prod) => {
-          if (activePickerIndex !== null) {
-            handleProductSelect(activePickerIndex, prod);
-          }
-        }}
-        onAddNew={() => {
-          const idx = activePickerIndex;
-          setActivePickerIndex(null);
-          setNewProductLineIndex(idx !== null ? idx : items.length - 1);
-        }}
-      />
 
       <ProductFormModal
         open={newProductLineIndex !== null}
@@ -3824,10 +3524,7 @@ function TaxInvoiceModal({ invoice, settings, tenant, viewMode, setViewMode, onC
   const customInvoiceTemplates = (billing.customTemplates || []).filter((t) => t.type === 'invoice');
   const customThermalTemplates = (billing.customTemplates || []).filter((t) => t.type === 'thermal');
 
-  // Must never fall back to the raw `billing` object here — see the matching
-  // comment in POSTerminal.jsx's ReceiptModal for why that breaks theme
-  // switching (billing's accumulated fields silently override the newly
-  // selected theme's own defaults for almost everything).
+  // Must never fall back to raw `billing` — see the matching comment in POSTerminal.jsx's ReceiptModal for why that breaks theme switching.
   const selectedCustomInvoice = customInvoiceTemplates.find((t) => t.id === selectedInvoiceTheme);
   const activeInvoiceConfig = selectedCustomInvoice ? selectedCustomInvoice.config : {};
 
@@ -4323,24 +4020,24 @@ function QuotationDocumentModal({ quotation, settings, tenant, onClose, onConver
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Sales Returns (Credit Notes)
- * ------------------------------------------------------------------ */
+/* ------------------------------- Sales Returns (Credit Notes) ------------------------------- */
 
 const r2Local = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const CREDIT_NOTE_REASONS = ['Damaged', 'Wrong Item', 'Customer Changed Mind', 'Quality Issue', 'Size / Fit Issue', 'Other'];
 
-function SalesReturnModal({ invoice, creditNotes = [], showToast, onClose, onSaved }) {
+function SalesReturnModal({ invoice, creditNotes = [], allowItemsAfterReturn = false, onContinueToBilling, showToast, onClose, onSaved }) {
   const [qtys, setQtys] = useState({});
   const [reason, setReason] = useState('Damaged');
   const [customReason, setCustomReason] = useState('');
   const [saving, setSaving] = useState(false);
+  const [justSaved, setJustSaved] = useState(false);
 
   useEffect(() => {
     if (invoice) {
       setQtys({});
       setReason('Damaged');
       setCustomReason('');
+      setJustSaved(false);
     }
   }, [invoice]);
 
@@ -4375,7 +4072,11 @@ function SalesReturnModal({ invoice, creditNotes = [], showToast, onClose, onSav
         reason: reason === 'Other' ? customReason || 'Other' : reason
       });
       showToast(res.message);
-      onSaved();
+      if (allowItemsAfterReturn && onContinueToBilling) {
+        setJustSaved(true);
+      } else {
+        onSaved();
+      }
     } catch (err) {
       showToast(api.message(err, 'Could not record the return.'), 'error');
     } finally {
@@ -4383,29 +4084,57 @@ function SalesReturnModal({ invoice, creditNotes = [], showToast, onClose, onSav
     }
   };
 
+  const finishWithoutBilling = () => {
+    setJustSaved(false);
+    onSaved();
+  };
+
+  const continueToBilling = () => {
+    setJustSaved(false);
+    onSaved();
+    onContinueToBilling?.();
+  };
+
   return (
     <Modal
       open={Boolean(invoice)}
-      onClose={onClose}
-      title="Return Items from Customer"
+      onClose={justSaved ? finishWithoutBilling : onClose}
+      title={justSaved ? 'Return Recorded' : 'Return Items from Customer'}
       subtitle={invoice ? `Against invoice #${invoice.orderId} · ${invoice.customerName || 'Walk-in Customer'}` : ''}
       icon={RefreshCw}
       size="lg"
       footer={
-        <>
-          <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={submit} loading={saving} disabled={!canSubmit}>
-            Record Return
-          </Button>
-        </>
+        justSaved ? (
+          <>
+            <Button onClick={finishWithoutBilling}>Done</Button>
+            <Button variant="primary" icon={Store} onClick={continueToBilling}>
+              Continue to Billing (Exchange)
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button onClick={onClose}>Cancel</Button>
+            <Button variant="primary" onClick={submit} loading={saving} disabled={!canSubmit}>
+              Record Return
+            </Button>
+          </>
+        )
       }
     >
-      {invoice && (
+      {justSaved ? (
+        <div className="flex flex-col items-center text-center gap-3 py-6">
+          <CheckCircle2 className="w-10 h-10 text-emerald-600" />
+          <div className="font-bold text-sm text-[color:var(--text-primary)]">Return recorded successfully.</div>
+          <div className="text-xs text-[color:var(--text-muted)] max-w-sm">
+            To ring up an exchange item for {invoice?.customerName || 'this customer'}, continue straight into Billing — or close out here if nothing else is being sold.
+          </div>
+        </div>
+      ) : invoice && (
         <form onSubmit={submit} className="space-y-4">
           {lines.length === 0 ? (
             <EmptyState icon={RefreshCw} title="Nothing left to return" hint="Every item on this invoice has already been fully returned." />
           ) : (
-            <div className="surface overflow-hidden rounded-2xl border border-[color:var(--border)]">
+            <div className="surface overflow-x-auto rounded-2xl border border-[color:var(--border)]">
               <table className="w-full text-xs border-collapse">
                 <thead>
                   <tr className="border-b border-[color:var(--border)]">
@@ -4504,7 +4233,7 @@ function CreditNoteDetailModal({ creditNote, onClose, onVoid }) {
             </div>
           </div>
 
-          <div className="surface overflow-hidden rounded-2xl border border-[color:var(--border)]">
+          <div className="surface overflow-x-auto rounded-2xl border border-[color:var(--border)]">
             <table className="w-full text-xs border-collapse">
               <thead>
                 <tr className="border-b border-[color:var(--border)]">

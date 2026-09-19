@@ -6,9 +6,7 @@ import { money, todayISO, monthStartISO, financialYearStartISO } from './api';
 
 const cx = (...parts) => parts.filter(Boolean).join(' ');
 
-/* ------------------------------------------------------------------ *
- * Surfaces & layout
- * ------------------------------------------------------------------ */
+/* ------------------------------- Surfaces & layout ------------------------------- */
 
 export function Panel({ className = '', children, padded = true, ...rest }) {
   return (
@@ -44,9 +42,7 @@ export function Toolbar({ children, className = '' }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Controls
- * ------------------------------------------------------------------ */
+/* ------------------------------- Controls ------------------------------- */
 
 const BUTTON_VARIANTS = {
   primary: 'bg-indigo-600 text-white hover:bg-indigo-500 shadow-sm shadow-indigo-600/25 border-transparent',
@@ -122,9 +118,7 @@ export function Select({ className = '', children, value, onChange, ...rest }) {
   const triggerRef = useRef(null);
   const panelRef = useRef(null);
 
-  // Position the dropdown against the trigger's actual on-screen location and
-  // portal it to <body> — otherwise a modal's `overflow-y-auto` body clips
-  // any option list that would extend past its scrollable bounds.
+  // Portal to <body> at the trigger's on-screen location, or a modal's overflow-y-auto body would clip the option list.
   const computeCoords = () => {
     const el = triggerRef.current;
     if (!el) return;
@@ -149,9 +143,7 @@ export function Select({ className = '', children, value, onChange, ...rest }) {
       const insidePanel = panelRef.current && panelRef.current.contains(e.target);
       if (!insideTrigger && !insidePanel) setOpen(false);
     };
-    // Scroll doesn't bubble, so this must be a capturing listener to catch it
-    // from any scrollable ancestor (e.g. a modal body). Scrolling inside the
-    // dropdown's own option list is exempt so it doesn't close mid-search.
+    // Scroll doesn't bubble, so this is a capturing listener to catch it from any scrollable ancestor; the dropdown's own list is exempt.
     const closeOnOutsideScroll = (e) => {
       if (panelRef.current && panelRef.current.contains(e.target)) return;
       setOpen(false);
@@ -184,7 +176,7 @@ export function Select({ className = '', children, value, onChange, ...rest }) {
   const selectedOption = options.find(o => String(o.value) === String(value));
   const selectedLabel = selectedOption ? selectedOption.label : 'Select...';
 
-  const filtered = options.filter(o => 
+  const filtered = options.filter(o =>
     String(o.label || '').toLowerCase().includes(search.toLowerCase())
   );
 
@@ -419,10 +411,7 @@ export function SegmentedControl({ options, value, onChange, className = '' }) {
 /** Period selector shared by every report and ledger screen. */
 export function DateRange({ from, to, onChange, presets = true }) {
   const apply = (nextFrom, nextTo) => onChange({ from: nextFrom, to: nextTo });
-  // Local calendar date, matching the convention documented on todayISO() in
-  // lib/api.js — a UTC-based "today" (this used to be `new Date().toISOString()`)
-  // silently requests yesterday's data for the first several hours of every
-  // local day east of UTC.
+  // Local calendar date (see todayISO() in lib/api.js) — a UTC "today" would request yesterday's data for hours east of UTC.
   const today = todayISO();
 
   const quick = [
@@ -479,9 +468,7 @@ export function DateRange({ from, to, onChange, presets = true }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Data display
- * ------------------------------------------------------------------ */
+/* ------------------------------- Data display ------------------------------- */
 
 const TONES = {
   neutral: 'bg-[color:var(--bg-subtle)] text-[color:var(--text-secondary)]',
@@ -580,10 +567,7 @@ export function Spinner({ label = 'Loading…' }) {
   );
 }
 
-/**
- * Table shell with sticky headers and per-column alignment.
- * columns: [{ key, label, align, width, render(row, index), className }]
- */
+/** Table shell with sticky headers and per-column alignment. columns: [{ key, label, align, width, render(row, index), className }] */
 export function DataTable({
   columns,
   rows,
@@ -666,9 +650,7 @@ export function DataTable({
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Overlays
- * ------------------------------------------------------------------ */
+/* ------------------------------- Overlays ------------------------------- */
 
 const MODAL_WIDTH = {
   sm: 'w-[95vw] max-w-sm',
@@ -785,9 +767,7 @@ export function Modal({
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Lightweight charts (inline SVG — no chart library needed)
- * ------------------------------------------------------------------ */
+/* ------------------------------- Lightweight charts (inline SVG — no chart library needed) ------------------------------- */
 
 /** Grouped income/expense bars for the accounts dashboard. */
 export function TrendBars({ data, height = 120 }) {
@@ -887,9 +867,7 @@ export function Donut({ segments, size = 132, thickness = 16, centerLabel, cente
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Report shell — consistent header, print and export affordances
- * ------------------------------------------------------------------ */
+/* ------------------------------- Report shell — consistent header, print and export affordances ------------------------------- */
 
 export function ReportFrame({ title, company, period, onExport, children, meta }) {
   return (

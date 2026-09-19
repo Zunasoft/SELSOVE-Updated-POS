@@ -147,6 +147,7 @@ export default function InventoryManager({ products, categories, onRefresh, show
           showToast={showToast}
           onRefresh={refreshAll}
           batchTrackingEnabled={Boolean(posSettings.enableBatchTracking)}
+          serialTrackingEnabled={Boolean(posSettings.enableSerialTracking)}
           storeNearExpiryDays={posSettings.nearExpiryDays}
           tenant={tenant}
         />
@@ -192,9 +193,7 @@ export default function InventoryManager({ products, categories, onRefresh, show
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Dashboard Tab
- * ------------------------------------------------------------------ */
+/* ------------------------------- Dashboard Tab ------------------------------- */
 
 export function resolveProductStockInfo(p, allProducts = []) {
   if (!p || p.productType === 'service') {
@@ -265,10 +264,7 @@ export function resolveProductStockInfo(p, allProducts = []) {
 
 const NEAR_EXPIRY_DAYS = 30;
 
-/**
- * The near-expiry warning window for a product: its own override if set
- * (e.g. eggs at 14 days), else the store-wide default, else the hard fallback.
- */
+/** The near-expiry warning window: product's own override, else store-wide default, else the hard fallback. */
 function resolveNearExpiryDays(product, storeDefaultDays) {
   return Number(product?.nearExpiryDays) || Number(storeDefaultDays) || NEAR_EXPIRY_DAYS;
 }
@@ -447,9 +443,7 @@ function DashboardTab({ summary, products, setTab, nearExpiryDays }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Products Tab
- * ------------------------------------------------------------------ */
+/* ------------------------------- Products Tab ------------------------------- */
 
 function getDefaultSubUnit(unitName, units = []) {
   const u = String(unitName || '').toLowerCase().trim();
@@ -480,15 +474,7 @@ function getDefaultBigUnit(unitName) {
   return null;
 }
 
-/**
- * Writes a real computed Price/MRP into the sub-unit and every Additional
- * Unit row whose price/mrp is still flagged "auto" (see *Auto fields below),
- * so the numbers are visibly filled in — not just a placeholder hint — and
- * stay in sync as the main Price/MRP or a unit's factor changes. A field
- * stops auto-updating the moment the user types their own value into it
- * (updateAltUnit / the price inputs flip the *Auto flag to false); clearing
- * it back to blank re-enables auto-tracking.
- */
+/** Recomputes Price/MRP for sub-unit and Additional Unit rows still flagged "auto"; a field stops auto-updating once the user types into it directly. */
 function recomputeAutoUnitPricing(f) {
   const price = Number(f.price) || 0;
   const mrp = Number(f.mrp) || 0;
@@ -518,10 +504,7 @@ function recomputeAutoUnitPricing(f) {
   return { ...f, customSubUnitPrice, customSubUnitMrp, altUnits };
 }
 
-// Stable per-row identity for recipe/combo item rows so React keeps each
-// IngredientRow's internal state (sub-unit toggle, in-progress qty text)
-// attached to the correct row when a row is removed from the middle of the
-// list — an index-based key would reuse the wrong row's state after a shift.
+// Stable per-row key so removing a row from the middle doesn't reuse the wrong row's state (an index-based key would).
 let rowKeySeq = 0;
 const genRowKey = () => `row_${Date.now()}_${rowKeySeq++}`;
 const randomBarcode = () => Math.floor(1000000000 + Math.random() * 9000000000).toString();
@@ -547,6 +530,7 @@ const blankProduct = (categories) => ({
   price: '',
   mrp: '',
   purchasePrice: '',
+  marginPercent: '',
   wholesalePrice: '',
   specialPrice: '',
   stock: '',
@@ -588,12 +572,7 @@ const blankProduct = (categories) => ({
   warrantyDurationUnit: 'months'
 });
 
-/**
- * Live cost math for the recipe builder — mirrors the server's
- * `decorateRecipe` in modules/recipes.js so the numbers shown while editing
- * never surprise the user once the request round-trips.
- * Each unit sold consumes exactly the listed raw material quantities (1:1).
- */
+/** Live cost math for the recipe builder — mirrors the server's `decorateRecipe` in modules/recipes.js so the UI never surprises the user once it round-trips. */
 function computeRecipeTotals(ingredients, products) {
   const rows = (ingredients || [])
     .map((ing) => {
@@ -615,21 +594,14 @@ function computeRecipeTotals(ingredients, products) {
   return { rows, unitCost, producible: Math.max(0, Number.isFinite(producible) ? producible : 0) };
 }
 
-/**
- * Serial Number Sheet — one row per physical unit of stock. Opened from the
- * Add Product screen once "Track by Serial / IMEI Number" is checked; the
- * row count always matches the product's current Opening Stock quantity, so
- * checking a product with 10 units in stock gets exactly 10 rows here.
- */
+/** Serial Number Sheet: one row per physical unit — row count always matches the product's Opening Stock quantity. */
 function SerialSheetModal({ open, qty, serials, customLabels, onClose, onSave }) {
   const [rows, setRows] = useState([]);
   const [labels, setLabels] = useState(DEFAULT_SERIAL_CUSTOM_LABELS);
 
   useEffect(() => {
     if (!open) return;
-    // Keep existing rows by position (so re-opening the sheet doesn't lose
-    // what's already been entered), pad with blank rows if stock went up,
-    // and drop from the end if stock came back down.
+    // Keep existing rows by position, pad with blanks if stock went up, drop from the end if it came back down.
     const base = Array.from({ length: qty }, (_, i) => {
       const existing = serials[i];
       return existing
@@ -797,11 +769,7 @@ function SerialSheetModal({ open, qty, serials, customLabels, onClose, onSave })
   );
 }
 
-/**
- * Summary + trigger for the serial sheet, shown on the Add Product screen
- * once "Track by Serial / IMEI Number" is checked — mirrors the batch table
- * section's role for batch-tracked products.
- */
+/** Summary + trigger for the serial sheet — mirrors the batch table section's role for batch-tracked products. */
 function SerialNumberSection({ form, setForm }) {
   const [showSheet, setShowSheet] = useState(false);
   const qty = Math.max(0, Math.floor(Number(form.stock) || 0));
@@ -840,9 +808,7 @@ function SerialNumberSection({ form, setForm }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Reusable Category Creation & Edit Modal
- * ------------------------------------------------------------------ */
+/* ------------------------------- Reusable Category Creation & Edit Modal ------------------------------- */
 
 export function CategoryFormModal({ open, editing = null, categories = [], showToast, onClose, onSaved }) {
   const [form, setForm] = useState({ name: '', icon: '📦', description: '', kotPrinter: '', color: 'indigo' });
@@ -949,14 +915,7 @@ export function CategoryFormModal({ open, editing = null, categories = [], showT
   );
 }
 
-/**
- * The full product create/edit form, as its own reusable modal — extracted
- * out of ProductsTab so any screen (not just Inventory > Products) can open
- * it, e.g. Purchases' "add an item not in the catalogue" flow. Visibility
- * and which product is being edited are owned by the caller (`open`/
- * `editing`); everything about the form itself (image upload, units,
- * batches, recipe/combo builders, save) lives here.
- */
+/** The full product create/edit form as its own reusable modal, so screens other than Inventory > Products (e.g. Purchases' quick-add) can open it too. */
 export function ProductFormModal({
   open,
   editing,
@@ -965,6 +924,7 @@ export function ProductFormModal({
   warehouses,
   products,
   batchTrackingEnabled,
+  serialTrackingEnabled,
   storeNearExpiryDays,
   showToast,
   onClose,
@@ -1002,12 +962,7 @@ export function ProductFormModal({
     onCategoryCreated?.(newCat);
   };
 
-  // Once a product carries real batch stock, "unbatching" it would strand
-  // that stock outside the batch system it's tracked in — so the toggle
-  // stays locked on until every batch for this product is sold down (or
-  // written off) to zero. Measured against `editing` (the persisted
-  // product), not `form`, so it can't be gamed by editing batch qty in the
-  // same session before saving.
+  // Locked on until every batch is sold/written off to zero, measured against `editing` (persisted) so it can't be gamed via unsaved `form` edits.
   const lockedBatchRemainingQty = useMemo(() => {
     if (!editing?.trackBatches) return 0;
     return (editing.batches || []).reduce((sum, b) => sum + (Number(b.qty) || 0), 0);
@@ -1019,9 +974,7 @@ export function ProductFormModal({
     [units]
   );
 
-  // Seeds `form` from the product being edited (or a blank product) every
-  // time the modal opens or the target product changes — mirrors the old
-  // openAdd/openEdit logic, just driven by props instead of local state.
+  // Seeds `form` from the product being edited whenever the modal opens or the target changes (mirrors the old openAdd/openEdit logic).
   useEffect(() => {
     if (!open) return;
     if (!editing) {
@@ -1620,7 +1573,7 @@ export function ProductFormModal({
               </Field>
             </div>
 
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <span className="label-eyebrow">Categories</span>
@@ -1955,10 +1908,7 @@ export function ProductFormModal({
                 <button
                   type="button"
                   onClick={() => {
-                    // SKUs are numeric-only and sequential, so "next" is
-                    // whatever comes after the highest one already in use —
-                    // the backend re-derives the same value from the saved
-                    // catalogue at save time if this preview ever drifts.
+                    // Preview only — the backend re-derives the real next SKU from the saved catalogue at save time.
                     const highest = (products || []).reduce((max, p) => {
                       const digits = String(p.sku || '').replace(/\D/g, '');
                       const n = digits ? parseInt(digits, 10) : 0;
@@ -2145,7 +2095,7 @@ export function ProductFormModal({
             ) : form.productType !== 'combo' && form.productType !== 'composite' ? (
               <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
                 <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">Multiple Selling Prices</h4>
-                <div className="grid grid-cols-4 gap-3">
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
                   <Field label="Purchase Price (₹)" hint={form.productType === 'composite' ? 'Calculated from the recipe' : undefined}>
                     <Input
                       type="number"
@@ -2155,9 +2105,34 @@ export function ProductFormModal({
                           ? computeRecipeTotals(form.recipeItems, products).unitCost.toFixed(2)
                           : form.purchasePrice
                       }
-                      onChange={(e) => setForm({ ...form, purchasePrice: e.target.value })}
+                      onChange={(e) => {
+                        const pp = e.target.value;
+                        const margin = Number(form.marginPercent);
+                        const next = { ...form, purchasePrice: pp };
+                        // Keep Selling Price in step with an already-configured margin so a cost change doesn't leave it stale.
+                        if (form.marginPercent !== '' && Number(pp) > 0) {
+                          next.price = (Number(pp) * (1 + margin / 100)).toFixed(2);
+                        }
+                        setForm(next);
+                      }}
                       disabled={form.productType === 'composite' && !form.useCustomPricing}
                       className={form.productType === 'composite' && !form.useCustomPricing ? 'opacity-70 cursor-not-allowed' : ''}
+                    />
+                  </Field>
+                  <Field label="Margin %" hint="Type a margin to auto-fill Selling Price from Purchase Price">
+                    <Input
+                      type="number"
+                      step="0.1"
+                      value={form.marginPercent}
+                      onChange={(e) => {
+                        const marginVal = e.target.value;
+                        const pp = Number(form.purchasePrice) || 0;
+                        const next = { ...form, marginPercent: marginVal };
+                        if (marginVal !== '' && pp > 0) {
+                          next.price = (pp * (1 + Number(marginVal) / 100)).toFixed(2);
+                        }
+                        setForm(next);
+                      }}
                     />
                   </Field>
                   <Field label="Selling Price (₹) *">
@@ -2177,7 +2152,15 @@ export function ProductFormModal({
                             })()
                           : form.price
                       }
-                      onChange={(e) => setForm({ ...form, price: e.target.value })}
+                      onChange={(e) => {
+                        const priceVal = e.target.value;
+                        const pp = Number(form.purchasePrice) || 0;
+                        const next = { ...form, price: priceVal };
+                        // Editing Selling Price directly re-derives the margin
+                        // shown, rather than leaving a now-inaccurate figure in place.
+                        next.marginPercent = pp > 0 && priceVal !== '' ? (((Number(priceVal) - pp) / pp) * 100).toFixed(1) : '';
+                        setForm(next);
+                      }}
                       required
                       disabled={form.productType === 'combo' && !form.useCustomPricing}
                       className={form.productType === 'combo' && !form.useCustomPricing ? 'opacity-70 cursor-not-allowed' : ''}
@@ -2212,7 +2195,7 @@ export function ProductFormModal({
                   <span>Warehouse Distribution & Minimum Stock</span>
                   <span className="bg-indigo-100 text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300 px-2 py-0.5 rounded-full text-[9px]">Total: {form.stock || 0}</span>
                 </h4>
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <Field
                     label="Select Warehouse"
                     hint={form.trackBatches ? 'Disabled — select warehouse per batch below' : undefined}
@@ -2290,7 +2273,7 @@ export function ProductFormModal({
                         }}
                         className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4 disabled:opacity-50"
                       />
-                      Track by Batch (lot number, expiry date, batch-wise cost)
+                      Enable Batch
                     </label>
                     {lockTrackBatchesOff && (
                       <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-1 pl-6">
@@ -2304,23 +2287,27 @@ export function ProductFormModal({
                   </div>
                 )}
 
-                <div className="pt-2 border-t border-[color:var(--border-subtle)]">
-                  <label className="flex items-center gap-2 text-xs font-bold cursor-pointer text-indigo-600 dark:text-indigo-400">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(form.trackSerials)}
-                      onChange={(e) => {
-                        const on = e.target.checked;
-                        // Batch and serial are two answers to the same question
-                        // ("what identifies one unit of this product?") — a
-                        // product is tracked one way or the other, not both.
-                        setForm({ ...form, trackSerials: on, trackBatches: on ? false : form.trackBatches });
-                      }}
-                      className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
-                    />
-                    Track by Serial / IMEI Number (one record per unit)
-                  </label>
-                </div>
+                {(serialTrackingEnabled || form.trackSerials) ? (
+                  <div className="pt-2 border-t border-[color:var(--border-subtle)]">
+                    <label className="flex items-center gap-2 text-xs font-bold cursor-pointer text-indigo-600 dark:text-indigo-400">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(form.trackSerials)}
+                        onChange={(e) => {
+                          const on = e.target.checked;
+                          // Batch and serial track the same thing one way or the other, never both.
+                          setForm({ ...form, trackSerials: on, trackBatches: on ? false : form.trackBatches });
+                        }}
+                        className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+                      />
+                      Enable Serial
+                    </label>
+                  </div>
+                ) : (
+                  <div className="text-[10px] text-[color:var(--text-muted)] pt-2 border-t border-[color:var(--border-subtle)]">
+                    Serial number tracking is off for this store. Enable it under Settings → Billing & Tax → Inventory to use it here.
+                  </div>
+                )}
               </div>
             )}
 
@@ -2519,8 +2506,6 @@ export function ProductFormModal({
                   </p>
                 </div>
 
-
-
                 <div className="space-y-2">
                   {(form.recipeItems || []).length > 0 && (
                     <div className="hidden md:grid grid-cols-12 gap-2 px-2 text-[10px] font-bold uppercase text-[color:var(--text-muted)]">
@@ -2556,7 +2541,7 @@ export function ProductFormModal({
                   const marginPct = sellingPrice ? (margin / sellingPrice) * 100 : 0;
                   return (
                     <div className="pt-2 border-t border-emerald-300/40 dark:border-emerald-800/40 space-y-3">
-                      <div className="grid grid-cols-3 gap-2">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                         <StatBlock label="Material Cost" value={money(totals.unitCost)} />
                         <StatBlock label="Margin" value={money(margin)} tone={margin < 0 ? 'danger' : 'success'} />
                         <StatBlock label="Margin %" value={`${marginPct.toFixed(1)}%`} tone={margin < 0 ? 'danger' : 'success'} />
@@ -2648,7 +2633,7 @@ export function ProductFormModal({
                         <StatBlock label="Combo Selling Price" value={money(sellingPrice)} />
                         <StatBlock label="Customer Savings" value={money(discount)} tone={discount < 0 ? 'danger' : 'success'} />
                       </div>
-                      <div className="grid grid-cols-3 gap-3 pt-2">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
                         <Field label="Discount (%)">
                           <Input
                             type="number"
@@ -2697,8 +2682,6 @@ export function ProductFormModal({
                 })()}
               </div>
             )}
-
-
 
             <div className="grid grid-cols-2 gap-3">
               <Field label="HSN Code">
@@ -2777,7 +2760,7 @@ export function ProductFormModal({
   );
 }
 
-function ProductsTab({ products, categories, units, warehouses, showToast, onRefresh, batchTrackingEnabled, storeNearExpiryDays, tenant }) {
+function ProductsTab({ products, categories, units, warehouses, showToast, onRefresh, batchTrackingEnabled, serialTrackingEnabled, storeNearExpiryDays, tenant }) {
   const [query, setQuery] = useState('');
   const [categoryId, setCategoryId] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
@@ -2871,7 +2854,10 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
         (p.regionalName || '').toLowerCase().includes(needle) ||
         (p.printName || '').toLowerCase().includes(needle) ||
         (p.sku || '').toLowerCase().includes(needle) ||
-        (p.barcodes || [p.barcode]).some((b) => String(b).includes(needle))
+        (p.barcodes || [p.barcode]).some((b) => String(b).includes(needle)) ||
+        (p.trackSerials && Array.isArray(p.serials) && p.serials.some((s) =>
+          String(s.serialNo || '').toLowerCase().includes(needle) || String(s.imei || '').toLowerCase().includes(needle)
+        ))
       );
     });
   }, [products, deferredQuery, categoryId, typeFilter, stockFilter, statusFilter, warehouseFilter, batchFilter, batchNoFilter, storeNearExpiryDays, warehouses]);
@@ -2884,10 +2870,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
     return map;
   }, [products]);
 
-  // Form state, unit/batch/recipe builders and the actual save/upload logic
-  // now live in the shared ProductFormModal (also reused by Purchases' "add
-  // a product not in the catalogue" flow) — this tab only decides which
-  // product (if any) to open it for.
+  // Form state and save logic live in the shared ProductFormModal; this tab only decides which product (if any) to open it for.
   const openAdd = () => {
     setEditing(null);
     setShowForm(true);
@@ -2914,8 +2897,8 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       {/* Search & Action Bar */}
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
         <div className="flex flex-1 flex-wrap gap-2 items-center">
-          <SearchInput value={query} onChange={setQuery} placeholder="Search by name, SKU, barcode..." className="w-64" />
-          
+          <SearchInput value={query} onChange={setQuery} placeholder="Search by name, SKU, barcode, or serial no..." className="w-64" />
+
           <Select value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className="w-44">
             <option value="all">All Categories</option>
             {categories.map((c) => (
@@ -2994,7 +2977,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                     .filter(Boolean);
                   const isCompositeRow = p.productType === 'composite' || p.isComposite;
                   const isComboRow = p.productType === 'combo';
-                  
+
                   const compositeIngredients = (p.recipe?.ingredients?.length ? p.recipe.ingredients : p.recipeItems) || [];
 
                   const producible = isCompositeRow && compositeIngredients.length > 0
@@ -3010,7 +2993,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                         return material && Number(item.qty) > 0 ? (material.stock || 0) / Number(item.qty) : 0;
                       }))))
                     : 0;
-                    
+
                   let displayStock = p.stock;
                   if (warehouseFilter !== 'all') {
                     if (p.warehouses) {
@@ -3020,19 +3003,19 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                       displayStock = (warehouseFilter === 'wh_shop' || warehouseFilter === defaultWh) ? (p.stock || 0) : 0;
                     }
                   }
-                  
+
                   const isLow = p.productType !== 'service' && (
-                    isCompositeRow ? producible <= Number(p.minStock ?? 5) : 
+                    isCompositeRow ? producible <= Number(p.minStock ?? 5) :
                     isComboRow ? comboBuyable <= Number(p.minStock ?? 5) :
                     Number(displayStock) <= Number(p.minStock ?? 5)
                   );
-                  
+
                   const isOut = p.productType !== 'service' && (
-                    isCompositeRow ? producible <= 0 : 
+                    isCompositeRow ? producible <= 0 :
                     isComboRow ? comboBuyable <= 0 :
                     Number(displayStock) <= 0
                   );
-                  
+
                   const productTypesList = Array.isArray(p.productTypes) && p.productTypes.length ? p.productTypes : [p.productType || 'standard'];
                   const ingredientCount = isCompositeRow
                     ? (p.recipe?.ingredients?.length || p.recipeItems?.length || 0)
@@ -3275,6 +3258,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
         warehouses={warehouses}
         products={products}
         batchTrackingEnabled={batchTrackingEnabled}
+        serialTrackingEnabled={serialTrackingEnabled}
         storeNearExpiryDays={storeNearExpiryDays}
         showToast={showToast}
         onClose={() => setShowForm(false)}
@@ -3294,9 +3278,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Recipe & Alternate Unit row widgets — used inside the Product form
- * ------------------------------------------------------------------ */
+/* ------------------------------- Recipe & Alternate Unit row widgets — used inside the Product form ------------------------------- */
 
 function StatBlock({ label, value, tone = 'neutral' }) {
   const color = tone === 'danger' ? 'text-red-600' : tone === 'success' ? 'text-emerald-600' : 'text-[color:var(--text-primary)]';
@@ -3326,13 +3308,13 @@ function IngredientRow({ row, index, products, excludeIds, onChange, onRemove })
   const isKg = material?.unit?.toLowerCase() === 'kg';
   const isLtr = ['ltr', 'l', 'liter', 'liters', 'litre', 'litres'].includes(material?.unit?.toLowerCase());
   const hasCustom = !!material?.customSubUnitName && Number(material?.customSubUnitFactor) > 0;
-  
+
   const hasSubUnit = isKg || isLtr || hasCustom;
   const subUnitName = isKg ? 'g' : isLtr ? 'ml' : hasCustom ? material.customSubUnitName : null;
   const subUnitFactor = isKg || isLtr ? 1000 : hasCustom ? Number(material.customSubUnitFactor) : 1;
-  
+
   const [useSubUnit, setUseSubUnit] = useState(hasSubUnit);
-  
+
   useEffect(() => {
     setUseSubUnit(hasSubUnit);
   }, [hasSubUnit]);
@@ -3417,8 +3399,8 @@ function IngredientRow({ row, index, products, excludeIds, onChange, onRemove })
       </div>
       <div className="col-span-2 md:col-span-1 text-xs text-center font-medium">
         {hasSubUnit ? (
-           <select 
-             value={useSubUnit ? 'sub' : 'base'} 
+           <select
+             value={useSubUnit ? 'sub' : 'base'}
              onChange={(e) => {
                // When switching units, the displayed quantity will automatically update to reflect the same base amount
                setUseSubUnit(e.target.value === 'sub');
@@ -3452,10 +3434,7 @@ function IngredientRow({ row, index, products, excludeIds, onChange, onRemove })
   );
 }
 
-
-/* ------------------------------------------------------------------ *
- * Categories Tab (Story 1)
- * ------------------------------------------------------------------ */
+/* ------------------------------- Categories Tab (Story 1) ------------------------------- */
 
 function CategoriesTab({ categories, products, showToast, onRefresh }) {
   const [query, setQuery] = useState('');
@@ -3550,9 +3529,7 @@ function CategoriesTab({ categories, products, showToast, onRefresh }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Units Tab (Story 2)
- * ------------------------------------------------------------------ */
+/* ------------------------------- Units Tab (Story 2) ------------------------------- */
 
 const UNIT_NAME_RE = /^[a-zA-Z][a-zA-Z0-9\s-]{0,29}$/;
 
@@ -3800,9 +3777,7 @@ function UnitsTab({ units, showToast, onRefresh }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Warehouses & Stock Transfer Tab
- * ------------------------------------------------------------------ */
+/* ------------------------------- Warehouses & Stock Transfer Tab ------------------------------- */
 
 function WarehousesTab({ warehouses, products, showToast, onRefresh }) {
   const [sourceWh, setSourceWh] = useState(warehouses[0]?.id || 'wh_main');
@@ -4133,9 +4108,7 @@ function WarehousesTab({ warehouses, products, showToast, onRefresh }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Stock Adjustment Tab (Story 10)
- * ------------------------------------------------------------------ */
+/* ------------------------------- Stock Adjustment Tab (Story 10) ------------------------------- */
 
 function AdjustTab({ products, warehouses = [], showToast, onRefresh }) {
   const [productId, setProductId] = useState('');
@@ -4480,9 +4453,7 @@ function AdjustTab({ products, warehouses = [], showToast, onRefresh }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * History Tab (Story 11)
- * ------------------------------------------------------------------ */
+/* ------------------------------- History Tab (Story 11) ------------------------------- */
 
 function HistoryTab({ products }) {
   const [movements, setMovements] = useState([]);
@@ -4580,10 +4551,7 @@ function HistoryTab({ products }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Batch Tracking Tab — every batch across every batch-tracked product,
- * in one place, with write-off.
- * ------------------------------------------------------------------ */
+/* --------------------- Batch Tracking Tab: every batch across every batch-tracked product, with write-off --------------------- */
 
 function BatchesTab({ products, showToast, onRefresh, storeNearExpiryDays }) {
   const [view, setView] = useState('stock'); // 'stock' | 'sales'
@@ -4963,24 +4931,13 @@ function BatchesTab({ products, showToast, onRefresh, storeNearExpiryDays }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Serial Tracking Tab — the Batch Tracking tab's counterpart for
- * serial-tracked products. Default view is a normal product list (one row
- * per serial-tracked product, with its total/in-stock/sold counts); picking
- * a product ("Keyboard") drills into that product's own unit-by-unit table
- * with all its qty details — same drill-down shape as any other product list
- * in this app, rather than one giant flat table of every unit everywhere.
- * "View" on a unit opens its full record (product info, serial no., IMEI,
- * every configured custom field, status and warranty) in one place, since a
- * single row can't show all of that for products that each define their own
- * custom field labels.
- * ------------------------------------------------------------------ */
+/* Serial Tracking Tab: product list drills into a per-unit table (same shape as any other product list), and "View" opens a unit's full record since one row can't show every custom field. */
 
 function SerialsTab({ products }) {
   const [query, setQuery] = useState('');
   const [selectedProductId, setSelectedProductId] = useState(null);
   const [unitQuery, setUnitQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all'); // 'all' | 'in_stock' | 'sold'
+  const [statusFilter, setStatusFilter] = useState('all'); // 'all' | 'in_stock' | 'sold' | 'returned'
   const [detailTarget, setDetailTarget] = useState(null); // { product, serial }
 
   const serialProducts = useMemo(() => {
@@ -4991,8 +4948,9 @@ function SerialsTab({ products }) {
       .map((p) => ({
         product: p,
         total: p.serials.length,
-        inStock: p.serials.filter((s) => s.status !== 'SOLD').length,
-        sold: p.serials.filter((s) => s.status === 'SOLD').length
+        inStock: p.serials.filter((s) => s.status === 'IN_STOCK').length,
+        sold: p.serials.filter((s) => s.status === 'SOLD').length,
+        returned: p.serials.filter((s) => s.status === 'RETURNED').length
       }))
       .sort((a, b) => a.product.name.localeCompare(b.product.name));
   }, [products, query]);
@@ -5011,8 +4969,9 @@ function SerialsTab({ products }) {
     const needle = unitQuery.trim().toLowerCase();
     return (selectedProduct.serials || [])
       .filter((s) => {
-        if (statusFilter === 'in_stock') return s.status !== 'SOLD';
+        if (statusFilter === 'in_stock') return s.status === 'IN_STOCK';
         if (statusFilter === 'sold') return s.status === 'SOLD';
+        if (statusFilter === 'returned') return s.status === 'RETURNED';
         return true;
       })
       .filter((s) => !needle || String(s.serialNo || '').toLowerCase().includes(needle) || String(s.imei || '').toLowerCase().includes(needle))
@@ -5023,8 +4982,9 @@ function SerialsTab({ products }) {
   if (selectedProduct) {
     const p = selectedProduct;
     const totalUnits = (p.serials || []).length;
-    const inStockUnits = (p.serials || []).filter((s) => s.status !== 'SOLD').length;
-    const soldUnits = totalUnits - inStockUnits;
+    const inStockUnits = (p.serials || []).filter((s) => s.status === 'IN_STOCK').length;
+    const soldUnits = (p.serials || []).filter((s) => s.status === 'SOLD').length;
+    const returnedUnits = (p.serials || []).filter((s) => s.status === 'RETURNED').length;
 
     return (
       <div className="space-y-4">
@@ -5042,10 +5002,11 @@ function SerialsTab({ products }) {
           {p.sku && <span className="text-xs font-mono text-[color:var(--text-muted)]">SKU: {p.sku}</span>}
         </div>
 
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <StatTile label="Total Units" value={totalUnits} icon={ScanLine} />
           <StatTile label="In Stock" value={inStockUnits} tone="success" />
           <StatTile label="Sold" value={soldUnits} tone="accent" />
+          <StatTile label="Returned" value={returnedUnits} tone="danger" />
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3 bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
@@ -5054,6 +5015,7 @@ function SerialsTab({ products }) {
             <option value="all">All Units</option>
             <option value="in_stock">In Stock</option>
             <option value="sold">Sold</option>
+            <option value="returned">Returned</option>
           </Select>
         </div>
 
@@ -5078,8 +5040,8 @@ function SerialsTab({ products }) {
                       <td className="py-2.5 px-3 font-mono font-bold text-[color:var(--text-primary)]">{s.serialNo}</td>
                       <td className="py-2.5 px-3 font-mono text-[color:var(--text-secondary)]">{s.imei || '—'}</td>
                       <td className="py-2.5 px-3">
-                        <Badge tone={s.status === 'SOLD' ? 'neutral' : 'success'}>
-                          {s.status === 'SOLD' ? 'Sold' : 'In Stock'}
+                        <Badge tone={s.status === 'SOLD' ? 'neutral' : s.status === 'RETURNED' ? 'danger' : 'success'}>
+                          {s.status === 'SOLD' ? 'Sold' : s.status === 'RETURNED' ? 'Returned' : 'In Stock'}
                         </Badge>
                       </td>
                       <td className="py-2.5 px-3 text-[color:var(--text-muted)]">
@@ -5135,9 +5097,12 @@ function SerialsTab({ products }) {
                 {field('Unit Price', money(p.price))}
                 {field('Serial No.', <span className="font-mono font-bold">{s.serialNo}</span>)}
                 {field('IMEI', s.imei ? <span className="font-mono">{s.imei}</span> : '—')}
-                {field('Status', <Badge tone={s.status === 'SOLD' ? 'neutral' : 'success'}>{s.status === 'SOLD' ? 'Sold' : 'In Stock'}</Badge>)}
+                {field('Status', <Badge tone={s.status === 'SOLD' ? 'neutral' : s.status === 'RETURNED' ? 'danger' : 'success'}>{s.status === 'SOLD' ? 'Sold' : s.status === 'RETURNED' ? 'Returned' : 'In Stock'}</Badge>)}
                 {field('Received On', s.createdAt ? String(s.createdAt).slice(0, 10) : '—')}
                 {s.status === 'SOLD' && field('Sold On Order', s.soldOrderId || '—')}
+                {s.status === 'RETURNED' && field('Return Reason', s.returnReason || '—')}
+                {s.status === 'RETURNED' && field('Returned On', s.returnedAt ? String(s.returnedAt).slice(0, 10) : '—')}
+                {s.status === 'RETURNED' && field('Returned By', s.returnedBy || '—')}
                 {p.hasWarranty && field('Warranty Till', s.warrantyEndDate ? String(s.warrantyEndDate).slice(0, 10) : 'Not sold yet')}
               </div>
 
@@ -5192,11 +5157,12 @@ function SerialsTab({ products }) {
                   <th className="py-2.5 px-3 text-right">Total Units</th>
                   <th className="py-2.5 px-3 text-right">In Stock</th>
                   <th className="py-2.5 px-3 text-right">Sold</th>
+                  <th className="py-2.5 px-3 text-right">Returned</th>
                   <th className="py-2.5 px-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[color:var(--border-subtle)]">
-                {serialProducts.map(({ product: p, total, inStock, sold }) => (
+                {serialProducts.map(({ product: p, total, inStock, sold, returned }) => (
                   <tr
                     key={p.id}
                     onClick={() => setSelectedProductId(p.id)}
@@ -5207,6 +5173,7 @@ function SerialsTab({ products }) {
                     <td className="py-2.5 px-3 text-right font-mono">{total}</td>
                     <td className="py-2.5 px-3 text-right font-mono text-emerald-600 dark:text-emerald-400">{inStock}</td>
                     <td className="py-2.5 px-3 text-right font-mono text-[color:var(--text-muted)]">{sold}</td>
+                    <td className="py-2.5 px-3 text-right font-mono text-rose-600 dark:text-rose-400">{returned}</td>
                     <td className="py-2.5 px-3 text-right">
                       <button
                         type="button"
@@ -5227,9 +5194,7 @@ function SerialsTab({ products }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Price Sheets Tab (Story 18 & Story 13)
- * ------------------------------------------------------------------ */
+/* ------------------------------- Price Sheets Tab (Story 18 & Story 13) ------------------------------- */
 
 function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
   const [subTab, setSubTab] = useState('matrix');
@@ -5247,7 +5212,7 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
   const [showSheetModal, setShowSheetModal] = useState(false);
   const [editingSheet, setEditingSheet] = useState(null);
   const [sheetForm, setSheetForm] = useState({ name: '', code: '', customerType: 'Retail', defaultDiscountPercent: 0, isActive: true });
-  
+
   // Custom Pricing State
   const [manageSheet, setManageSheet] = useState(null);
   const [sheetDiscount, setSheetDiscount] = useState(0);
@@ -5683,7 +5648,7 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
               </span>
             </div>
 
-            <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--surface,#ffffff)]">
+            <div className="flex-1 min-h-0 overflow-auto rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--surface,#ffffff)]">
               {filteredManageRows.length === 0 ? (
                 <div className="p-8">
                   <EmptyState
@@ -5708,7 +5673,7 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
                       const stdPrice = Number(p.price) || 0;
                       const sheetPct = Number(sheetDiscount) || 0;
                       const calcDefaultPrice = stdPrice > 0 ? (stdPrice * (1 - sheetPct / 100)) : 0;
-                      
+
                       const hasCustomDiscount = discountMap[p.id] !== undefined && discountMap[p.id] !== '';
                       const hasCustomPrice = pricingMap[p.id] !== undefined && pricingMap[p.id] !== '';
                       const isOverridden = hasCustomDiscount || hasCustomPrice;
@@ -5798,9 +5763,7 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Import / Export Tab (Stories 8 & 16)
- * ------------------------------------------------------------------ */
+/* ------------------------------- Import / Export Tab (Stories 8 & 16) ------------------------------- */
 
 function parseCSVContent(text) {
   const cleanText = text.replace(/^\uFEFF/, '');

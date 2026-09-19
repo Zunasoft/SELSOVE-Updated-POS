@@ -103,13 +103,7 @@ export function VisualTemplateBuilderModal({
     const customList = billing.customTemplates || [];
     setCustomTemplates(customList);
 
-    // Builds a theme's editable config from ONLY that theme's own defaults
-    // plus its own saved override (never the raw `billing` object — that's
-    // one object shared by every theme, so spreading it here used to mean
-    // every theme's editor opened pre-polluted with whatever the *last
-    // edited* theme had saved, and editing propagated that further).
-    // `custom.baseTheme` resolves an older-style custom entry (a distinct id
-    // pointing at a base theme) as well as a same-id in-place override.
+    // Builds a theme's config from only its own defaults + saved override, never raw `billing` (shared by every theme, would leak edits across them).
     const buildConfig = (themes, type, themeId, defaultSections) => {
       const custom = customList.find((t) => t.id === themeId && t.type === type);
       const baseId = custom ? (custom.baseTheme || themeId) : themeId;
@@ -148,12 +142,7 @@ export function VisualTemplateBuilderModal({
   const setConfig = isThermal ? setThermalConfig : setInvoiceConfig;
   const currentTheme = isThermal ? selectedThermalTheme : selectedInvoiceTheme;
 
-  // Billing only ever offers the 2 fixed thermal slots — see
-  // BILLING_THERMAL_THEME_IDS. Invoice presets stay the full built-in list.
-  // Either way, an in-place edit of a built-in is saved with the SAME id as
-  // that built-in (self-referential baseTheme), so it must never also be
-  // listed a second time under "My Custom Templates" — only genuinely new,
-  // separately-created custom templates belong there.
+  // An in-place edit of a built-in saves with the SAME id (self-referential baseTheme), so it must never also appear under "My Custom Templates".
   const presetThemesForPicker = isThermal
     ? THERMAL_THEMES.filter((th) => BILLING_THERMAL_THEME_IDS.includes(th.id))
     : INVOICE_THEMES;
@@ -210,11 +199,7 @@ export function VisualTemplateBuilderModal({
     }
   };
 
-  // Save current configuration. Every theme's config — built-in or custom —
-  // now lives ONLY inside its own customTemplates[] entry, upserted here by
-  // the theme's own id (baseTheme === id for an in-place edit of a built-in).
-  // Nothing is ever written onto the shared `billing` object itself, so
-  // editing one theme can no longer bleed into another's rendering.
+  // Every theme's config lives only inside its own customTemplates[] entry; nothing is ever written onto the shared `billing` object.
   const handleSaveConfiguration = async () => {
     setSaving(true);
     try {

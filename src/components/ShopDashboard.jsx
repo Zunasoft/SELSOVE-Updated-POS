@@ -13,15 +13,7 @@ import {
 
 const DONUT_COLORS = ['#4f46e5', '#059669', '#f59e0b', '#e11d48', '#0891b2', '#7c3aed', '#65a30d'];
 
-/**
- * ISO date N days before today — used to build the 14-day trend window.
- *
- * Built from local calendar fields, not `toISOString()`. The backend buckets
- * every order by its local calendar day, so a client that instead sends the
- * UTC calendar day would — for a shop east of UTC, for a few hours after its
- * own local midnight — ask for "today" while actually meaning "yesterday",
- * silently dropping the day's own sales from the window it just asked for.
- */
+// Built from local calendar fields, not toISOString() — the backend buckets by local day, and UTC would ask for "yesterday" for a few hours after local midnight east of UTC.
 const daysAgoISO = (n) => {
   const d = new Date();
   d.setDate(d.getDate() - n);
@@ -31,12 +23,7 @@ const daysAgoISO = (n) => {
   return `${y}-${m}-${day}`;
 };
 
-/**
- * Module 2 — Shop Dashboard. The shop's front door: today's numbers, the
- * counter session, low stock and a look at what just sold. Every section is
- * defensive because a brand-new shop has zero of everything and must still
- * render cleanly instead of crashing on an undefined field.
- */
+/** Module 2 — Shop Dashboard. Every section is defensive since a brand-new shop has zero of everything and must render cleanly. */
 export default function ShopDashboard({ tenant, token, showToast, onNavigate }) {
   const [analytics, setAnalytics] = useState(null);
   const [daily, setDaily] = useState(null);

@@ -2,12 +2,11 @@ import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Truck, Plus, Trash2, ClipboardList, Wallet, X, Search, Boxes, FileText,
-  Undo2, Ban, AlertTriangle, Download, Code, Printer, ChevronLeft, ChevronRight, Paperclip,
-  CreditCard, Clock, CheckCircle2, Edit3, ChevronDown, Receipt, Calendar, Building2, User, Eye
+  Undo2, Ban, AlertTriangle, Download, Printer, ChevronLeft, ChevronRight, Paperclip,
+  CreditCard, Clock, CheckCircle2, Edit3, ChevronDown, Receipt, Calendar, Building2, User, Eye, Tag
 } from 'lucide-react';
 
 import api, { money, fmtDate, todayISO, monthStartISO, financialYearStartISO, API_BASE } from '../lib/api';
-import { exportPurchaseToWord, exportPurchaseOrderToWord } from '../lib/exporters';
 import { getProductUnitOptions } from './POSTerminal';
 import { ProductFormModal } from './InventoryManager';
 import { PartyFormModal } from './CustomerVendorLedger';
@@ -20,10 +19,7 @@ import { isWholeNumberUnit } from '../lib/units';
 
 const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Cheque'];
 
-// Same wrapping icon+label pill-tab pattern the Inventory section uses — a
-// row of tabs is far easier to scan and reach than a compact segmented
-// control once there are 5 of them, and a live badge count draws the eye to
-// whichever tab actually needs attention right now.
+// Same wrapping icon+label pill-tab pattern as Inventory — easier to scan than a segmented control once there are 5 tabs.
 const PURCHASE_TABS = [
   { id: 'INVOICES', label: 'Invoices', icon: Truck },
   { id: 'BY VENDOR', label: 'By Vendor', icon: ClipboardList },
@@ -32,11 +28,7 @@ const PURCHASE_TABS = [
   { id: 'PAYMENTS MADE', label: 'Payments Made', icon: Wallet }
 ];
 
-/**
- * Purchase (goods inward) register. Recording an invoice here receives stock,
- * refreshes each item's cost price, and posts Inventory + GST Input against
- * the vendor — so the "new purchase" flow is the heart of this screen.
- */
+/** Purchase (goods inward) register: recording an invoice receives stock, refreshes cost price, and posts Inventory + GST Input against the vendor. */
 export default function PurchaseManager({ tenant, token, showToast }) {
   const loadSeq = useRef(0);
   const [range, setRange] = useState({ from: financialYearStartISO(), to: todayISO() });
@@ -61,7 +53,7 @@ export default function PurchaseManager({ tenant, token, showToast }) {
   const [vcDetail, setVcDetail] = useState(null);
   const [invoiceSearch, setInvoiceSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('ALL');
-  const [downloadTarget, setDownloadTarget] = useState(null);
+  const [printTarget, setPrintTarget] = useState(null);
   const [poSearch, setPoSearch] = useState('');
   const [returnSearch, setReturnSearch] = useState('');
   const [paymentSearch, setPaymentSearch] = useState('');
@@ -233,41 +225,17 @@ export default function PurchaseManager({ tenant, token, showToast }) {
     return list;
   }, [purchases, statusFilter, invoiceSearch]);
 
-  const handleExecuteDownload = (format, target) => {
+  const handlePrint = (target) => {
     if (!target) return;
-    const isPO = target.type === 'po' || Boolean(target.poNumber);
-    const safeName = (target.invoiceNo || target.poNumber || 'purchase-doc')
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, '-')
-      .replace(/-+/g, '-');
-
-    if (format === 'json') {
-      const exportData = {
-        documentType: isPO ? 'Purchase Order' : 'Purchase Invoice',
-        data: target,
-        exportedAt: new Date().toISOString(),
-        generator: 'Selsolve Smart POS'
-      };
-      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${isPO ? 'po' : 'purchase'}-${safeName}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-      showToast(`Downloaded "${target.invoiceNo || target.poNumber}" as JSON file`);
-    } else if (format === 'word') {
-      if (isPO) {
-        exportPurchaseOrderToWord({ po: target, company: tenant || {} });
-      } else {
-        exportPurchaseToWord({ purchase: target, company: tenant || {} });
-      }
-      showToast(`Exported "${target.invoiceNo || target.poNumber}" as Word (.doc) document`);
-    } else if (format === 'pdf') {
+    setPrintTarget(target);
+    showToast(`Opening Print / Save as PDF for "${target.invoiceNo || target.poNumber}"...`);
+    setTimeout(() => {
       window.print();
-      showToast(`Opening Print / Save as PDF for "${target.invoiceNo || target.poNumber}"...`);
-    }
-    setDownloadTarget(null);
+    }, 150);
+  };
+
+  const handleExecuteDownload = (a, b) => {
+    handlePrint(b || a);
   };
 
   if (loading) return <Spinner label="Loading purchases…" />;
@@ -518,12 +486,12 @@ export default function PurchaseManager({ tenant, token, showToast }) {
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setDownloadTarget(p);
+                        handlePrint(p);
                       }}
                       className="p-1.5 rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 transition-colors"
-                      title="Download / Export"
+                      title="Print / Save as PDF"
                     >
-                      <Download className="w-3.5 h-3.5" />
+                      <Printer className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 )
@@ -575,7 +543,25 @@ export default function PurchaseManager({ tenant, token, showToast }) {
             { key: 'vendorName', label: 'Vendor', render: (p) => p.vendorName },
             { key: 'items', label: 'Lines', width: 70, align: 'right', render: (p) => p.items?.length || 0 },
             { key: 'totalAmount', label: 'Total', align: 'right', width: 120, render: (p) => <Money value={p.totalAmount} className="font-bold" /> },
-            { key: 'status', label: 'Status', width: 150, render: (p) => <POStatusBadge po={p} /> }
+            { key: 'status', label: 'Status', width: 150, render: (p) => <POStatusBadge po={p} /> },
+            {
+              key: 'action',
+              label: '',
+              width: 50,
+              render: (p) => (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handlePrint(p);
+                  }}
+                  className="p-1.5 rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 transition-colors"
+                  title="Print / Save as PDF"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                </button>
+              )
+            }
           ]}
           rows={filteredPOs}
           onRowClick={setPoDetail}
@@ -705,7 +691,7 @@ export default function PurchaseManager({ tenant, token, showToast }) {
         vendorCredits={vendorCredits.filter((v) => v.purchaseId === detail?.id)}
         onClose={() => setDetail(null)}
         onVoid={handleVoidPurchase}
-        onDownload={setDownloadTarget}
+        onDownload={handlePrint}
         onEdit={setEditTarget}
         onReturn={(p) => {
           setDetail(null);
@@ -767,7 +753,7 @@ export default function PurchaseManager({ tenant, token, showToast }) {
         po={poDetail}
         onClose={() => setPoDetail(null)}
         onCancel={handleCancelPO}
-        onDownload={setDownloadTarget}
+        onDownload={handlePrint}
         onReceive={(po) => {
           setPoDetail(null);
           setReceivePO(po);
@@ -776,6 +762,7 @@ export default function PurchaseManager({ tenant, token, showToast }) {
 
       <PurchaseReturnModal
         purchase={returnTarget}
+        products={products}
         vendorCredits={vendorCredits.filter((v) => v.purchaseId === returnTarget?.id)}
         showToast={showToast}
         onClose={() => setReturnTarget(null)}
@@ -787,62 +774,13 @@ export default function PurchaseManager({ tenant, token, showToast }) {
 
       <VendorCreditDetailModal vendorCredit={vcDetail} onClose={() => setVcDetail(null)} onVoid={handleVoidVendorCredit} />
 
-      {/* 50% Screen Width Download / Export Format Selection Modal */}
-      <Modal
-        open={Boolean(downloadTarget)}
-        onClose={() => setDownloadTarget(null)}
-        title="Select Download Format"
-        subtitle={`Export ${downloadTarget?.invoiceNo || downloadTarget?.poNumber || 'document'}`}
-        icon={Download}
-        size="custom"
-        className="!max-w-[50vw] !w-[50vw]"
-      >
-        <div className="py-2">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <button
-              onClick={() => handleExecuteDownload('json', downloadTarget)}
-              className="flex flex-col items-center justify-center p-5 rounded-2xl border-2 border-slate-200 dark:border-slate-800 hover:border-indigo-500 dark:hover:border-indigo-400 bg-slate-50 dark:bg-slate-900/50 hover:bg-indigo-50/30 dark:hover:bg-indigo-950/20 transition-all text-center group"
-            >
-              <div className="w-12 h-12 rounded-xl bg-amber-500/10 text-amber-500 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
-                <Code className="w-6 h-6" />
-              </div>
-              <div className="font-bold text-sm text-slate-800 dark:text-slate-100">JSON File</div>
-              <div className="text-xs text-slate-400 mt-0.5">.json format</div>
-            </button>
-
-            <button
-              onClick={() => handleExecuteDownload('word', downloadTarget)}
-              className="flex flex-col items-center justify-center p-5 rounded-2xl border-2 border-slate-200 dark:border-slate-800 hover:border-indigo-500 dark:hover:border-indigo-400 bg-slate-50 dark:bg-slate-900/50 hover:bg-indigo-50/30 dark:hover:bg-indigo-950/20 transition-all text-center group"
-            >
-              <div className="w-12 h-12 rounded-xl bg-blue-500/10 text-blue-500 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
-                <FileText className="w-6 h-6" />
-              </div>
-              <div className="font-bold text-sm text-slate-800 dark:text-slate-100">Word Document</div>
-              <div className="text-xs text-slate-400 mt-0.5">.doc format</div>
-            </button>
-
-            <button
-              onClick={() => handleExecuteDownload('pdf', downloadTarget)}
-              className="flex flex-col items-center justify-center p-5 rounded-2xl border-2 border-slate-200 dark:border-slate-800 hover:border-indigo-500 dark:hover:border-indigo-400 bg-slate-50 dark:bg-slate-900/50 hover:bg-indigo-50/30 dark:hover:bg-indigo-950/20 transition-all text-center group"
-            >
-              <div className="w-12 h-12 rounded-xl bg-rose-500/10 text-rose-500 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
-                <Printer className="w-6 h-6" />
-              </div>
-              <div className="font-bold text-sm text-slate-800 dark:text-slate-100">PDF / Print</div>
-              <div className="text-xs text-slate-400 mt-0.5">.pdf document</div>
-            </button>
-          </div>
-        </div>
-      </Modal>
+      {/* Off-screen Printable Document for Purchases & Purchase Orders */}
+      <PrintablePurchaseDocument target={printTarget} tenant={tenant} />
     </div>
   );
 }
 
-/**
- * Vendor Cash Payment — Module 6. Settling a supplier without leaving the
- * purchases screen; the money is applied to their oldest unpaid invoices
- * first, exactly as the backend does it.
- */
+/** Vendor Cash Payment (Module 6): applies to the vendor's oldest unpaid invoices first, exactly as the backend does. */
 function VendorPayablesPanel({ vendors, onPay }) {
   const payable = useMemo(
     () => vendors.filter((v) => v.outstandingPayable > 0).sort((a, b) => b.outstandingPayable - a.outstandingPayable),
@@ -937,8 +875,8 @@ function PurchaseDetailModal({ purchase, vendorCredits = [], onClose, onVoid, on
       footer={
         <>
           {purchase && onDownload && (
-            <Button variant="outline" icon={Download} onClick={() => onDownload(purchase)}>
-              Download / Export
+            <Button variant="outline" icon={Printer} onClick={() => onDownload(purchase)}>
+              Print / PDF
             </Button>
           )}
           {purchase && !isVoid && onEdit && (
@@ -972,7 +910,7 @@ function PurchaseDetailModal({ purchase, vendorCredits = [], onClose, onVoid, on
               Received against purchase order {purchase.poNumber}.
             </div>
           )}
-          <div className="grid grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <Summary label="Payment status" value={<PaymentStatusBadge purchase={purchase} />} />
             <Summary label="Payment mode" value={purchase.paymentMode || '—'} />
             <Summary label="Received by" value={purchase.receivedBy || '—'} />
@@ -1099,12 +1037,7 @@ function MiniStat({ label, value }) {
 
 const resolveFileUrl = (url) => (url && url.startsWith('/') ? `${API_BASE.replace('/api/pos', '')}${url}` : url);
 
-/**
- * Attaches a vendor invoice photo/PDF, delivery challan, etc. against a
- * purchase, PO, or vendor credit. Binary lives server-side (see
- * attachment.controller.js) — this only manages the lightweight metadata
- * list already sitting on the record.
- */
+/** Attaches vendor invoice photos/PDFs etc. to a purchase, PO, or vendor credit; binary lives server-side, this manages only the metadata list. */
 function AttachmentsPanel({ refType, refId, attachments = [], onChanged, showToast }) {
   const [uploading, setUploading] = useState(false);
 
@@ -1363,7 +1296,10 @@ const blankLine = () => ({
   batchNo: '',
   mfgDate: '',
   expiryDate: '',
-  sellPrice: ''
+  sellPrice: '',
+  trackSerials: false,
+  showSerial: false,
+  serials: []
 });
 
 const r2Local = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -1374,7 +1310,7 @@ const addDaysISO = (dateStr, days) => {
 };
 
 /** Product Cell Display & Trigger Component for Purchase Invoices */
-function ProductItemCell({ row, index, onOpenPicker, onUpdateName }) {
+function ProductItemCell({ row, index, products = [], onSelectProduct, onOpenNewProduct, onUpdateName, onSwitchToCustom, onSwitchToCatalog }) {
   if (row.isCustom) {
     return (
       <div className="flex items-center gap-1.5 w-full">
@@ -1388,7 +1324,7 @@ function ProductItemCell({ row, index, onOpenPicker, onUpdateName }) {
         />
         <button
           type="button"
-          onClick={() => onOpenPicker(index)}
+          onClick={() => onSwitchToCatalog(index)}
           className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 px-2 py-1.5 rounded-xl shrink-0 hover:bg-indigo-100 transition-colors"
           title="Pick from catalog instead"
         >
@@ -1398,181 +1334,26 @@ function ProductItemCell({ row, index, onOpenPicker, onUpdateName }) {
     );
   }
 
-  if (!row.name) {
-    return (
-      <button
-        type="button"
-        onClick={() => onOpenPicker(index)}
-        className="w-full py-2 px-3 rounded-xl border border-dashed border-indigo-400/60 bg-indigo-50/40 dark:bg-indigo-950/20 text-indigo-600 dark:text-indigo-400 text-xs font-bold hover:bg-indigo-50 dark:hover:bg-indigo-950/40 flex items-center justify-between transition-all"
-      >
-        <span className="flex items-center gap-1.5">
-          <Search className="w-3.5 h-3.5 opacity-80" /> Click to Select Product…
-        </span>
-        <ChevronDown className="w-3.5 h-3.5 opacity-60" />
-      </button>
-    );
-  }
-
   return (
-    <div
-      onClick={() => onOpenPicker(index)}
-      className="p-1.5 px-2.5 rounded-xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/50 hover:bg-[color:var(--bg-subtle)] cursor-pointer flex items-center justify-between gap-2 group transition-colors"
-      title="Click to change product"
+    <Select
+      value={row.productId || ''}
+      onChange={(e) => {
+        const val = e.target.value;
+        if (val === '__new__') return onOpenNewProduct(index);
+        if (val === '__custom__') return onSwitchToCustom(index);
+        const prod = products.find((p) => p.id === val);
+        if (prod) onSelectProduct(index, prod);
+      }}
     >
-      <div className="min-w-0 pr-1">
-        <div className="font-bold text-xs text-[color:var(--text-primary)] truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400">
-          {row.name}
-        </div>
-        {row.barcode && (
-          <div className="text-[10px] text-[color:var(--text-muted)] font-mono">{row.barcode}</div>
-        )}
-      </div>
-      <div className="flex items-center gap-1 shrink-0 text-[10.5px] font-bold text-indigo-600 dark:text-indigo-400 opacity-80 group-hover:opacity-100">
-        <span>Change</span>
-        <Edit3 className="w-3 h-3" />
-      </div>
-    </div>
-  );
-}
-
-/** Search-as-you-type product picker for purchase line items */
-function PurchaseProductPickerModal({ open, onClose, products = [], onSelectProduct, onAddNew }) {
-  const [search, setSearch] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState('ALL');
-
-  useEffect(() => {
-    if (open) {
-      setSearch('');
-      setCategoryFilter('ALL');
-    }
-  }, [open]);
-
-  const categories = useMemo(() => {
-    const cats = new Set();
-    (products || []).forEach((p) => {
-      if (p.category) cats.add(p.category);
-    });
-    return Array.from(cats);
-  }, [products]);
-
-  const filteredProducts = useMemo(() => {
-    const q = search.toLowerCase().trim();
-    return (products || []).filter((p) => {
-      if (categoryFilter !== 'ALL' && p.category !== categoryFilter) return false;
-      if (!q) return true;
-      return (
-        (p.name && p.name.toLowerCase().includes(q)) ||
-        (p.barcode && String(p.barcode).toLowerCase().includes(q)) ||
-        (p.hsn && String(p.hsn).toLowerCase().includes(q)) ||
-        (p.category && p.category.toLowerCase().includes(q))
-      );
-    });
-  }, [products, search, categoryFilter]);
-
-  if (!open) return null;
-
-  return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      title="Select Product"
-      subtitle={`Choose from ${products.length} catalog products, or add a new one for this purchase.`}
-      icon={Boxes}
-      size="xl"
-      footer={
-        <div className="flex items-center justify-between w-full">
-          <button
-            type="button"
-            onClick={() => {
-              onAddNew();
-              onClose();
-            }}
-            className="text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:underline"
-          >
-            + Add new product (not in catalogue)
-          </button>
-          <Button onClick={onClose}>Close</Button>
-        </div>
-      }
-    >
-      <div className="space-y-3">
-        <div className="flex flex-col sm:flex-row items-center gap-2">
-          <div className="relative w-full sm:w-[60%]">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[color:var(--text-muted)]" />
-            <input
-              type="text"
-              placeholder="Search by product name, barcode, HSN, category…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="field-input text-xs pl-8 pr-8 w-full rounded-xl"
-              autoFocus
-            />
-            {search && (
-              <button
-                type="button"
-                onClick={() => setSearch('')}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-
-          {categories.length > 0 && (
-            <select
-              value={categoryFilter}
-              onChange={(e) => setCategoryFilter(e.target.value)}
-              className="field-input text-xs py-2 px-3 rounded-xl font-semibold cursor-pointer w-full sm:w-[30%]"
-            >
-              <option value="ALL">All Categories</option>
-              {categories.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-
-        <div className="max-h-80 overflow-y-auto rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-surface)] divide-y divide-[color:var(--border-subtle)]">
-          {filteredProducts.length === 0 ? (
-            <div className="p-8 text-center space-y-2">
-              <div className="text-xs font-bold text-[color:var(--text-secondary)]">No products match your search</div>
-              <div className="text-[11px] text-[color:var(--text-muted)]">
-                Try another keyword, or add this as a new product below.
-              </div>
-            </div>
-          ) : (
-            filteredProducts.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => {
-                  onSelectProduct(p);
-                  onClose();
-                }}
-                className="w-full flex items-center justify-between gap-3 p-3 text-left hover:bg-[color:var(--bg-subtle)] transition-colors"
-              >
-                <div className="min-w-0">
-                  <div className="text-xs font-bold text-[color:var(--text-primary)] truncate">{p.name}</div>
-                  <div className="text-[10.5px] text-[color:var(--text-muted)]">
-                    {p.unit || 'pcs'}
-                    {p.hsn ? ` · HSN ${p.hsn}` : ''}
-                    {p.category ? ` · ${p.category}` : ''}
-                  </div>
-                </div>
-                <div className="shrink-0 text-right">
-                  <div className="text-xs font-mono font-bold text-[color:var(--text-primary)]">
-                    {money(p.purchasePrice ?? p.price ?? 0)}
-                  </div>
-                  <div className="text-[10px] text-[color:var(--text-muted)]">Stock {p.stock ?? 0}</div>
-                </div>
-              </button>
-            ))
-          )}
-        </div>
-      </div>
-    </Modal>
+      <option value="">— Select Product —</option>
+      <option value="__new__">+ Create New Product…</option>
+      <option value="__custom__">+ Custom Item / Description…</option>
+      {products.map((p) => (
+        <option key={p.id} value={p.id}>
+          {p.name}{p.sku ? ` (SKU: ${p.sku})` : ''}
+        </option>
+      ))}
+    </Select>
   );
 }
 
@@ -1593,7 +1374,6 @@ function NewPurchaseModal({
   poContext = null
 }) {
   const [loading, setLoading] = useState(false);
-  const [activePickerIndex, setActivePickerIndex] = useState(null);
   const [newProductLineIndex, setNewProductLineIndex] = useState(null);
   // showVendorForm opens the real "New Vendor" form from Parties when
   // "+ Create New Vendor…" is picked in the dropdown.
@@ -1682,7 +1462,7 @@ function NewPurchaseModal({
         setVendorName(poContext.vendorName || '');
         setBuyerOrderNo(poContext.poNumber || '');
         setBuyerOrderDate(poContext.date ? String(poContext.date).slice(0, 10) : todayISO());
-        
+
         const matchedVendor = vendors.find((v) => v.id === poContext.vendorId || v.name === poContext.vendorName);
         if (matchedVendor) {
           setVendorPhone(matchedVendor.phone || '');
@@ -1800,12 +1580,7 @@ function NewPurchaseModal({
         discount,
         total,
         isCustom: !prod.id,
-        // Batch entry only ever applies to a product that's already batch-
-        // tracked in the catalog (product.trackBatches) — a store-wide
-        // "batch tracking enabled" setting used to auto-show this drawer for
-        // every product too, but the backend only ever creates batches when
-        // product.trackBatches is true, so any batch/expiry typed here for a
-        // non-tracked product was silently discarded on save.
+        // Only applies when the product itself is batch-tracked — the backend silently discards batch/expiry data otherwise.
         trackBatches: Boolean(prod.trackBatches),
         showBatch: Boolean(prod.trackBatches),
         batches: [
@@ -1821,7 +1596,17 @@ function NewPurchaseModal({
         batchNo: '',
         mfgDate: '',
         expiryDate: '',
-        sellPrice: prod.price ?? ''
+        sellPrice: prod.price ?? '',
+        // Mirrors the batch guard above; every unit received needs its own serial row, so the drawer starts with exactly `qty` blanks.
+        trackSerials: Boolean(prod.trackSerials),
+        showSerial: Boolean(prod.trackSerials),
+        serials: Boolean(prod.trackSerials)
+          ? Array.from({ length: Math.max(1, Math.round(qty)) }, () => ({
+              id: `sr_${Date.now()}_${Math.floor(Math.random() * 1000000)}`,
+              serialNo: '',
+              imei: ''
+            }))
+          : []
       };
 
       const hasEmptyRowBelow = next.some((r, i) => i > index && (!r.name || !r.name.trim()));
@@ -1849,6 +1634,22 @@ function NewPurchaseModal({
 
       if (field === 'qty' && Array.isArray(updated.batches) && updated.batches.length === 1) {
         updated.batches = [{ ...updated.batches[0], qty }];
+      }
+      if (field === 'qty' && (updated.trackSerials || updated.showSerial)) {
+        const wholeQty = Math.max(0, Math.round(qty));
+        const curSerials = Array.isArray(updated.serials) ? updated.serials : [];
+        if (wholeQty > curSerials.length) {
+          updated.serials = [
+            ...curSerials,
+            ...Array.from({ length: wholeQty - curSerials.length }, () => ({
+              id: `sr_${Date.now()}_${Math.floor(Math.random() * 1000000)}`,
+              serialNo: '',
+              imei: ''
+            }))
+          ];
+        } else if (wholeQty < curSerials.length) {
+          updated.serials = curSerials.slice(0, Math.max(wholeQty, 0));
+        }
       }
       next[index] = updated;
       return next;
@@ -1951,6 +1752,72 @@ function NewPurchaseModal({
     });
   };
 
+  // Unlike batches, a serial row is always exactly 1 unit, so adding/removing a row moves qty in lockstep instead of its own qty field.
+  const addSerialToLine = (lineIdx) => {
+    setItems((prev) => {
+      const next = [...prev];
+      const curItem = next[lineIdx];
+      const curSerials = Array.isArray(curItem.serials) ? curItem.serials : [];
+      const updatedSerials = [
+        ...curSerials,
+        { id: `sr_${Date.now()}_${Math.floor(Math.random() * 1000000)}`, serialNo: '', imei: '' }
+      ];
+      const newQty = updatedSerials.length;
+      const rate = Number(curItem.rate) || 0;
+      const taxRate = Number(curItem.taxRate) || 0;
+      const discount = Number(curItem.discount) || 0;
+      const sub = newQty * rate;
+      const taxAmt = (sub * taxRate) / 100;
+      const total = Math.max(0, Math.round((sub + taxAmt - discount) * 100) / 100);
+
+      next[lineIdx] = {
+        ...curItem,
+        qty: newQty,
+        total,
+        trackSerials: true,
+        showSerial: true,
+        serials: updatedSerials
+      };
+      return next;
+    });
+  };
+
+  const updateSerialInLine = (lineIdx, serialIdx, field, value) => {
+    setItems((prev) => {
+      const next = [...prev];
+      const curItem = next[lineIdx];
+      const curSerials = Array.isArray(curItem.serials) ? [...curItem.serials] : [];
+      curSerials[serialIdx] = { ...curSerials[serialIdx], [field]: value };
+      next[lineIdx] = { ...curItem, serials: curSerials, trackSerials: true };
+      return next;
+    });
+  };
+
+  const removeSerialFromLine = (lineIdx, serialIdx) => {
+    setItems((prev) => {
+      const next = [...prev];
+      const curItem = next[lineIdx];
+      const curSerials = (curItem.serials || []).filter((_, i) => i !== serialIdx);
+      if (curSerials.length === 0) return next;
+
+      const newQty = curSerials.length;
+      const rate = Number(curItem.rate) || 0;
+      const taxRate = Number(curItem.taxRate) || 0;
+      const discount = Number(curItem.discount) || 0;
+      const sub = newQty * rate;
+      const taxAmt = (sub * taxRate) / 100;
+      const total = Math.max(0, Math.round((sub + taxAmt - discount) * 100) / 100);
+
+      next[lineIdx] = {
+        ...curItem,
+        qty: newQty,
+        total,
+        serials: curSerials
+      };
+      return next;
+    });
+  };
+
   const switchLineUnit = (index, line, newUnit) => {
     const product = products.find((pr) => pr.id === line.productId);
     if (!product) {
@@ -1961,7 +1828,7 @@ function NewPurchaseModal({
     const opt = options.find((o) => o.unit === newUnit);
     const baseCost = Number(product.purchasePrice) || 0;
     const newRate = opt && baseCost ? r2Local(baseCost * Number(opt.factor || 1)) : line.rate;
-    
+
     setItems((prev) => {
       const next = [...prev];
       const updated = { ...next[index], unit: newUnit, rate: newRate };
@@ -2102,6 +1969,7 @@ function NewPurchaseModal({
         items: validItems.map((l) => {
           const batches = Array.isArray(l.batches) && l.batches.length > 0 ? l.batches : [];
           const hasBatch = Boolean(l.trackBatches || l.showBatch || batches.length > 0 || l.batchNo || l.expiryDate || l.mfgDate);
+          const hasSerials = Boolean(l.trackSerials || l.showSerial) && Array.isArray(l.serials) && l.serials.length > 0;
           return {
             productId: l.productId || null,
             name: l.name,
@@ -2125,7 +1993,10 @@ function NewPurchaseModal({
             batchNo: batches[0]?.batchNo || (hasBatch ? l.batchNo || '' : undefined),
             mfgDate: batches[0]?.mfgDate || (hasBatch ? l.mfgDate || '' : undefined),
             expiryDate: batches[0]?.expiryDate || (hasBatch ? l.expiryDate || '' : undefined),
-            sellPrice: batches[0]?.sellPrice || (hasBatch ? l.sellPrice || '' : undefined)
+            sellPrice: batches[0]?.sellPrice || (hasBatch ? l.sellPrice || '' : undefined),
+            serials: hasSerials
+              ? l.serials.map((s) => ({ serialNo: s.serialNo || '', imei: s.imei || '' }))
+              : undefined
           };
         }),
         additionalCharges: charges
@@ -2195,11 +2066,23 @@ function NewPurchaseModal({
                   >
                     <option value="">— Select a Vendor —</option>
                     <option value="__new__">+ Create New Vendor…</option>
-                    {allVendors.map((v) => (
-                      <option key={v.id} value={v.id}>
-                        {v.name} {Number(v.outstandingPayable) > 0 ? `(Payable: ${money(v.outstandingPayable)})` : ''}
-                      </option>
-                    ))}
+                    {allVendors.map((v) => {
+                      const out = Number(v.outstandingPayable || 0);
+                      const adv = Number(v.advancePaid || 0);
+                      const op = Number(v.openingBalance || 0);
+                      const label = out > 0
+                        ? `(Due: ${money(out)})`
+                        : adv > 0
+                        ? `(Advance Paid: ${money(adv)})`
+                        : op > 0
+                        ? `(All Dues Paid · Opening: ${money(op)})`
+                        : '(All Dues Paid)';
+                      return (
+                        <option key={v.id} value={v.id}>
+                          {v.name} {label}
+                        </option>
+                      );
+                    })}
                   </Select>
                 )}
               </Field>
@@ -2211,6 +2094,62 @@ function NewPurchaseModal({
                   placeholder="Contact number"
                 />
               </Field>
+
+              {/* Vendor Info & Status Strip */}
+              {(() => {
+                const ven = allVendors.find((v) => v.id === selectedVendorId) || (poContext?.vendorId ? allVendors.find((v) => v.id === poContext.vendorId) : null);
+                if (!ven) return null;
+                const out = Number(ven.outstandingPayable || 0);
+                const op = Number(ven.openingBalance || 0);
+                const adv = Number(ven.advancePaid || 0);
+                return (
+                  <div className="md:col-span-3 -mt-1 p-2.5 px-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)]/70 flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-bold text-[color:var(--text-primary)] flex items-center gap-1.5">
+                        <Truck className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                        {ven.name}
+                      </span>
+                      {op > 0 && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white dark:bg-slate-900 text-[11px] font-semibold text-[color:var(--text-secondary)] border border-[color:var(--border-subtle)]" title="Initial 1-time opening balance recorded at vendor creation">
+                          <span className="text-[color:var(--text-muted)]">Opening Balance:</span>
+                          <span className="font-mono font-bold">{money(op)}</span>
+                        </span>
+                      )}
+                      {ven.gstin && (
+                        <span className="text-[11px] font-mono text-[color:var(--text-muted)]">
+                          GSTIN: {ven.gstin}
+                        </span>
+                      )}
+                    </div>
+                    <div>
+                      {out > 0 ? (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 px-2.5 py-1 rounded-lg border border-rose-200 dark:border-rose-900/60 font-mono">
+                          <span>Current Outstanding Due:</span>
+                          <span>{money(out)}</span>
+                        </span>
+                      ) : adv > 0 ? (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-700 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 px-2.5 py-1 rounded-lg border border-indigo-200 dark:border-indigo-900/60 font-mono">
+                          <span>Advance Credit Available:</span>
+                          <span>{money(adv)}</span>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 px-2.5 py-1 rounded-lg border border-emerald-200 dark:border-emerald-900/60">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>All Dues Paid in Full</span>
+                        </span>
+                      )}
+                    </div>
+                    {adv > 0 && (
+                      <div className="md:col-span-3 w-full text-[10.5px] text-indigo-700/90 dark:text-indigo-300/80 flex items-center gap-1.5 pt-1 border-t border-indigo-100 dark:border-indigo-900/40">
+                        <CheckCircle2 className="w-3 h-3 shrink-0" />
+                        <span>
+                          This advance is held on the vendor's own ledger account — it's netted automatically against whatever this purchase leaves unpaid, no separate step needed. Net payable after this purchase: {money(Math.max(0, totals.total - adv))}.
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -2519,8 +2458,18 @@ function NewPurchaseModal({
                             <ProductItemCell
                               row={item}
                               index={idx}
-                              onOpenPicker={(i) => setActivePickerIndex(i)}
+                              products={products}
+                              onSelectProduct={handleProductSelect}
+                              onOpenNewProduct={(i) => setNewProductLineIndex(i)}
                               onUpdateName={(i, name) => handleItemChange(i, 'name', name)}
+                              onSwitchToCustom={(i) => {
+                                handleItemChange(i, 'isCustom', true);
+                                handleItemChange(i, 'productId', '');
+                              }}
+                              onSwitchToCatalog={(i) => {
+                                handleItemChange(i, 'isCustom', false);
+                                handleItemChange(i, 'name', '');
+                              }}
                             />
                             {/* Batch entry is only ever offered for a product that's
                                 already batch-tracked in the catalog — the backend
@@ -2563,6 +2512,43 @@ function NewPurchaseModal({
                                     : item.batchNo
                                     ? `Batch #${item.batchNo}`
                                     : (item.showBatch || item.trackBatches ? 'Hide Batch Details' : 'Add Batch / Expiry')}
+                                </button>
+                              </div>
+                            )}
+                            {/* Serial entry is only ever offered for a product that's
+                                already serial-tracked in the catalog — mirrors the
+                                batch-entry guard above. A line built from a PO doesn't
+                                pre-fill serial rows, so this is how those lines open
+                                the drawer to enter them. */}
+                            {Boolean(product?.trackSerials) && (
+                              <div className="mt-1 flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const nextVal = !(item.showSerial || item.trackSerials);
+                                    handleItemChange(idx, 'showSerial', nextVal);
+                                    if (nextVal && (!item.serials || item.serials.length === 0)) {
+                                      handleItemChange(
+                                        idx,
+                                        'serials',
+                                        Array.from({ length: Math.max(1, Math.round(Number(item.qty) || 1)) }, () => ({
+                                          id: `sr_${Date.now()}_${Math.floor(Math.random() * 1000000)}`,
+                                          serialNo: '',
+                                          imei: ''
+                                        }))
+                                      );
+                                    }
+                                  }}
+                                  className={`text-[10px] font-bold px-2 py-0.5 rounded-lg border transition-all inline-flex items-center gap-1 ${
+                                    (item.serials && item.serials.length > 0)
+                                      ? 'bg-indigo-100 dark:bg-indigo-950/60 text-indigo-800 dark:text-indigo-300 border-indigo-300 dark:border-indigo-700'
+                                      : 'bg-white dark:bg-slate-900 text-slate-500 hover:text-indigo-600 border-slate-200 dark:border-slate-800'
+                                  }`}
+                                >
+                                  <Tag className="w-3 h-3 text-indigo-600" />
+                                  {item.serials && item.serials.length > 0
+                                    ? `${item.serials.length} Serial${item.serials.length === 1 ? '' : 's'}`
+                                    : (item.showSerial || item.trackSerials ? 'Hide Serial Entry' : 'Add Serial Numbers')}
                                 </button>
                               </div>
                             )}
@@ -2785,6 +2771,78 @@ function NewPurchaseModal({
                             </td>
                           </tr>
                         )}
+
+                        {/* Serial Number Inward Drawer */}
+                        {(item.trackSerials || item.showSerial) && (
+                          <tr>
+                            <td colSpan={10} className="!pt-0 !pb-3 bg-indigo-50/20 dark:bg-indigo-950/10">
+                              <div className="rounded-xl border border-indigo-200 dark:border-indigo-800/60 bg-indigo-50/50 dark:bg-indigo-950/30 p-3 space-y-3">
+                                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-indigo-200/60 dark:border-indigo-800/40 pb-2">
+                                  <div className="space-y-0.5">
+                                    <span className="text-[11px] font-extrabold uppercase tracking-wider text-indigo-800 dark:text-indigo-300 flex items-center gap-1.5">
+                                      <Tag className="w-3.5 h-3.5 text-indigo-600" />
+                                      Serial Numbers Inward for {item.name || 'this item'} ({(item.serials || []).length} {(item.serials || []).length === 1 ? 'unit' : 'units'})
+                                    </span>
+                                    <div className="text-[10.5px] text-indigo-700/80 dark:text-indigo-400/80">
+                                      Each unit needs its own serial — add or remove rows to match quantity received.
+                                    </div>
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => addSerialToLine(idx)}
+                                    className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400 bg-white dark:bg-slate-900 border border-indigo-200 dark:border-indigo-800 px-2.5 py-1 rounded-lg hover:bg-indigo-50 dark:hover:bg-indigo-950/50 transition-colors flex items-center gap-1 shadow-xs"
+                                  >
+                                    <Plus className="w-3 h-3" />
+                                    <span>+ Add Another Serial</span>
+                                  </button>
+                                </div>
+
+                                <div className="space-y-2">
+                                  {(item.serials && item.serials.length > 0 ? item.serials : [{ id: 'sr_0', serialNo: '', imei: '' }]).map((serial, sIdx) => (
+                                    <div
+                                      key={serial.id || sIdx}
+                                      className="flex flex-wrap items-end gap-2.5 p-2.5 rounded-xl border border-indigo-200/80 dark:border-indigo-800/60 bg-white dark:bg-slate-900 shadow-xs"
+                                    >
+                                      <div className="text-[11px] font-mono font-bold text-indigo-700 dark:text-indigo-400 self-center px-1">
+                                        Unit #{sIdx + 1}
+                                      </div>
+
+                                      <Field label="Serial No. / IMEI" className="min-w-[160px] flex-1">
+                                        <Input
+                                          value={serial.serialNo}
+                                          onChange={(e) => updateSerialInLine(idx, sIdx, 'serialNo', e.target.value)}
+                                          placeholder="Auto (1, 2, …) if blank"
+                                          className="text-xs font-mono"
+                                        />
+                                      </Field>
+
+                                      <Field label="IMEI (optional)" className="min-w-[140px] flex-1">
+                                        <Input
+                                          value={serial.imei}
+                                          onChange={(e) => updateSerialInLine(idx, sIdx, 'imei', e.target.value)}
+                                          placeholder="IMEI number"
+                                          className="text-xs font-mono"
+                                        />
+                                      </Field>
+
+                                      {(item.serials || []).length > 1 && (
+                                        <button
+                                          type="button"
+                                          onClick={() => removeSerialFromLine(idx, sIdx)}
+                                          className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/60 rounded-lg transition-colors self-center mb-0.5"
+                                          title="Remove this serial"
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
                       </React.Fragment>
                     );
                   })}
@@ -2810,7 +2868,7 @@ function NewPurchaseModal({
             </div>
 
             {charges.length > 0 && (
-              <div className="overflow-hidden rounded-xl border border-[color:var(--border)] bg-[color:var(--bg-surface)]">
+              <div className="overflow-x-auto rounded-xl border border-[color:var(--border)] bg-[color:var(--bg-surface)]">
                 <table className="w-full text-left text-xs border-collapse">
                   <thead>
                     <tr className="border-b border-[color:var(--border)] bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-secondary)] text-[10px] uppercase">
@@ -2965,20 +3023,6 @@ function NewPurchaseModal({
         </form>
       </Modal>
 
-      <PurchaseProductPickerModal
-        open={activePickerIndex !== null}
-        onClose={() => setActivePickerIndex(null)}
-        products={products}
-        onSelectProduct={(p) => {
-          if (activePickerIndex !== null) handleProductSelect(activePickerIndex, p);
-        }}
-        onAddNew={() => {
-          const idx = activePickerIndex;
-          setActivePickerIndex(null);
-          setNewProductLineIndex(idx !== null ? idx : items.length - 1);
-        }}
-      />
-
       <ProductFormModal
         open={newProductLineIndex !== null}
         editing={null}
@@ -3018,9 +3062,7 @@ function NewPurchaseModal({
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Purchase Orders
- * ------------------------------------------------------------------ */
+/* ------------------------------- Purchase Orders ------------------------------- */
 
 function POStatusBadge({ po }) {
   const map = {
@@ -3072,7 +3114,6 @@ function PurchaseOrderModal({
   const [notes, setNotes] = useState('');
   const [lines, setLines] = useState([blankPOLine()]);
   const [saving, setSaving] = useState(false);
-  const [activePickerIndex, setActivePickerIndex] = useState(null);
   const [newProductLineIndex, setNewProductLineIndex] = useState(null);
   // showVendorForm opens the real "New Vendor" form from Parties when
   // "+ Create New Vendor…" is picked in the dropdown.
@@ -3304,11 +3345,23 @@ function PurchaseOrderModal({
                 >
                   <option value="">— Select a Vendor —</option>
                   <option value="__new__">+ Create New Vendor…</option>
-                  {allVendors.map((v) => (
-                    <option key={v.id} value={v.id}>
-                      {v.name} {Number(v.outstandingPayable) > 0 ? `(Payable: ${money(v.outstandingPayable)})` : ''}
-                    </option>
-                  ))}
+                  {allVendors.map((v) => {
+                    const out = Number(v.outstandingPayable || 0);
+                    const adv = Number(v.advancePaid || 0);
+                    const op = Number(v.openingBalance || 0);
+                    const label = out > 0
+                      ? `(Due: ${money(out)})`
+                      : adv > 0
+                      ? `(Advance Paid: ${money(adv)})`
+                      : op > 0
+                      ? `(All Dues Paid · Opening: ${money(op)})`
+                      : '(All Dues Paid)';
+                    return (
+                      <option key={v.id} value={v.id}>
+                        {v.name} {label}
+                      </option>
+                    );
+                  })}
                 </Select>
               </Field>
 
@@ -3319,6 +3372,54 @@ function PurchaseOrderModal({
                   placeholder="Contact phone number"
                 />
               </Field>
+
+              {/* Vendor Info & Status Strip */}
+              {(() => {
+                const ven = allVendors.find((v) => v.id === selectedVendorId);
+                if (!ven) return null;
+                const out = Number(ven.outstandingPayable || 0);
+                const op = Number(ven.openingBalance || 0);
+                const adv = Number(ven.advancePaid || 0);
+                return (
+                  <div className="md:col-span-3 -mt-1 p-2.5 px-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)]/70 flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-bold text-[color:var(--text-primary)] flex items-center gap-1.5">
+                        <Truck className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                        {ven.name}
+                      </span>
+                      {op > 0 && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white dark:bg-slate-900 text-[11px] font-semibold text-[color:var(--text-secondary)] border border-[color:var(--border-subtle)]" title="Initial 1-time opening balance recorded at vendor creation">
+                          <span className="text-[color:var(--text-muted)]">Opening Balance:</span>
+                          <span className="font-mono font-bold">{money(op)}</span>
+                        </span>
+                      )}
+                      {ven.gstin && (
+                        <span className="text-[11px] font-mono text-[color:var(--text-muted)]">
+                          GSTIN: {ven.gstin}
+                        </span>
+                      )}
+                    </div>
+                    <div>
+                      {out > 0 ? (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 px-2.5 py-1 rounded-lg border border-rose-200 dark:border-rose-900/60 font-mono">
+                          <span>Current Outstanding Due:</span>
+                          <span>{money(out)}</span>
+                        </span>
+                      ) : adv > 0 ? (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-700 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 px-2.5 py-1 rounded-lg border border-indigo-200 dark:border-indigo-900/60 font-mono">
+                          <span>Advance Credit Available:</span>
+                          <span>{money(adv)}</span>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 px-2.5 py-1 rounded-lg border border-emerald-200 dark:border-emerald-900/60">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>All Dues Paid in Full</span>
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -3408,8 +3509,18 @@ function PurchaseOrderModal({
                           <ProductItemCell
                             row={line}
                             index={idx}
-                            onOpenPicker={(i) => setActivePickerIndex(i)}
+                            products={products}
+                            onSelectProduct={handleProductSelect}
+                            onOpenNewProduct={(i) => setNewProductLineIndex(i)}
                             onUpdateName={(i, name) => handleLineChange(i, 'name', name)}
+                            onSwitchToCustom={(i) => {
+                              handleLineChange(i, 'isCustom', true);
+                              handleLineChange(i, 'productId', '');
+                            }}
+                            onSwitchToCatalog={(i) => {
+                              handleLineChange(i, 'isCustom', false);
+                              handleLineChange(i, 'name', '');
+                            }}
                           />
                         </td>
 
@@ -3548,20 +3659,6 @@ function PurchaseOrderModal({
         </form>
       </Modal>
 
-      <PurchaseProductPickerModal
-        open={activePickerIndex !== null}
-        onClose={() => setActivePickerIndex(null)}
-        products={products}
-        onSelectProduct={(p) => {
-          if (activePickerIndex !== null) handleProductSelect(activePickerIndex, p);
-        }}
-        onAddNew={() => {
-          const idx = activePickerIndex;
-          setActivePickerIndex(null);
-          setNewProductLineIndex(idx !== null ? idx : lines.length - 1);
-        }}
-      />
-
       <ProductFormModal
         open={newProductLineIndex !== null}
         editing={null}
@@ -3617,8 +3714,8 @@ function PODetailModal({ po, onClose, onCancel, onReceive, onDownload }) {
       footer={
         <>
           {po && onDownload && (
-            <Button variant="outline" icon={Download} onClick={() => onDownload(po)}>
-              Download / Export
+            <Button variant="outline" icon={Printer} onClick={() => onDownload(po)}>
+              Print / PDF
             </Button>
           )}
           {canCancel && (
@@ -3637,7 +3734,7 @@ function PODetailModal({ po, onClose, onCancel, onReceive, onDownload }) {
     >
       {po && (
         <div className="space-y-3">
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <Summary label="Status" value={<POStatusBadge po={po} />} />
             <Summary label="Expected delivery" value={po.expectedDate ? fmtDate(po.expectedDate) : '—'} />
             <Summary label="Created by" value={po.createdBy || '—'} />
@@ -3692,14 +3789,13 @@ function PODetailModal({ po, onClose, onCancel, onReceive, onDownload }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Vendor Credits (Purchase Returns)
- * ------------------------------------------------------------------ */
+/* ------------------------------- Vendor Credits (Purchase Returns) ------------------------------- */
 
 const RETURN_REASONS = ['Damaged', 'Wrong Item', 'Expired', 'Quality Issue', 'Price Adjustment', 'Other'];
 
-function PurchaseReturnModal({ purchase, vendorCredits = [], showToast, onClose, onSaved }) {
+function PurchaseReturnModal({ purchase, products = [], vendorCredits = [], showToast, onClose, onSaved }) {
   const [qtys, setQtys] = useState({});
+  const [selectedSerials, setSelectedSerials] = useState({});
   const [reason, setReason] = useState('Damaged');
   const [customReason, setCustomReason] = useState('');
   const [saving, setSaving] = useState(false);
@@ -3707,6 +3803,7 @@ function PurchaseReturnModal({ purchase, vendorCredits = [], showToast, onClose,
   useEffect(() => {
     if (purchase) {
       setQtys({});
+      setSelectedSerials({});
       setReason('Damaged');
       setCustomReason('');
     }
@@ -3724,19 +3821,36 @@ function PurchaseReturnModal({ purchase, vendorCredits = [], showToast, onClose,
         0
       );
 
+  // Serial-tracked lines return specific units: "returnable" is whichever serials from this line are still IN_STOCK.
   const lines = (purchase?.items || [])
     .map((line, idx) => {
       const key = `${line.productId}_${line.batchId || ''}_${idx}`;
+      if (Array.isArray(line.serialIds) && line.serialIds.length > 0) {
+        const product = products.find((p) => p.id === line.productId);
+        const returnableSerials = (product?.serials || []).filter(
+          (s) => line.serialIds.includes(s.id) && s.status === 'IN_STOCK'
+        );
+        return { ...line, key, isSerial: true, returnableSerials };
+      }
       const credited = alreadyCredited(line.productId, line.batchId);
       const max = r2Local(Number(line.qty) - credited);
       return { ...line, key, credited, max };
     })
-    .filter((l) => l.max > 0.009);
+    .filter((l) => (l.isSerial ? l.returnableSerials.length > 0 : l.max > 0.009));
 
   const setQty = (key, v) => setQtys((q) => ({ ...q, [key]: v }));
+  const toggleSerial = (key, serialId) => {
+    setSelectedSerials((prev) => {
+      const cur = new Set(prev[key] || []);
+      if (cur.has(serialId)) cur.delete(serialId);
+      else cur.add(serialId);
+      return { ...prev, [key]: cur };
+    });
+  };
 
-  const selected = lines.filter((l) => Number(qtys[l.key]) > 0);
-  const canSubmit = selected.length > 0 && selected.every((l) => Number(qtys[l.key]) <= l.max + 0.009);
+  const selected = lines.filter((l) => (l.isSerial ? (selectedSerials[l.key]?.size || 0) > 0 : Number(qtys[l.key]) > 0));
+  const canSubmit =
+    selected.length > 0 && selected.every((l) => (l.isSerial ? true : Number(qtys[l.key]) <= l.max + 0.009));
 
   const submit = async (e) => {
     e.preventDefault();
@@ -3744,7 +3858,11 @@ function PurchaseReturnModal({ purchase, vendorCredits = [], showToast, onClose,
     setSaving(true);
     try {
       const res = await api.post(`/purchases/${purchase.id}/return`, {
-        items: selected.map((l) => ({ productId: l.productId, batchId: l.batchId || undefined, qty: Number(qtys[l.key]) })),
+        items: selected.map((l) =>
+          l.isSerial
+            ? { productId: l.productId, serialIds: Array.from(selectedSerials[l.key] || []) }
+            : { productId: l.productId, batchId: l.batchId || undefined, qty: Number(qtys[l.key]) }
+        ),
         reason: reason === 'Other' ? customReason || 'Other' : reason
       });
       showToast(res.message);
@@ -3778,7 +3896,7 @@ function PurchaseReturnModal({ purchase, vendorCredits = [], showToast, onClose,
           {lines.length === 0 ? (
             <EmptyState icon={Undo2} title="Nothing left to return" hint="Every item on this invoice has already been fully returned." />
           ) : (
-            <div className="surface overflow-hidden rounded-2xl">
+            <div className="surface overflow-x-auto rounded-2xl">
               <table className="ledger-table w-full border-collapse">
                 <thead>
                   <tr>
@@ -3794,23 +3912,50 @@ function PurchaseReturnModal({ purchase, vendorCredits = [], showToast, onClose,
                       <td>
                         <div className="text-xs font-semibold">{l.name}</div>
                         {l.batchNo && <div className="text-[10px] text-[color:var(--text-muted)]">Batch {l.batchNo}</div>}
+                        {l.isSerial && <div className="text-[10px] text-[color:var(--text-muted)]">Serial-tracked</div>}
                       </td>
                       <td className="tabular text-right">
-                        {l.qty} {l.unit}
+                        {l.isSerial ? l.serialIds.length : l.qty} {l.unit}
                       </td>
                       <td className="tabular text-right font-bold">
-                        {l.max} {l.unit}
+                        {l.isSerial ? l.returnableSerials.length : l.max} {l.unit}
                       </td>
                       <td>
-                        <Input
-                          type="number"
-                          min="0"
-                          max={l.max}
-                          step="any"
-                          value={qtys[l.key] || ''}
-                          onChange={(e) => setQty(l.key, e.target.value)}
-                          className="text-right"
-                        />
+                        {l.isSerial ? (
+                          <div className="flex flex-wrap justify-end gap-1.5 max-w-[240px] ml-auto">
+                            {l.returnableSerials.map((s) => {
+                              const checked = selectedSerials[l.key]?.has(s.id);
+                              return (
+                                <label
+                                  key={s.id}
+                                  className={`text-[10.5px] font-mono font-bold px-2 py-1 rounded-lg border cursor-pointer transition-colors ${
+                                    checked
+                                      ? 'bg-indigo-600 text-white border-indigo-600'
+                                      : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:border-indigo-400'
+                                  }`}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    className="hidden"
+                                    checked={Boolean(checked)}
+                                    onChange={() => toggleSerial(l.key, s.id)}
+                                  />
+                                  {s.serialNo}
+                                </label>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <Input
+                            type="number"
+                            min="0"
+                            max={l.max}
+                            step="any"
+                            value={qtys[l.key] || ''}
+                            onChange={(e) => setQty(l.key, e.target.value)}
+                            className="text-right"
+                          />
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -3895,5 +4040,186 @@ function VendorCreditDetailModal({ vendorCredit, onClose, onVoid }) {
         </div>
       )}
     </Modal>
+  );
+}
+
+/** Printable Purchase Invoice/PO, rendered with id="printable-tax-invoice" to hook into the app's global print CSS. */
+function PrintablePurchaseDocument({ target, tenant = {} }) {
+  if (!target) return null;
+  const isPO = target.type === 'po' || Boolean(target.poNumber);
+
+  const docNumber = target.invoiceNo || target.poNumber || 'PURCHASE';
+  const docDate = target.date ? fmtDate(target.date) : fmtDate(new Date());
+  const vendorName = target.vendorName || target.vendor?.name || 'Vendor';
+  const vendorGstin = target.vendorGstin || target.vendor?.gstin || '';
+  const vendorPhone = target.vendorPhone || target.vendor?.phone || '';
+  const vendorAddress = target.vendorAddress || target.vendor?.address || '';
+  const items = target.items || [];
+  const subtotal = Number(target.subtotal || 0);
+  const tax = Number(target.tax || 0);
+  const total = Number(target.totalAmount || target.total || (subtotal + tax));
+
+  return (
+    <div
+      id="printable-tax-invoice"
+      className="hidden print:block p-8 bg-white text-slate-900 font-sans text-xs leading-normal"
+    >
+      {/* Header */}
+      <div className="flex justify-between items-start border-b-2 border-slate-800 pb-4 mb-4">
+        <div>
+          <h1 className="text-xl font-black tracking-tight text-slate-900">
+            {tenant?.name || tenant?.legalName || 'Selsolve Retail'}
+          </h1>
+          {tenant?.address && <div className="text-slate-600 mt-1">{tenant.address}</div>}
+          {(tenant?.city || tenant?.state || tenant?.pincode) && (
+            <div className="text-slate-600">
+              {[tenant.city, tenant.state, tenant.pincode].filter(Boolean).join(', ')}
+            </div>
+          )}
+          {tenant?.gstin && (
+            <div className="text-slate-700 font-semibold mt-0.5">GSTIN: {tenant.gstin}</div>
+          )}
+          {tenant?.phone && <div className="text-slate-600">Phone: {tenant.phone}</div>}
+        </div>
+        <div className="text-right">
+          <div className="text-base font-black tracking-wider uppercase text-slate-800">
+            {isPO ? 'Purchase Order' : 'Purchase Invoice'}
+          </div>
+          <div className="font-bold text-sm text-slate-900 mt-1">
+            {isPO ? `PO #: ${docNumber}` : `Inv #: ${docNumber}`}
+          </div>
+          <div className="text-slate-600 mt-0.5">Date: {docDate}</div>
+          {isPO && target.expectedDate && (
+            <div className="text-slate-600">Expected: {fmtDate(target.expectedDate)}</div>
+          )}
+          {!isPO && target.dueDate && (
+            <div className="text-slate-600">Due Date: {fmtDate(target.dueDate)}</div>
+          )}
+          {!isPO && target.voucherNo && (
+            <div className="text-slate-600">Voucher: {target.voucherNo}</div>
+          )}
+          <div className="mt-1">
+            <span className="inline-block px-2 py-0.5 text-[10px] font-bold rounded border border-slate-300 uppercase">
+              {isPO ? (target.status || 'ISSUED') : (target.paymentStatus || 'UNPAID')}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Vendor & Details */}
+      <div className="grid grid-cols-2 gap-4 p-3 bg-slate-50 border border-slate-200 rounded-lg mb-4">
+        <div>
+          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+            Vendor / Supplier
+          </div>
+          <div className="font-bold text-sm text-slate-900">{vendorName}</div>
+          {vendorAddress && <div className="text-slate-600 mt-0.5">{vendorAddress}</div>}
+          {vendorGstin && <div className="text-slate-700 font-medium">GSTIN: {vendorGstin}</div>}
+          {vendorPhone && <div className="text-slate-600">Phone: {vendorPhone}</div>}
+        </div>
+        <div className="text-right">
+          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+            Transaction Details
+          </div>
+          {!isPO && target.paymentMode && (
+            <div className="text-slate-700">Payment Mode: <span className="font-semibold">{target.paymentMode}</span></div>
+          )}
+          {!isPO && target.receivedBy && (
+            <div className="text-slate-700">Received By: <span className="font-semibold">{target.receivedBy}</span></div>
+          )}
+          {target.notes && (
+            <div className="text-slate-600 italic mt-1 text-[11px]">"{target.notes}"</div>
+          )}
+        </div>
+      </div>
+
+      {/* Items Table */}
+      <table className="w-full border-collapse border border-slate-300 text-left mb-4">
+        <thead>
+          <tr className="bg-slate-100 text-slate-800 text-[11px] font-bold uppercase">
+            <th className="border border-slate-300 px-2 py-1.5 text-center w-10">#</th>
+            <th className="border border-slate-300 px-3 py-1.5">Item & Description</th>
+            <th className="border border-slate-300 px-2 py-1.5 text-center w-20">HSN</th>
+            <th className="border border-slate-300 px-2 py-1.5 text-right w-20">Qty</th>
+            <th className="border border-slate-300 px-2 py-1.5 text-right w-24">Rate (₹)</th>
+            <th className="border border-slate-300 px-2 py-1.5 text-right w-20">Tax %</th>
+            <th className="border border-slate-300 px-3 py-1.5 text-right w-28">Amount (₹)</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-200">
+          {items.map((it, idx) => {
+            const qty = Number(it.qty || it.quantity || 1);
+            const rate = Number(it.rate || it.purchasePrice || 0);
+            const taxRate = Number(it.taxRate || 0);
+            const lineSubtotal = qty * rate;
+            const lineTax = (lineSubtotal * taxRate) / 100;
+            const lineTotal = Number(it.lineTotal || (lineSubtotal + lineTax));
+
+            return (
+              <tr key={idx} className="text-slate-800">
+                <td className="border border-slate-300 px-2 py-1.5 text-center">{idx + 1}</td>
+                <td className="border border-slate-300 px-3 py-1.5">
+                  <div className="font-semibold text-slate-900">{it.name || it.productName || 'Item'}</div>
+                  {(it.batchNo || it.expiryDate || it.serialNumber) && (
+                    <div className="text-[10px] text-slate-500 mt-0.5 space-x-2">
+                      {it.batchNo && <span>Batch: {it.batchNo}</span>}
+                      {it.expiryDate && <span>Exp: {it.expiryDate}</span>}
+                      {it.serialNumber && <span>Serial: {it.serialNumber}</span>}
+                    </div>
+                  )}
+                </td>
+                <td className="border border-slate-300 px-2 py-1.5 text-center text-slate-600">{it.hsn || '—'}</td>
+                <td className="border border-slate-300 px-2 py-1.5 text-right font-medium">{qty} {it.unit || 'pcs'}</td>
+                <td className="border border-slate-300 px-2 py-1.5 text-right tabular-nums">{rate.toFixed(2)}</td>
+                <td className="border border-slate-300 px-2 py-1.5 text-right tabular-nums">{taxRate > 0 ? `${taxRate}%` : '0%'}</td>
+                <td className="border border-slate-300 px-3 py-1.5 text-right font-bold tabular-nums">{lineTotal.toFixed(2)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+
+      {/* Totals Summary */}
+      <div className="flex justify-end mb-6">
+        <div className="w-72 bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-1.5 text-xs">
+          <div className="flex justify-between text-slate-600">
+            <span>Subtotal:</span>
+            <span className="font-semibold text-slate-800 tabular-nums">₹{subtotal.toFixed(2)}</span>
+          </div>
+          <div className="flex justify-between text-slate-600">
+            <span>GST / Tax:</span>
+            <span className="font-semibold text-slate-800 tabular-nums">₹{tax.toFixed(2)}</span>
+          </div>
+          <div className="flex justify-between text-sm font-black text-slate-900 border-t border-slate-300 pt-1.5">
+            <span>Total Amount:</span>
+            <span className="tabular-nums">₹{total.toFixed(2)}</span>
+          </div>
+          {!isPO && target.paidAmount > 0 && (
+            <div className="flex justify-between text-slate-600 pt-1">
+              <span>Amount Paid:</span>
+              <span className="font-medium text-emerald-700 tabular-nums">₹{Number(target.paidAmount).toFixed(2)}</span>
+            </div>
+          )}
+          {!isPO && (Number(target.totalAmount || 0) - Number(target.paidAmount || 0)) > 0 && (
+            <div className="flex justify-between text-rose-700 font-bold">
+              <span>Balance Due:</span>
+              <span className="tabular-nums">₹{(Number(target.totalAmount || 0) - Number(target.paidAmount || 0)).toFixed(2)}</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Footer Notes */}
+      <div className="border-t border-slate-200 pt-4 text-[10px] text-slate-500 flex justify-between items-end">
+        <div>
+          <div>This is a computer-generated document from {tenant?.name || 'Selsolve Smart POS'}.</div>
+          <div>Printed on: {new Date().toLocaleString('en-IN')}</div>
+        </div>
+        <div className="text-right">
+          <div className="h-10"></div>
+          <div className="border-t border-slate-400 pt-1 font-semibold text-slate-700">Authorised Signatory</div>
+        </div>
+      </div>
+    </div>
   );
 }

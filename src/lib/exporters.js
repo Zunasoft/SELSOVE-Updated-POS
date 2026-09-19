@@ -1,8 +1,4 @@
-/**
- * Report exporters — CSV/Excel and PDF, both produced entirely in the browser
- * so no server-side rendering dependency is introduced.
- */
-
+/** Report exporters — CSV/Excel and PDF, both produced entirely in the browser with no server-side rendering dependency. */
 const escapeCsv = (value) => {
   const s = value === null || value === undefined ? '' : String(value);
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -22,9 +18,7 @@ function download(blob, filename) {
 const stamp = () => new Date().toISOString().slice(0, 10);
 const slug = (text) => String(text).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
-/**
- * CSV with a UTF-8 BOM so Excel opens ₹ and regional product names correctly.
- */
+/** CSV with a UTF-8 BOM so Excel opens ₹ and regional product names correctly. */
 export function exportCsv({ title, columns, rows, meta = [] }) {
   const header = [
     [title],
@@ -46,11 +40,7 @@ export function exportCsv({ title, columns, rows, meta = [] }) {
   download(new Blob([`﻿${csv}`], { type: 'text/csv;charset=utf-8;' }), `${slug(title)}-${stamp()}.csv`);
 }
 
-/**
- * PDF via a print-ready document opened in a new window. Using the browser's
- * own print pipeline keeps fonts, ₹ glyphs and page breaks correct without
- * bundling a PDF engine.
- */
+/** PDF via a print-ready document in a new window — the browser's own print pipeline keeps fonts, ₹ glyphs and page breaks correct. */
 export function exportPdf({ title, company, period, columns, rows, totals = null, note }) {
   const win = window.open('', '_blank', 'width=1000,height=760');
   if (!win) return;
@@ -122,9 +112,7 @@ export function exportReport(format, payload) {
   return exportCsv(payload);
 }
 
-/**
- * Number to Indian Words Converter (e.g. ₹1,250 -> One Thousand Two Hundred Fifty Rupees Only)
- */
+/** Number to Indian Words Converter (e.g. ₹1,250 -> One Thousand Two Hundred Fifty Rupees Only). */
 export function numberToWordsINR(amount) {
   const num = Math.round(Number(amount) || 0);
   if (num === 0) return 'Zero Rupees Only';
@@ -162,9 +150,7 @@ export function numberToWordsINR(amount) {
   return (result.trim() + ' Rupees Only').replace(/\s+/g, ' ');
 }
 
-/**
- * Export Tax Invoice as a Native Microsoft Word (.doc) Document
- */
+/** Export Tax Invoice as a Native Microsoft Word (.doc) Document. */
 export function exportInvoiceToWord({ invoice = {}, settings = {}, customConfig = {}, activeTheme = 'corporate_blue' }) {
   const company = invoice?.company || settings?.company || { name: 'Selsolve Store' };
   const billing = invoice?.billing || settings?.billing || {};
@@ -198,9 +184,7 @@ export function exportInvoiceToWord({ invoice = {}, settings = {}, customConfig 
     const taxRate = Number(it.taxRate || it.gstRate || 0);
     const discount = Number(it.discount || 0);
     const lineSubtotal = qty * rate;
-    // `??`, not `||` — a fully-discounted or promo-free line legitimately has
-    // it.total === 0, and `||` would treat that falsy 0 as "missing" and
-    // silently recompute (and print) a nonzero total for it instead.
+    // `??` not `||` — a fully-discounted line legitimately has it.total === 0, which `||` would treat as "missing".
     const lineTotal = Number(it.total ?? (lineSubtotal + (lineSubtotal * taxRate) / 100 - discount));
 
     return `
@@ -398,9 +382,7 @@ export function exportInvoiceToWord({ invoice = {}, settings = {}, customConfig 
   download(new Blob(['\ufeff' + wordHtml], { type: 'application/msword;charset=utf-8;' }), `Tax-Invoice-${orderId}.doc`);
 }
 
-/**
- * Export POS Bill as a Native Microsoft Word (.doc) Document
- */
+/** Export POS Bill as a Native Microsoft Word (.doc) Document. */
 export function exportBillToWord({ receipt = {}, settings = {}, customConfig = {}, activeTheme = 'detailed_gst' }) {
   const company = receipt?.company || settings?.company || { name: 'Selsolve Retail' };
   const billing = receipt?.billing || settings?.billing || {};
@@ -485,10 +467,7 @@ export function exportBillToWord({ receipt = {}, settings = {}, customConfig = {
   download(new Blob(['\ufeff' + wordHtml], { type: 'application/msword;charset=utf-8;' }), `POS-Bill-${orderId}.doc`);
 }
 
-
-/**
- * Renders custom HTML template by interpolating live invoice/receipt data, company info, and line items.
- */
+/** Renders a custom HTML template by interpolating live invoice/receipt data, company info, and line items. */
 export function renderCustomDocumentHtml(templateHtml, { invoice = {}, receipt = {}, company = {}, billing = {}, cfg = {} }) {
   if (!templateHtml) return '';
 
@@ -590,11 +569,7 @@ export function renderCustomDocumentHtml(templateHtml, { invoice = {}, receipt =
   return html;
 }
 
-/**
- * Universal Document Template Reader & Parser
- * Robustly parses .docx, .doc, .pdf, .json, .html, and .txt files,
- * extracting template schemas, tables, custom labels, and styling into live editor templates.
- */
+/** Parses .docx/.doc/.pdf/.json/.html/.txt files, extracting template schemas, tables, labels and styling into live editor templates. */
 export async function readDocumentTemplateFile(file) {
   if (!file) throw new Error('No file provided');
 
@@ -837,9 +812,7 @@ export async function readDocumentTemplateFile(file) {
   }
 }
 
-/**
- * Export Purchase Invoice to Word (.doc)
- */
+/** Export Purchase Invoice to Word (.doc). */
 export function exportPurchaseToWord({ purchase, company = {} }) {
   if (!purchase) return;
 
@@ -978,9 +951,7 @@ export function exportPurchaseToWord({ purchase, company = {} }) {
   URL.revokeObjectURL(url);
 }
 
-/**
- * Export Purchase Order to Word (.doc)
- */
+/** Export Purchase Order to Word (.doc). */
 export function exportPurchaseOrderToWord({ po, company = {} }) {
   if (!po) return;
 
@@ -1084,7 +1055,4 @@ export function exportPurchaseOrderToWord({ po, company = {} }) {
   a.click();
   URL.revokeObjectURL(url);
 }
-
-
-
 

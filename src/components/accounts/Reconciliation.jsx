@@ -7,11 +7,7 @@ import {
   Badge, Money, Spinner, EmptyState, DataTable, DateRange
 } from '../../lib/ui';
 
-/**
- * Bank reconciliation. The operator ticks the entries that actually appear on
- * the bank statement; the cleared balance is recomputed locally on every tick
- * so the difference moves live rather than only after a save.
- */
+/** Cleared balance recomputes locally on every tick so the difference moves live rather than only after a save. */
 export default function Reconciliation({ showToast }) {
   const [accounts, setAccounts] = useState([]);
   const [accountId, setAccountId] = useState('');

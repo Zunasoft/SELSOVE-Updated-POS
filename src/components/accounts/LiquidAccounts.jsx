@@ -10,11 +10,7 @@ import {
   Badge, Money, Spinner, EmptyState, DataTable, DateRange
 } from '../../lib/ui';
 
-/**
- * Bank and cash ledgers. Both are "liquid" accounts that behave identically in
- * the journal, so one component serves both with the bank-specific detail
- * fields and the cash book switched on by `kind`.
- */
+/** Bank and cash ledgers behave identically in the journal, so one component serves both, switched by `kind`. */
 export default function LiquidAccounts({ kind, showToast }) {
   const isBank = kind === 'BANK';
   const [data, setData] = useState(null);
@@ -173,7 +169,7 @@ export default function LiquidAccounts({ kind, showToast }) {
         <div className="space-y-2">
           <SectionHeader eyebrow="Last 30 days" title="Cash Book" icon={CalendarDays} />
           <Panel padded={false}>
-            <div className="max-h-[52vh] overflow-y-auto">
+            <div className="max-h-[52vh] overflow-auto">
               <table className="ledger-table w-full">
                 <thead>
                   <tr>
@@ -433,7 +429,7 @@ function LedgerModal({ account, onClose, showToast }) {
           <Spinner />
         ) : (
           <>
-            <div className="grid grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               <Summary label="Opening" value={ledger.opening} />
               <Summary label="Total In" value={ledger.totalDebit} />
               <Summary label="Total Out" value={ledger.totalCredit} />

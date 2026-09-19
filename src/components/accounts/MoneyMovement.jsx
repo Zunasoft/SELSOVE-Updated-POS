@@ -32,10 +32,7 @@ const CONFIG = {
   }
 };
 
-/**
- * Receipts and payments are the same shape of screen from opposite sides of the
- * ledger, so one component drives both via CONFIG rather than duplicating markup.
- */
+/** Receipts and payments are the same shape of screen from opposite sides of the ledger, so one component drives both via CONFIG. */
 export default function MoneyMovement({ mode, showToast }) {
   const cfg = CONFIG[mode];
 

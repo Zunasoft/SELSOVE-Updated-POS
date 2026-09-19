@@ -34,8 +34,7 @@ const TABS = [
   { id: 'settings', label: 'Settings', short: 'Settings', icon: SettingsIcon }
 ];
 
-/** Maps a nav tab to the plan feature that gates it. Tabs absent from this
- * map (Settings) are always shown — a shop must always be able to reach it. */
+/** Maps a nav tab to the plan feature that gates it; tabs absent here (Settings) are always shown. */
 const TAB_FEATURE_MAP = {
   dashboard: 'dashboard',
   pos: 'billing',
@@ -63,11 +62,7 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [features, setFeatures] = useState(null);
 
-  // Stable identity is load-bearing: this is passed to every screen and several
-  // of them put it in a useEffect/useCallback dependency array. A fresh function
-  // reference on every App render (toast display, dark-mode toggle, tab clicks…)
-  // used to re-fire those effects and re-trigger full data reloads on the active
-  // screen — visible as a loading-spinner flash / "buffering" on almost any click.
+  // Stable identity is load-bearing: several screens put this in a dependency array, so a fresh reference re-triggered reloads on any click.
   const showToast = useCallback((msg, type = 'success') => {
     setToast({ msg, type, id: Date.now() });
     setTimeout(() => setToast(null), 4000);
@@ -223,9 +218,7 @@ export default function App() {
     if (tenant && token) fetchStoreData();
   }, [tenant, token]);
 
-  // Plan-based feature gating: hide tabs the shop's plan does not include.
-  // Fail open on error — never lock a shop out of its own POS because one
-  // request failed.
+  // Plan-based feature gating; fails open on error so a shop is never locked out of its own POS because one request failed.
   useEffect(() => {
     if (!tenant || !token) return;
     api

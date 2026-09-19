@@ -16,11 +16,7 @@ const TYPE_LABEL = {
   EXPENSE: 'Expenses'
 };
 
-/**
- * Lets a shop entering Selsolve mid-year key in its existing balances. Every
- * row posts against Opening Balance Equity, a suspense account that should net
- * to zero once the batch is complete — that's the signal the books are ready.
- */
+/** Every row posts against Opening Balance Equity, a suspense account that should net to zero once the batch is complete. */
 export default function OpeningBalances({ showToast }) {
   const [accounts, setAccounts] = useState([]);
   const [vouchers, setVouchers] = useState([]);

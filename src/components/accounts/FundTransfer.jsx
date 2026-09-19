@@ -7,11 +7,7 @@ import {
   Badge, Money, Spinner, EmptyState, DataTable
 } from '../../lib/ui';
 
-/**
- * Fund transfer (contra voucher) — moving the business's own money between its
- * cash and bank ledgers. This never touches income or expenses; only bank
- * charges, if any, land in the P&L.
- */
+/** Fund transfer (contra voucher): moves money between cash/bank ledgers, never touching income or expenses (except bank charges). */
 export default function FundTransfer({ showToast }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -107,13 +103,18 @@ export default function FundTransfer({ showToast }) {
                 <option value="">— Select account —</option>
                 {accounts.map((a) => (
                   <option key={a.id} value={a.id}>
-                    {a.name} · {money(a.balance, { decimals: false })}
+                    {a.kind === 'CASH' ? `Counter (${a.name})` : `Company · ${a.name}`} · {money(a.balance, { decimals: false })}
                   </option>
                 ))}
               </Select>
             </Field>
             {from && (
               <Projection label="Balance after transfer" current={from.balance} next={from.balance - debited} />
+            )}
+            {from?.kind === 'CASH' && (
+              <div className="mt-1 text-[10.5px] font-semibold text-amber-600 dark:text-amber-400">
+                Also deducted from the open POS Counter session's cash, if one is running.
+              </div>
             )}
           </div>
 
@@ -132,12 +133,17 @@ export default function FundTransfer({ showToast }) {
                 <option value="">— Select account —</option>
                 {accounts.map((a) => (
                   <option key={a.id} value={a.id}>
-                    {a.name} · {money(a.balance, { decimals: false })}
+                    {a.kind === 'CASH' ? `Counter (${a.name})` : `Company · ${a.name}`} · {money(a.balance, { decimals: false })}
                   </option>
                 ))}
               </Select>
             </Field>
             {to && <Projection label="Balance after transfer" current={to.balance} next={to.balance + amount} />}
+            {to?.kind === 'CASH' && (
+              <div className="mt-1 text-[10.5px] font-semibold text-amber-600 dark:text-amber-400">
+                Also added to the open POS Counter session's cash, if one is running.
+              </div>
+            )}
           </div>
         </div>
 
@@ -206,7 +212,7 @@ export default function FundTransfer({ showToast }) {
         </div>
       </Panel>
 
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <StatTile label="Transfers" value={transfers.length} sub="Contra vouchers posted" />
         <StatTile label="Total Transferred" value={money(totalTransferred, { decimals: false })} tone="accent" />
         <StatTile label="Charges Paid" value={money(totalCharges, { decimals: false })} tone="danger" />

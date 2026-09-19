@@ -9,15 +9,7 @@ const formatUrl = (url) => {
 
 export const API_BASE = `${formatUrl(ADMIN_BE)}/pos`;
 
-/**
- * Uploaded images (product photos, company logo, ...) come back from the
- * backend as a path relative to the API server, e.g.
- * `/uploads/products/<shop>/<file>` — never an absolute URL. Anything that
- * renders one directly (an `<img>` on a printed receipt/invoice, in
- * particular) needs it resolved against the API host first, or the image
- * silently 404s against the POS frontend's own origin instead. A value that's
- * already absolute (http(s)/data/blob) or empty passes through unchanged.
- */
+/** Resolves a backend-relative asset path (e.g. `/uploads/...`) against the API host; already-absolute or empty values pass through unchanged. */
 export const resolveAssetUrl = (url) => {
   const trimmed = typeof url === 'string' ? url.trim() : '';
   if (!trimmed) return trimmed;
@@ -30,11 +22,7 @@ export const resolveAssetUrl = (url) => {
   return trimmed;
 };
 
-/**
- * Every request carries the tenant's JWT and database name so the backend can
- * resolve the isolated store. Session credentials live in localStorage and are
- * read per-request, which keeps the client working after a page refresh.
- */
+// Every request carries the tenant's JWT and database name, read from localStorage per-request so a page refresh doesn't lose the session.
 const client = axios.create({ baseURL: API_BASE });
 
 client.interceptors.request.use((config) => {
@@ -57,15 +45,7 @@ client.interceptors.request.use((config) => {
 
 export const SESSION_KEYS = ['pos_token', 'pos_tenant', 'pos_user_name'];
 
-/**
- * Codes the backend uses when the session itself is finished.
- *
- * A 403 on its own does not mean "signed out" — the server also answers 403 for
- * a feature the shop's plan excludes, a permission the user lacks, or a wrong
- * stock-edit password. Signing out on those would throw the cashier back to the
- * login screen for simply opening a tab their plan does not cover, so the code
- * is what decides, not the status.
- */
+// Codes for a truly finished session — a bare 403 also covers plan/permission limits, which must not sign the cashier out.
 const SESSION_ENDED_CODES = new Set([
   'NO_TOKEN',
   'TOKEN_INVALID',
@@ -119,9 +99,7 @@ export const api = {
   message
 };
 
-/* ------------------------------------------------------------------ *
- * Formatting helpers shared across every screen
- * ------------------------------------------------------------------ */
+/* ------------------------------- Formatting helpers shared across every screen ------------------------------- */
 
 const inr = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const inrCompact = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 });
@@ -177,14 +155,7 @@ export const fmtDateTime = (value) =>
       })
     : '—';
 
-/**
- * Local calendar date, not `toISOString()`'s UTC date. The backend buckets
- * every order/expense/report row by its own local calendar day (see
- * `dayKey` in accounting/engine.js), so a client east of UTC that instead
- * sent the UTC date would — for a few hours after its own local midnight —
- * ask reports for "today" while actually meaning "yesterday", silently
- * losing that window's own sales from every date-ranged report/tile.
- */
+// Local calendar date, not UTC — the backend buckets rows by local day (dayKey in accounting/engine.js), so UTC would misdate reports east of UTC.
 const localDateParts = (d) => ({
   y: d.getFullYear(),
   m: String(d.getMonth() + 1).padStart(2, '0'),

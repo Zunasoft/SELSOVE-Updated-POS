@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   BarChart3, CalendarDays, CalendarRange, Package, Layers, Truck, CreditCard,
   Boxes, History, ClipboardList, TrendingUp, AlertTriangle, Wallet,
-  Users, Landmark, Receipt, PiggyBank
+  Users, Landmark, Receipt, PiggyBank, BookOpen
 } from 'lucide-react';
 
 import api, { money, moneyShort, fmtDate, fmtDateTime, monthStartISO, todayISO } from '../lib/api';
@@ -12,10 +12,7 @@ import {
 } from '../lib/ui';
 import { exportReport } from '../lib/exporters';
 
-/**
- * Operational reporting — SOW Module 10. Financial statements live in the
- * Accounts module; everything here answers "what moved on the shop floor".
- */
+/** Operational reporting (SOW Module 10) — financial statements live in Accounts; this answers "what moved on the shop floor". */
 const REPORTS = [
   { id: 'sales-daily', label: 'Daily Sales', icon: CalendarDays, group: 'Sales' },
   { id: 'sales-monthly', label: 'Monthly Sales', icon: CalendarRange, group: 'Sales' },
@@ -28,6 +25,7 @@ const REPORTS = [
   { id: 'sessions', label: 'Session History', icon: ClipboardList, group: 'Counter' },
   { id: 'customer-outstanding', label: 'Customer Outstanding', icon: Users, group: 'Receivables' },
   { id: 'vendor-payables', label: 'Vendor Payables', icon: Landmark, group: 'Receivables' },
+  { id: 'collective-ledger', label: 'Collective Ledger', icon: BookOpen, group: 'Receivables' },
   { id: 'expenses', label: 'Expense Report', icon: Receipt, group: 'Expenses' },
   { id: 'cash-summary', label: 'Daily Cash Summary', icon: PiggyBank, group: 'Counter' }
 ];
@@ -72,6 +70,7 @@ export default function ReportsManager({ showToast }) {
       sessions: '/reports/sessions',
       'customer-outstanding': '/reports/customers/outstanding',
       'vendor-payables': '/reports/vendors/payables',
+      'collective-ledger': '/reports/collective-ledger',
       expenses: '/reports/expenses',
       'cash-summary': '/reports/cash-summary'
     };
@@ -199,9 +198,7 @@ export default function ReportsManager({ showToast }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Renderers
- * ------------------------------------------------------------------ */
+/* ------------------------------- Renderers ------------------------------- */
 
 function renderReport(id, data) {
   switch (id) {
@@ -227,6 +224,8 @@ function renderReport(id, data) {
       return <CustomerOutstanding data={data} />;
     case 'vendor-payables':
       return <VendorPayables data={data} />;
+    case 'collective-ledger':
+      return <CollectiveLedger data={data} />;
     case 'expenses':
       return <ExpenseReport data={data} />;
     case 'cash-summary':
@@ -455,7 +454,7 @@ const STOCK_LABEL = { HEALTHY: 'Healthy', LOW: 'Low', OUT_OF_STOCK: 'Out of stoc
 function StockReport({ data }) {
   return (
     <>
-      <div className="mb-3 grid grid-cols-3 gap-3">
+      <div className="mb-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
         <Mini label="Value at cost" value={money(data.totalValueAtCost)} />
         <Mini label="Value at retail" value={money(data.totalValueAtRetail)} />
         <Mini label="Potential margin" value={money(data.totalValueAtRetail - data.totalValueAtCost)} tone="success" />
@@ -668,7 +667,7 @@ function AgeingTable({ rows }) {
 function CustomerOutstanding({ data }) {
   return (
     <>
-      <div className="mb-3 grid grid-cols-3 gap-3">
+      <div className="mb-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
         <Mini label="Total outstanding" value={money(data.totalOutstanding)} tone="danger" />
         <Mini label="Total advance" value={money(data.totalAdvance)} tone="success" />
         <Mini label="Customers over limit" value={data.overLimitCount} tone={data.overLimitCount > 0 ? 'danger' : 'neutral'} />
@@ -747,6 +746,57 @@ function VendorPayables({ data }) {
       />
 
       <AgeingTable rows={data.ageing} />
+    </>
+  );
+}
+
+/** REQ-34 — Customers and vendors together in one ledger, rather than two separate reports. */
+function CollectiveLedger({ data }) {
+  const netPosition = (data.totalReceivable || 0) - (data.totalPayable || 0);
+  return (
+    <>
+      <div className="mb-3 grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <Mini label="Total receivable" value={money(data.totalReceivable)} tone="danger" />
+        <Mini label="Total payable" value={money(data.totalPayable)} tone="danger" />
+        <Mini
+          label="Net position"
+          value={money(Math.abs(netPosition))}
+          tone={netPosition >= 0 ? 'success' : 'danger'}
+        />
+        <Mini label="Parties with a balance" value={data.partyCount} tone="neutral" />
+      </div>
+
+      <DataTable
+        maxHeight="none"
+        dense
+        columns={[
+          {
+            key: 'name',
+            label: 'Party',
+            render: (r) => (
+              <span className="flex items-center gap-1.5 font-semibold">
+                {r.name}
+                <Badge tone={r.partyType === 'CUSTOMER' ? 'info' : 'accent'}>
+                  {r.partyType === 'CUSTOMER' ? 'Customer' : 'Vendor'}
+                </Badge>
+              </span>
+            )
+          },
+          { key: 'phone', label: 'Phone', width: 120, render: (r) => <span className="text-[color:var(--text-muted)]">{r.phone || '—'}</span> },
+          { key: 'due', label: 'Due', align: 'right', width: 130, render: (r) => <Money value={r.due} className="font-bold" /> },
+          {
+            key: 'advance',
+            label: 'Advance',
+            align: 'right',
+            width: 110,
+            render: (r) => <Money value={r.advance} showZero={false} className="text-emerald-600 dark:text-emerald-400" />
+          }
+        ]}
+        rows={data.rows}
+        rowKey={(r) => `${r.partyType}_${r.id}`}
+        empty={<EmptyState icon={BookOpen} title="No party balances in this period" />}
+        footer={['Total', '', money((data.totalReceivable || 0) + (data.totalPayable || 0)), '']}
+      />
     </>
   );
 }
@@ -876,9 +926,7 @@ function Mini({ label, value, tone = 'neutral' }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Export flattening — one shape per report so CSV and PDF agree
- * ------------------------------------------------------------------ */
+/* ------------------------------- Export flattening — one shape per report so CSV and PDF agree ------------------------------- */
 
 function buildExport(id, data, title) {
   if (!data) return null;
@@ -1062,6 +1110,20 @@ function buildExport(id, data, title) {
         ],
         rows: data.rows,
         totals: ['TOTAL', '', '', num(data.totalPayable), num(data.totalAdvance), '', '', '']
+      };
+
+    case 'collective-ledger':
+      return {
+        title,
+        columns: [
+          { key: 'partyType', label: 'Type', value: (r) => (r.partyType === 'CUSTOMER' ? 'Customer' : 'Vendor') },
+          { key: 'name', label: 'Party' },
+          { key: 'phone', label: 'Phone' },
+          { key: 'due', label: 'Due', align: 'right', value: (r) => num(r.due) },
+          { key: 'advance', label: 'Advance', align: 'right', value: (r) => num(r.advance) }
+        ],
+        rows: data.rows,
+        totals: ['TOTAL', '', '', num((data.totalReceivable || 0) + (data.totalPayable || 0)), num((data.totalCustomerAdvance || 0) + (data.totalVendorAdvance || 0))]
       };
 
     case 'expenses':

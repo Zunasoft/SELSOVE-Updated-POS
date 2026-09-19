@@ -3,13 +3,7 @@ import { Edit3, History, Save } from 'lucide-react';
 import api, { fmtDateTime } from '../lib/api';
 import { Modal, Field, Input, Textarea, Button } from '../lib/ui';
 
-/**
- * Field groups for the "Edit Details" form on an already-issued sales
- * invoice/bill. Items, quantities, prices and totals are intentionally left
- * out — the backend rejects them outright for a non-draft order (see
- * LOCKED_FIELDS_ON_ISSUED in routes/sales.js). Correcting an amount means
- * Void or a Sales Return, not a silent edit here.
- */
+/** Items/prices/totals are intentionally excluded — backend rejects them for a non-draft order (LOCKED_FIELDS_ON_ISSUED in routes/sales.js). */
 const SALE_FIELD_GROUPS = [
   {
     title: 'Customer & Billing',
@@ -55,10 +49,7 @@ const SALE_FIELD_GROUPS = [
   }
 ];
 
-/**
- * Same idea, mirrored for a received purchase invoice — vendor/header fields
- * only. See PURCHASE_LOCKED_FIELDS in routes/parties.js.
- */
+/** Same idea, mirrored for a received purchase invoice — vendor/header fields only. See PURCHASE_LOCKED_FIELDS in routes/parties.js. */
 const PURCHASE_FIELD_GROUPS = [
   {
     title: 'Vendor & Billing',
@@ -130,13 +121,7 @@ function toDateInputValue(value) {
   return `${y}-${m}-${day}`;
 }
 
-/**
- * "Edit Details" modal for a finalized sales invoice/bill or a received
- * purchase invoice — shared across InvoicesManager, POSTerminal and
- * PurchaseManager. Only header/party fields are editable; the backend
- * enforces the same restriction independently. Shows the document's own
- * edit history (who changed what, and when) underneath the form.
- */
+/** "Edit Details" modal shared across InvoicesManager, POSTerminal and PurchaseManager; only header/party fields are editable. */
 export default function InvoiceEditModal({ invoice, kind = 'sale', onClose, onSaved, showToast }) {
   const config = KIND_CONFIG[kind] || KIND_CONFIG.sale;
   const fieldGroups = config.fieldGroups;

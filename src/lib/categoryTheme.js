@@ -1,8 +1,4 @@
-/**
- * Category Theme & Color System
- * Provides distinctive, vibrant, and customizable color schemes for each product category.
- */
-
+/** Distinctive, customizable color schemes for each product category. */
 export const AVAILABLE_CATEGORY_COLORS = [
   {
     id: 'emerald',
@@ -216,11 +212,7 @@ export const AVAILABLE_CATEGORY_COLORS = [
   }
 ];
 
-/**
- * Returns color theme for a category by its custom color property, name, or ID.
- * @param {string|object} cat Category object, color ID, or name
- * @returns {object} Complete Theme object
- */
+/** Returns the color theme for a category by its custom color property, name, or ID. */
 export function getCategoryTheme(cat) {
   // 1. Explicit color property set on category object (e.g. cat.color = 'rose')
   if (typeof cat === 'object' && cat && cat.color) {
@@ -272,11 +264,7 @@ export function getCategoryTheme(cat) {
   return AVAILABLE_CATEGORY_COLORS[idx];
 }
 
-/**
- * Returns a new, unused color id from AVAILABLE_CATEGORY_COLORS for newly created categories.
- * @param {Array} existingCategories List of current categories
- * @returns {string} color ID e.g. 'emerald'
- */
+/** Returns a new, unused color id from AVAILABLE_CATEGORY_COLORS for newly created categories. */
 export function getNextAvailableColor(existingCategories = []) {
   const usedColors = new Set(
     (existingCategories || [])

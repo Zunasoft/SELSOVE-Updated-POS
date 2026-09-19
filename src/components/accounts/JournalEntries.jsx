@@ -22,11 +22,7 @@ const VOUCHER_TONE = {
   STOCK: 'neutral'
 };
 
-/**
- * Every sale, purchase, receipt and payment posts a voucher here automatically,
- * so this register doubles as the complete audit trail. Manual journals are the
- * exception, not the rule — the composer exists for corrections and adjustments.
- */
+/** Every sale/purchase/receipt/payment posts a voucher here automatically; manual journals are for corrections and adjustments only. */
 export default function JournalEntries({ showToast }) {
   const [vouchers, setVouchers] = useState([]);
   const [count, setCount] = useState(0);
@@ -206,7 +202,7 @@ function VoucherRow({ voucher, isOpen, onToggle, onReverse }) {
 
       {isOpen && (
         <div className="px-4 pb-3" style={{ background: 'var(--bg-subtle)' }}>
-          <div className="overflow-hidden rounded-xl" style={{ border: '1px solid var(--border)' }}>
+          <div className="overflow-x-auto rounded-xl" style={{ border: '1px solid var(--border)' }}>
             <table className="w-full text-[12px]">
               <thead>
                 <tr>

@@ -358,13 +358,7 @@ export const THERMAL_THEMES = [
   }
 ];
 
-// Billing only ever offers these two thermal options — a detailed GST bill
-// and a plain one — rather than the full built-in gallery plus an
-// open-ended custom-template list. That's what made theme selection at the
-// counter feel broken: an unbounded, ever-growing set of near-identical
-// choices whose config could silently leak into each other. Both remain
-// fully editable in place (branding, labels, sections) via the template
-// editor — editing overwrites that same slot rather than creating a new one.
+// Billing only ever offers these two thermal slots; both stay editable in place via the template editor rather than spawning new ones.
 export const BILLING_THERMAL_THEME_IDS = ['detailed_gst', 'normal_thermal'];
 
 export const SAMPLE_RECEIPT_DATA = {
@@ -486,9 +480,7 @@ function fmtReceiptDate(d) {
   }
 }
 
-/**
- * Main Thermal Receipt Renderer supporting themes, custom labels, block reordering, and custom CSS
- */
+/** Main Thermal Receipt Renderer supporting themes, custom labels, block reordering, and custom CSS. */
 export function ThermalReceiptView({
   receipt = SAMPLE_RECEIPT_DATA,
   settings = {},
@@ -519,21 +511,7 @@ export function ThermalReceiptView({
   const themeMeta = THERMAL_THEMES.find((t) => t.id === baseThemeId) || THERMAL_THEMES[0];
   const customTemplateConfig = selectedCustom ? (selectedCustom.config || {}) : {};
 
-  // `billing.customHtml` is a stray leftover the template editor's "save"
-  // action can write to the general settings object even while editing a
-  // built-in theme — it must never override a built-in theme's own JSX
-  // rendering. Only a genuinely selected custom template (customTemplateConfig)
-  // or an explicit live-preview override (customConfig, from the editor
-  // itself) may supply customHtml.
-  // Deliberately NOT spreading `billing` into this merge. Template appearance
-  // (which sections show, labels, fonts, paper width...) is per-theme data —
-  // it belongs only in `customTemplateConfig` (this theme's own saved
-  // override, looked up by its own id) or `customConfig` (an explicit
-  // live-preview override from the editor). Spreading the whole `billing`
-  // settings object here used to mean whichever theme was *last saved*
-  // bled its exact settings into every other theme's rendering too, since
-  // billing is one global object shared by all of them — that's what made
-  // switching themes at the counter look like it did nothing.
+  // Deliberately not spreading `billing` (shared by every theme) — would bleed the last-saved theme's settings into this one.
   const cfg = {
     ...themeMeta.defaults,
     ...customTemplateConfig,
@@ -613,9 +591,7 @@ export function ThermalReceiptView({
 
   // Compute GST slabs
   const gstSlabs = {};
-  // Starts from the bill-level discount (shown separately below as "Bill
-  // Discount") so the savings badge reflects everything the customer actually
-  // saved, not just per-item discounts.
+  // Starts from the bill-level discount so the savings badge reflects everything saved, not just per-item discounts.
   let totalSavings = Number(receipt.discount) || 0;
 
   (receipt.items || []).forEach((item) => {
@@ -642,28 +618,18 @@ export function ThermalReceiptView({
     }
   });
 
-  // Render individual sections based on section ordering. A saved custom
-  // template's `sections` array can end up missing an entry entirely (rather
-  // than explicitly disabled) — e.g. from an older save before a section was
-  // introduced. Treat "missing" as "shown" (the same as a brand-new theme),
-  // and only actually hide a section the saved config explicitly disabled.
+  // A saved template's `sections` array can be missing an entry entirely (e.g. an older save); treat "missing" as "shown".
   const sections = cfg.sections || DEFAULT_THERMAL_SECTIONS;
   const sectionMap = {};
   DEFAULT_THERMAL_SECTIONS.forEach((s) => { sectionMap[s.id] = true; });
   sections.forEach((s) => { sectionMap[s.id] = s.enabled !== false; });
 
-  // Resolve the actual render order from the user-configured `sections` array
-  // (this used to be computed and then ignored — every section rendered in a
-  // fixed hardcoded order regardless of what was saved here). Any id missing
-  // from an older/incomplete saved config is appended in its default position
-  // so nothing silently disappears from render.
+  // Render order follows the user-configured `sections` array; any id missing from an older config is appended in its default spot.
   const orderedSectionIds = [
     ...sections.map((s) => s.id),
     ...DEFAULT_THERMAL_SECTIONS.map((s) => s.id).filter((id) => !sections.some((s2) => s2.id === id))
   ];
-  // bill_meta always renders its divider + receipt title even when the
-  // "Bill Number, Date, Time & Cashier" toggle is off — only the bill-info
-  // block inside billMetaNode itself is gated by sectionMap.bill_meta.
+  // bill_meta always renders its divider + title even with the "Bill Number/Date/Cashier" toggle off; only its inner block is gated.
   const enabledOrder = orderedSectionIds.filter((id) => sectionMap[id] || id === 'bill_meta');
 
   // If template has exact custom HTML markup (e.g. from Word or custom HTML import), render it directly!
@@ -685,11 +651,8 @@ export function ThermalReceiptView({
     );
   }
 
-  // Per-section content, built once and slotted into `enabledOrder` below so
-  // the visual order actually matches the user's configured section order.
-  // The dashed dividers (and the fixed "Receipt Title" line) aren't
-  // reorderable sections of their own — they travel with the section they
-  // visually separate, so they move along with it if it's reordered.
+  // Per-section content, slotted into `enabledOrder` below. Dashed dividers and the "Receipt Title" line travel with the section
+  // they visually separate rather than being reorderable sections of their own.
   const headerBrandingNode = (
     <div className="text-center space-y-0.5 mb-1.5">
       {cfg.showLogo && company.logoUrl && (

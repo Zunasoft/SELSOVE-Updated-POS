@@ -3,7 +3,7 @@ import {
   Users, Truck, MessageSquare, Plus, Edit3, Trash2, BookOpen, Phone,
   Wallet, ShoppingBag, Save, Search, Download, RefreshCw,
   CheckCircle2, AlertTriangle, ArrowUpRight, ArrowDownRight, Mail,
-  MapPin, FileText, X, Printer, Building2, CreditCard, History, Clock, ArrowRight, Star
+  MapPin, FileText, X, Printer, Building2, CreditCard, History, Clock, ArrowRight, Star, Lock
 } from 'lucide-react';
 
 import api, { money, fmtDate, fmtDateTime, todayISO } from '../lib/api';
@@ -13,10 +13,7 @@ import {
 } from '../lib/ui';
 import { exportReport } from '../lib/exporters';
 
-/**
- * Customer and vendor masters — SOW Modules 7 and 8.
- * Operational party register with contacts, groups, credit limits, and statements.
- */
+/** Customer and vendor masters (SOW Modules 7 and 8): operational party register with contacts, groups, credit limits, statements. */
 export default function CustomerVendorLedger({ showToast }) {
   const [tab, setTab] = useState('customers');
   const [customers, setCustomers] = useState([]);
@@ -602,6 +599,16 @@ export default function CustomerVendorLedger({ showToast }) {
                           <span className={`font-mono font-bold text-[13px] ${out > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
                             {money(out)}
                           </span>
+                          {out === 0 && (
+                            <span className="block text-[9.5px] font-bold text-emerald-600 dark:text-emerald-400">
+                              Dues Paid
+                            </span>
+                          )}
+                          {Number(v.openingBalance) > 0 && (
+                            <span className="block text-[9.5px] font-medium text-[color:var(--text-muted)]" title="Initial 1-time opening balance recorded at creation">
+                              Opening: {money(v.openingBalance)}
+                            </span>
+                          )}
                           {v.advancePaid > 0 && (
                             <span className="block text-[9.5px] font-extrabold uppercase text-emerald-500">
                               Advance paid
@@ -694,6 +701,7 @@ export function PartyFormModal({ open, isCustomer, editing, groups, onClose, sho
     contactPerson: '',
     paymentTerms: '',
     openingBalance: '',
+    openingBalanceDate: todayISO(),
     openingAdvance: '',
     advanceBalance: '',
     outstandingReceivable: '',
@@ -729,24 +737,29 @@ export function PartyFormModal({ open, isCustomer, editing, groups, onClose, sho
     try {
       const base = isCustomer ? '/customers' : '/vendors';
 
-      // The backend treats these three fields as "correct the balance to
-      // exactly this" and posts an audited adjustment for the difference
-      // against the live ledger — a real, intentional feature for fixing a
-      // wrong balance. But this form pre-fills them from whatever was cached
-      // when the list last loaded, and sends the whole form on every save.
-      // Left untouched, saving an edit to something unrelated (e.g. phone
-      // number) minutes after a new sale/purchase posted would silently
-      // overwrite the customer/vendor's balance back to that stale figure.
-      // Only forward a balance field the user actually changed.
+      // Backend treats these as "correct the balance to exactly this" — only forward a balance field the user actually changed, or an unrelated edit (e.g. phone) would silently overwrite a balance updated by a sale/purchase since the form's stale cache loaded.
       const payload = { ...form };
       if (editing) {
+        // Opening balance and vendor payable are strictly immutable on edit:
+        delete payload.openingBalance;
+        delete payload.openingBalanceDate;
+        delete payload.outstandingPayable;
+
         const originalReceivable = editing.outstanding !== undefined ? String(editing.outstanding) : String(editing.outstandingReceivable || '');
         const originalAdvance = editing.advance !== undefined ? String(editing.advance) : String(editing.advanceBalance || '');
-        const originalPayable = String(editing.outstandingPayable ?? '');
 
         if (String(form.outstandingReceivable ?? '') === originalReceivable) delete payload.outstandingReceivable;
         if (String(form.advanceBalance ?? '') === originalAdvance) delete payload.advanceBalance;
-        if (String(form.outstandingPayable ?? '') === originalPayable) delete payload.outstandingPayable;
+      } else {
+        if (!isCustomer) {
+          payload.openingBalance = Number(form.openingBalance) || 0;
+          payload.outstandingPayable = payload.openingBalance;
+        }
+        // The date input gives a plain yyyy-mm-dd string — convert it to the
+        // full ISO timestamp the ledger's other dated entries all use.
+        payload.openingBalanceDate = form.openingBalanceDate
+          ? new Date(form.openingBalanceDate).toISOString()
+          : undefined;
       }
 
       let saved;
@@ -759,9 +772,7 @@ export function PartyFormModal({ open, isCustomer, editing, groups, onClose, sho
         saved = res.data;
         showToast(`${form.name} added.`);
       }
-      // Passing the saved record along lets a caller that opened this form
-      // to quick-create a party (rather than manage the Parties list) select
-      // it immediately, without waiting on its own list to refetch.
+      // Lets a caller that opened this form to quick-create a party select it immediately, without waiting on its own list to refetch.
       onSaved(saved);
     } catch (err) {
       showToast(api.message(err, 'Could not save party.'), 'error');
@@ -949,6 +960,11 @@ export function PartyFormModal({ open, isCustomer, editing, groups, onClose, sho
                     className="font-bold text-blue-600 dark:text-blue-400 font-mono"
                   />
                 </Field>
+                {(Number(form.openingBalance) || Number(form.openingAdvance)) ? (
+                  <Field label="Opening Balance Date" hint="Effective date this balance was as-of, not necessarily today">
+                    <Input type="date" value={form.openingBalanceDate} onChange={set('openingBalanceDate')} max={todayISO()} />
+                  </Field>
+                ) : null}
               </>
             )}
 
@@ -991,26 +1007,92 @@ export function PartyFormModal({ open, isCustomer, editing, groups, onClose, sho
               </>
             )}
 
-            {/* If Vendor: Outstanding Payable is editable both on Add and Edit */}
-            {!isCustomer && (
-              <Field
-                label={editing ? 'Amount Payable / Outstanding Balance (₹)' : 'Opening Payable (₹)'}
-                hint={
-                  editing
-                    ? 'Edit to adjust current payable balance owed to this vendor (posts audited ledger adjustment).'
-                    : 'Initial balance owed to vendor when starting.'
-                }
-                className="sm:col-span-2"
-              >
-                <Input
-                  type="number"
-                  step="0.01"
-                  value={form.outstandingPayable}
-                  onChange={set('outstandingPayable')}
-                  placeholder="0.00"
-                  className="font-bold text-rose-600 dark:text-rose-400 font-mono"
-                />
-              </Field>
+            {/* If Vendor on creation: 1-time Opening Balance setup */}
+            {!isCustomer && !editing && (
+              <>
+                <Field
+                  label="Opening Balance / Opening Payable (₹)"
+                  hint="1-time option set when creating the vendor. Once created, this opening balance cannot be modified."
+                  className="sm:col-span-2"
+                >
+                  <Input
+                    type="number"
+                    step="0.01"
+                    value={form.openingBalance}
+                    onChange={(e) => setForm({ ...form, openingBalance: e.target.value, outstandingPayable: e.target.value })}
+                    placeholder="0.00"
+                    className="font-bold text-rose-600 dark:text-rose-400 font-mono"
+                  />
+                </Field>
+                {Number(form.openingBalance) ? (
+                  <Field label="Opening Balance Date" hint="Effective date this balance was as-of, not necessarily today" className="sm:col-span-2">
+                    <Input type="date" value={form.openingBalanceDate} onChange={set('openingBalanceDate')} max={todayISO()} />
+                  </Field>
+                ) : null}
+                <div className="sm:col-span-2 -mt-1 text-[11px] rounded-xl px-3.5 py-2.5 bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200/80 dark:border-amber-900/60 text-amber-900 dark:text-amber-200 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold">1-Time Opening Balance:</span> Enter any starting debt or opening balance owed to this vendor. Once saved, this opening balance is permanently recorded and cannot be changed. All future payments, bills, and purchases will adjust the balance through the ledger as usual.
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* If Vendor when editing: Read-only Informational Card */}
+            {!isCustomer && editing && (
+              <div className="sm:col-span-2 rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/60 p-3.5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Lock className="w-3.5 h-3.5 text-slate-500" />
+                    <span className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">
+                      Opening Balance &amp; Current Status
+                    </span>
+                  </div>
+                  <span className="text-[10.5px] font-bold px-2 py-0.5 rounded-md bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700 inline-flex items-center gap-1">
+                    <Lock className="w-3 h-3 text-slate-500" />
+                    1-Time Record (Locked)
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                  <div className="p-3 rounded-xl bg-white dark:bg-slate-900 border border-[color:var(--border-subtle)] shadow-xs">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">
+                      Initial Opening Balance
+                    </div>
+                    <div className="text-sm font-extrabold font-mono text-[color:var(--text-primary)] mt-1">
+                      {money(editing.openingBalance || 0)}
+                    </div>
+                    <div className="text-[10.5px] text-[color:var(--text-muted)] mt-0.5">
+                      Recorded at creation · Cannot be edited
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-white dark:bg-slate-900 border border-[color:var(--border-subtle)] shadow-xs">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-[color:var(--text-muted)]">
+                      Current Balance Owed
+                    </div>
+                    <div className={`text-sm font-extrabold font-mono mt-1 ${Number(editing.outstandingPayable) > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                      {money(editing.outstandingPayable || 0)}
+                    </div>
+                    <div className="mt-0.5">
+                      {Number(editing.outstandingPayable) <= 0 ? (
+                        <span className="inline-flex items-center gap-1 text-[10.5px] font-bold text-emerald-600 dark:text-emerald-400">
+                          <CheckCircle2 className="w-3 h-3" />
+                          All debt paid in full
+                        </span>
+                      ) : (
+                        <span className="text-[10.5px] font-medium text-rose-600 dark:text-rose-400">
+                          Pending payment to vendor
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <p className="text-[11px] text-[color:var(--text-muted)] leading-relaxed">
+                  Opening balance was set when this vendor was added. Payments, purchase bills, and debit notes update the current balance through standard ledger transactions.
+                </p>
+              </div>
             )}
 
             {/* If editing vendor, offer modification reason / notes */}
@@ -1034,13 +1116,7 @@ export function PartyFormModal({ open, isCustomer, editing, groups, onClose, sho
   );
 }
 
-/**
- * Search-and-select party picker — the customer/vendor equivalent of
- * PurchaseProductPickerModal's "search products, or add a new one" pattern.
- * Reused from Invoices (customers) and Purchases (vendors) so those screens
- * offer the exact same "click to select, or create new from the same popup"
- * experience as picking a product does, rather than a plain <select>.
- */
+/** Search-and-select party picker — the customer/vendor equivalent of PurchaseProductPickerModal's "search or add new" pattern. */
 export function PartyPickerModal({ open, onClose, parties = [], isCustomer, onSelectParty, onCreateNew }) {
   const [search, setSearch] = useState('');
 
@@ -1370,7 +1446,7 @@ function PartyLedgerModal({ party, onClose, showToast }) {
             <div className="surface rounded-xl p-3 border border-[color:var(--border)]">
               <span className="text-[10px] font-bold uppercase text-[color:var(--text-muted)]">Opening Balance</span>
               <div className="text-sm font-bold text-[color:var(--text-primary)] mt-1 font-mono">
-                {money(ledger.opening)}
+                {money(ledger.openingBalance ?? ledger.opening)}
               </div>
             </div>
 

@@ -26,10 +26,7 @@ const TYPE_LABEL = {
   EXPENSE: 'Expenses'
 };
 
-/**
- * The Chart of Accounts is the foundation every other screen reads from, so it
- * is presented as a real tree with roll-up balances rather than a flat list.
- */
+/** The foundation every other screen reads from, so it's presented as a real tree with roll-up balances rather than a flat list. */
 export default function ChartOfAccounts({ showToast }) {
   const [tree, setTree] = useState([]);
   const [flat, setFlat] = useState([]);
@@ -446,7 +443,7 @@ function LedgerModal({ account, onClose, showToast, onChanged }) {
         <Spinner />
       ) : (
         <div className="space-y-3">
-          <div className="grid grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <Summary label="Opening" value={ledger.opening} />
             <Summary label="Total debit" value={ledger.totalDebit} />
             <Summary label="Total credit" value={ledger.totalCredit} />

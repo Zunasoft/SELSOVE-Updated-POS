@@ -11,11 +11,7 @@ import {
 } from '../../lib/ui';
 import { exportReport } from '../../lib/exporters';
 
-/**
- * Every statutory and management report the shop needs, all reading the same
- * journal. Each report declares how to fetch itself, how to render itself and
- * how to flatten itself for export, so adding one is a single entry here.
- */
+/** Each report declares how to fetch, render, and flatten itself for export, so adding one is a single entry here. */
 const REPORTS = [
   { id: 'trial-balance', label: 'Trial Balance', icon: Scale, group: 'Statements' },
   { id: 'profit-loss', label: 'Profit & Loss', icon: TrendingUp, group: 'Statements' },
@@ -197,9 +193,7 @@ export default function AccountReports({ showToast }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Report renderers
- * ------------------------------------------------------------------ */
+/* ------------------------------- Report renderers ------------------------------- */
 
 function renderReport(id, data) {
   switch (id) {
@@ -455,7 +449,7 @@ function GeneralLedger({ data }) {
             </button>
 
             {isOpen && (
-              <div style={{ borderTop: '1px solid var(--border)' }}>
+              <div className="overflow-x-auto" style={{ borderTop: '1px solid var(--border)' }}>
                 <table className="ledger-table w-full">
                   <thead>
                     <tr>
@@ -664,7 +658,7 @@ function GstSummary({ data }) {
 
   return (
     <>
-      <div className="mb-3 grid grid-cols-3 gap-3">
+      <div className="mb-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
         <Kpi label="Output Tax Collected" value={data.totalOutput} tone="danger" />
         <Kpi label="Input Credit Available" value={data.totalInput} tone="success" />
         <Kpi
@@ -716,9 +710,7 @@ function Kpi({ label, value, sub, tone = 'neutral', raw = false }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Export flattening — one shape per report so CSV and PDF agree
- * ------------------------------------------------------------------ */
+/* ------------------------------- Export flattening — one shape per report so CSV and PDF agree ------------------------------- */
 
 function buildExport(id, data, title) {
   const num = (v) => Number(v || 0).toFixed(2);

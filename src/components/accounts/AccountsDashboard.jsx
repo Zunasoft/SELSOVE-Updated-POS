@@ -163,7 +163,7 @@ export default function AccountsDashboard({ navigate }) {
             </div>
           </div>
           <TrendBars data={data.trend} />
-          <div className="mt-3 grid grid-cols-3 gap-2 border-t pt-3" style={{ borderColor: 'var(--border)' }}>
+          <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2 border-t pt-3" style={{ borderColor: 'var(--border)' }}>
             <Metric label="Working funds" value={money(netWorking)} />
             <Metric label="Gross profit (MTD)" value={money(data.grossProfit)} />
             <Metric

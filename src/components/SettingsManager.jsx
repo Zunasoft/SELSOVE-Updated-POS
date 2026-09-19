@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
+import QRCode from 'qrcode';
 import {
   Settings, Plus, Trash2, ShieldCheck, RotateCcw, Check, X as XIcon,
   Star, Award, Gift, Sparkles, Calculator, TrendingUp, HelpCircle,
   Printer, Receipt, LayoutTemplate, Palette, Sliders, CheckCircle2, Eye, Edit3,
-  Copy, RefreshCw, FileText, CheckCircle, ChevronRight, ChevronLeft, Layers, Maximize2, Minimize2, Type
+  Copy, RefreshCw, FileText, CheckCircle, ChevronRight, ChevronLeft, Layers, Maximize2, Minimize2, Type,
+  Building2, Users, LayoutGrid, Landmark
 } from 'lucide-react';
 
 import api, { API_BASE } from '../lib/api';
@@ -20,18 +22,16 @@ import {
 import { VisualTemplateBuilderModal } from './VisualTemplateBuilderModal';
 
 const TABS = [
-  { key: 'company', label: 'Company' },
-  { key: 'billing', label: 'Billing & Tax' },
-  { key: 'hardware', label: 'Hardware' },
-  { key: 'users', label: 'Users & Roles' },
-  { key: 'tables', label: 'Tables' }
+  { key: 'company', label: 'Company', icon: Building2 },
+  { key: 'billing', label: 'Billing & Tax', icon: Receipt },
+  { key: 'templates', label: 'Templates', icon: LayoutTemplate },
+  { key: 'bank', label: 'Bank & Payment', icon: Landmark },
+  { key: 'hardware', label: 'Hardware', icon: Sliders },
+  { key: 'users', label: 'Users & Roles', icon: Users },
+  { key: 'tables', label: 'Tables', icon: LayoutGrid }
 ];
 
-/**
- * Store configuration in one place — company profile, billing/tax defaults,
- * connected hardware, staff access and dine-in tables. Each tab owns its own
- * data so switching tabs never re-fetches everything else.
- */
+/** Store configuration in one place; each tab owns its own data so switching tabs never re-fetches everything else. */
 export default function SettingsManager({ tenant, token, showToast, onSettingsChange }) {
   const [settings, setSettings] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -67,48 +67,60 @@ export default function SettingsManager({ tenant, token, showToast, onSettingsCh
     <div className="space-y-4">
       <SectionHeader eyebrow="Configuration" title="Settings" icon={Settings} subtitle="Company profile, billing, tax, hardware, staff access and tables." />
 
-      <div
-        className="inline-flex flex-wrap items-center gap-0.5 rounded-xl p-0.5"
-        style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}
-      >
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={cx(
-              'rounded-[10px] px-3.5 py-1.5 text-[11px] font-bold transition-all',
-              tab === t.key
-                ? 'bg-indigo-600 text-white shadow-sm'
-                : 'text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
-            )}
+      <div className="flex flex-col lg:flex-row gap-4 items-start">
+        {/* Left navigation rail — pick a settings page here, its content renders on the right. */}
+        <div className="w-full lg:w-56 shrink-0 lg:sticky lg:top-4">
+          <div
+            className="rounded-2xl p-1.5 space-y-0.5 flex flex-row lg:flex-col gap-0.5 lg:gap-0 overflow-x-auto lg:overflow-visible"
+            style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)' }}
           >
-            {t.label}
-          </button>
-        ))}
-      </div>
+            {TABS.map((t) => {
+              const Icon = t.icon;
+              const active = tab === t.key;
+              return (
+                <button
+                  key={t.key}
+                  onClick={() => setTab(t.key)}
+                  className={cx(
+                    'flex shrink-0 lg:w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-[12.5px] font-bold text-left transition-all whitespace-nowrap',
+                    active
+                      ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/25'
+                      : 'text-[color:var(--text-secondary)] hover:bg-[color:var(--bg-subtle)] hover:text-[color:var(--text-primary)]'
+                  )}
+                >
+                  <Icon className={cx('w-4 h-4 shrink-0', active ? 'text-white' : 'text-[color:var(--text-muted)]')} />
+                  <span>{t.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
 
-      {tab === 'company' && <CompanyTab company={settings.company} saveSection={saveSection} showToast={showToast} />}
-      {tab === 'billing' && (
-        <BillingTaxTab
-          company={settings.company}
-          billing={settings.billing}
-          tax={settings.tax}
-          pos={settings.pos}
-          loyalty={settings.loyalty}
-          saveSection={saveSection}
-          showToast={showToast}
-        />
-      )}
-      {tab === 'hardware' && <HardwareTab showToast={showToast} />}
-      {tab === 'users' && <UsersTab showToast={showToast} />}
-      {tab === 'tables' && <TablesTab enableTables={settings.pos?.enableTables} showToast={showToast} />}
+        {/* Right content — whichever settings page is selected on the left. */}
+        <div className="flex-1 min-w-0 w-full space-y-4">
+          {tab === 'company' && <CompanyTab company={settings.company} saveSection={saveSection} showToast={showToast} />}
+          {(tab === 'billing' || tab === 'templates' || tab === 'bank') && (
+            <BillingTaxTab
+              section={tab}
+              company={settings.company}
+              billing={settings.billing}
+              tax={settings.tax}
+              pos={settings.pos}
+              loyalty={settings.loyalty}
+              saveSection={saveSection}
+              showToast={showToast}
+            />
+          )}
+          {tab === 'hardware' && <HardwareTab showToast={showToast} />}
+          {tab === 'users' && <UsersTab showToast={showToast} />}
+          {tab === 'tables' && <TablesTab enableTables={settings.pos?.enableTables} showToast={showToast} />}
+        </div>
+      </div>
     </div>
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Shared bits
- * ------------------------------------------------------------------ */
+/* ------------------------------- Shared bits ------------------------------- */
 
 function Toggle({ label, hint, checked, onChange }) {
   return (
@@ -144,9 +156,36 @@ function Toggle({ label, hint, checked, onChange }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Company
- * ------------------------------------------------------------------ */
+/** A checkbox row (vs. the `Toggle` switch above) for checklist-style settings, e.g. a parent option gating indented sub-options. */
+function CheckboxOption({ label, hint, checked, onChange, indent = false, disabled = false }) {
+  return (
+    <label
+      className={cx(
+        'flex items-start gap-2 py-1 select-none',
+        indent && 'ml-5 pl-3 border-l-2 border-[color:var(--border-subtle)]',
+        disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+      )}
+    >
+      <input
+        type="checkbox"
+        checked={Boolean(checked)}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+        className="mt-0.5 h-3.5 w-3.5 rounded border-[color:var(--border-strong)] text-indigo-600 focus:ring-indigo-500 shrink-0"
+      />
+      <span className="flex items-center gap-1.5 flex-wrap">
+        <span className="text-[12.5px] font-medium text-[color:var(--text-primary)]">{label}</span>
+        {hint && (
+          <span title={hint} className="text-[color:var(--text-muted)] cursor-help">
+            <HelpCircle className="w-3 h-3" />
+          </span>
+        )}
+      </span>
+    </label>
+  );
+}
+
+/* ------------------------------- Company ------------------------------- */
 
 function CompanyTab({ company, saveSection, showToast }) {
   const [form, setForm] = useState(company || {});
@@ -159,11 +198,7 @@ function CompanyTab({ company, saveSection, showToast }) {
 
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
 
-  // A bare "paste a URL" field only works if the logo is already hosted
-  // somewhere public — which most shops don't have. This uploads the file
-  // straight into the tenant's own database (same endpoint product photos
-  // use) and fills the URL field with the result, so "I have a logo image on
-  // my computer" is enough to get it printing on receipts and invoices.
+  // Uploads the file into the tenant's own database (same endpoint as product photos) rather than requiring an already-hosted URL.
   const handleLogoUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -173,11 +208,7 @@ function CompanyTab({ company, saveSection, showToast }) {
     try {
       const res = await api.post('/upload', formData);
       if (res.success) {
-        // The upload endpoint returns a path relative to the API server
-        // (e.g. /uploads/products/<shop>/<file>) — the receipt/invoice
-        // templates print `company.logoUrl` exactly as stored, with no
-        // resolver of their own, so it has to be a full URL here or the
-        // logo silently fails to load wherever it's printed.
+        // Receipt/invoice templates print `company.logoUrl` as stored with no resolver of their own, so it must be a full URL here.
         const resolvedUrl = res.url.startsWith('/') ? `${API_BASE.replace('/api/pos', '')}${res.url}` : res.url;
         setForm((prev) => ({ ...prev, logoUrl: resolvedUrl }));
         showToast('Logo uploaded — click Save to apply it to your bills and invoices.');
@@ -315,17 +346,24 @@ function CompanyTab({ company, saveSection, showToast }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Billing & Tax
- * ------------------------------------------------------------------ */
+/* ------------------------------- Billing & Tax ------------------------------- */
 
-function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showToast }) {
+function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showToast, section = 'billing' }) {
   const [bForm, setBForm] = useState(billing || {});
   const [tForm, setTForm] = useState(tax || {});
   const [iForm, setIForm] = useState({
     enableBatchTracking: Boolean(pos?.enableBatchTracking),
     nearExpiryDays: pos?.nearExpiryDays ?? 30,
-    allowNegativeStock: pos?.allowNegativeStock !== false
+    enableSerialTracking: Boolean(pos?.enableSerialTracking),
+    allowReturnsOnlySoldSerials: Boolean(pos?.allowReturnsOnlySoldSerials),
+    restrictSoldSerialsInward: Boolean(pos?.restrictSoldSerialsInward),
+    allowDuplicateBatchNumbers: Boolean(pos?.allowDuplicateBatchNumbers),
+    allowReturnsOnlySoldBatch: Boolean(pos?.allowReturnsOnlySoldBatch),
+    allowNegativeStock: pos?.allowNegativeStock !== false,
+    lowStockNotifyEnabled: Boolean(pos?.lowStockNotifyEnabled),
+    lowStockNotifyEmail: pos?.lowStockNotifyEmail || '',
+    allowItemsAfterReturn: Boolean(pos?.allowItemsAfterReturn),
+    customerDisplayEnabled: pos?.customerDisplayEnabled !== false
   });
   const [savingInventory, setSavingInventory] = useState(false);
   const [showLoyaltyModal, setShowLoyaltyModal] = useState(false);
@@ -337,9 +375,26 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
   const [visualBuilderTarget, setVisualBuilderTarget] = useState('thermal');
   const [savingBilling, setSavingBilling] = useState(false);
   const [savingTax, setSavingTax] = useState(false);
+  const [uploadingQr, setUploadingQr] = useState(false);
+  const [autoQrPreview, setAutoQrPreview] = useState('');
 
   const thermalScrollRef = useRef(null);
   const invoiceScrollRef = useRef(null);
+
+  // Live preview so a UPI ID can be confirmed to produce a scannable QR before Billing relies on it; skipped once an image is uploaded.
+  useEffect(() => {
+    if (bForm.qrImageUrl || !bForm.upiId) {
+      setAutoQrPreview('');
+      return;
+    }
+    const payeeName = encodeURIComponent(company?.name || 'Store');
+    const payload = `upi://pay?pa=${bForm.upiId}&pn=${payeeName}&cu=INR`;
+    let cancelled = false;
+    QRCode.toDataURL(payload, { width: 160, margin: 1, color: { dark: '#000000', light: '#ffffff' } })
+      .then((url) => { if (!cancelled) setAutoQrPreview(url); })
+      .catch(() => { if (!cancelled) setAutoQrPreview(''); });
+    return () => { cancelled = true; };
+  }, [bForm.upiId, bForm.qrImageUrl, company?.name]);
 
   const scrollContainer = (ref, offset) => {
     if (ref.current) {
@@ -357,7 +412,16 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
     setIForm({
       enableBatchTracking: Boolean(pos?.enableBatchTracking),
       nearExpiryDays: pos?.nearExpiryDays ?? 30,
-      allowNegativeStock: pos?.allowNegativeStock !== false
+      enableSerialTracking: Boolean(pos?.enableSerialTracking),
+      allowReturnsOnlySoldSerials: Boolean(pos?.allowReturnsOnlySoldSerials),
+      restrictSoldSerialsInward: Boolean(pos?.restrictSoldSerialsInward),
+      allowDuplicateBatchNumbers: Boolean(pos?.allowDuplicateBatchNumbers),
+      allowReturnsOnlySoldBatch: Boolean(pos?.allowReturnsOnlySoldBatch),
+      allowNegativeStock: pos?.allowNegativeStock !== false,
+      lowStockNotifyEnabled: Boolean(pos?.lowStockNotifyEnabled),
+      lowStockNotifyEmail: pos?.lowStockNotifyEmail || '',
+      allowItemsAfterReturn: Boolean(pos?.allowItemsAfterReturn),
+      customerDisplayEnabled: pos?.customerDisplayEnabled !== false
     });
   }, [pos]);
 
@@ -374,6 +438,30 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
       return false;
     } finally {
       setSavingBilling(false);
+    }
+  };
+
+  // Lets shops upload their bank's own QR image instead, since a generated "upi://pay?..." QR doesn't scan reliably in every banking app.
+  const handleQrUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('image', file);
+    setUploadingQr(true);
+    try {
+      const res = await api.post('/upload', formData);
+      if (res.success) {
+        const resolvedUrl = res.url.startsWith('/') ? `${API_BASE.replace('/api/pos', '')}${res.url}` : res.url;
+        setBForm((prev) => ({ ...prev, qrImageUrl: resolvedUrl }));
+        showToast('QR code uploaded — click Save to apply it to Billing and the Customer Display.');
+      } else {
+        showToast(res.message || 'QR code upload failed.', 'error');
+      }
+    } catch (err) {
+      showToast(api.message(err, 'Failed to upload QR code.'), 'error');
+    } finally {
+      setUploadingQr(false);
+      e.target.value = '';
     }
   };
 
@@ -405,13 +493,7 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
     const theme = THERMAL_THEMES.find((t) => t.id === themeId);
     const custom = (bForm.customTemplates || []).find((t) => t.id === themeId);
     if (!theme && !custom) return;
-    // Only the pointer changes here — a theme's own visual config
-    // (showGstin, dividerStyle, sections, ...) must never be flattened onto
-    // the shared billing settings, or picking this theme active would leak
-    // its look into every other theme's rendering too.
-    // Wait for the save to actually succeed before announcing it — showing
-    // this toast unconditionally meant a failed save still told the user
-    // their new default had been applied.
+    // Only the pointer changes — a theme's own visual config must never flatten onto shared billing settings and leak into other themes.
     const ok = await saveBilling({ activeThermalTemplate: themeId, customHtml: '' });
     if (ok) showToast(`Active bill template set to: ${theme ? theme.name : custom.name}`);
   };
@@ -453,11 +535,7 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
   const customThermalTemplates = (bForm.customTemplates || []).filter((t) => t.type === 'thermal');
   const customInvoiceTemplates = (bForm.customTemplates || []).filter((t) => t.type === 'invoice');
 
-  // Billing only ever offers the 2 fixed thermal slots (detailed_gst /
-  // normal_thermal) — see BILLING_THERMAL_THEME_IDS. Both stay editable in
-  // place: a saved edit lands as a customTemplates[] entry with the same id
-  // as the built-in, so it's merged onto that same card here rather than
-  // appearing as a separate, deletable "custom" entry.
+  // The 2 fixed thermal slots stay editable in place: a saved edit reuses the built-in's id, merging onto its card instead of adding a separate entry.
   const allThermalThemes = THERMAL_THEMES
     .filter((th) => BILLING_THERMAL_THEME_IDS.includes(th.id))
     .map((th) => {
@@ -498,13 +576,15 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
 
   return (
     <div className="space-y-4">
+      {section === 'billing' && (
+      <>
       {/* 1. Billing Defaults Panel */}
       <Panel className="space-y-4">
         <div className="flex items-center justify-between border-b pb-2" style={{ borderColor: 'var(--border)' }}>
           <div className="label-eyebrow">Billing & Currency</div>
           <span className="text-[11px] text-[color:var(--text-muted)]">General POS cash counter rules</span>
         </div>
-        
+
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Currency symbol">
             <Input value={bForm.currency || ''} onChange={(e) => setBForm({ ...bForm, currency: e.target.value })} placeholder="₹" />
@@ -618,34 +698,133 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
       <Panel className="space-y-4">
         <div className="flex items-center justify-between border-b pb-2" style={{ borderColor: 'var(--border)' }}>
           <div className="label-eyebrow">Inventory</div>
-          <span className="text-[11px] text-[color:var(--text-muted)]">Batch/lot tracking for perishables & traceable stock</span>
+          <span className="text-[11px] text-[color:var(--text-muted)]">Batch/lot & serial tracking for perishables & traceable stock</span>
+        </div>
+
+        <div className="space-y-3">
+          <div className="text-[11px] font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">
+            Advanced Inventory Tracking
+          </div>
+
+          <div>
+            <CheckboxOption
+              label="Enable Serial Number Tracking"
+              checked={iForm.enableSerialTracking}
+              onChange={(v) =>
+                setIForm({
+                  ...iForm,
+                  enableSerialTracking: v,
+                  // Clear sub-options (not just disable) so a stale "on" can't silently take effect if re-enabled later.
+                  allowReturnsOnlySoldSerials: v ? iForm.allowReturnsOnlySoldSerials : false,
+                  restrictSoldSerialsInward: v ? iForm.restrictSoldSerialsInward : false
+                })
+              }
+            />
+            <CheckboxOption
+              indent
+              label="Allow returns only for sold serial numbers"
+              checked={iForm.allowReturnsOnlySoldSerials}
+              disabled={!iForm.enableSerialTracking}
+              onChange={(v) => setIForm({ ...iForm, allowReturnsOnlySoldSerials: v })}
+            />
+            <CheckboxOption
+              indent
+              label="Restrict already sold serial numbers in inward transactions"
+              hint="Blocks receiving a purchase against a serial number that was already sold — you'll have to correct it before the purchase can be saved."
+              checked={iForm.restrictSoldSerialsInward}
+              disabled={!iForm.enableSerialTracking}
+              onChange={(v) => setIForm({ ...iForm, restrictSoldSerialsInward: v })}
+            />
+          </div>
+
+          <div>
+            <CheckboxOption
+              label="Enable Batch Tracking"
+              hint="Lets individual products track stock by lot number, expiry date, and batch-wise cost. Turn this on first, then enable it per product from the product form."
+              checked={iForm.enableBatchTracking}
+              onChange={(v) =>
+                setIForm({
+                  ...iForm,
+                  enableBatchTracking: v,
+                  allowDuplicateBatchNumbers: v ? iForm.allowDuplicateBatchNumbers : false,
+                  allowReturnsOnlySoldBatch: v ? iForm.allowReturnsOnlySoldBatch : false
+                })
+              }
+            />
+            <CheckboxOption
+              indent
+              label="Allow duplicate batch numbers"
+              hint="Off (default): a batch number already on file for a product is rejected — the purchase gets the next auto-generated number instead. On: the same batch number can be reused."
+              checked={iForm.allowDuplicateBatchNumbers}
+              disabled={!iForm.enableBatchTracking}
+              onChange={(v) => setIForm({ ...iForm, allowDuplicateBatchNumbers: v })}
+            />
+            <CheckboxOption
+              indent
+              label="Allow returns only to the sold batch"
+              checked={iForm.allowReturnsOnlySoldBatch}
+              disabled={!iForm.enableBatchTracking}
+              onChange={(v) => setIForm({ ...iForm, allowReturnsOnlySoldBatch: v })}
+            />
+          </div>
+
+          {iForm.enableBatchTracking && (
+            <div className="grid gap-3 sm:grid-cols-2 pt-1">
+              <Field label="Near-Expiry Alert Window (days)" hint="Batches expiring within this many days show up on the Inventory dashboard">
+                <Input
+                  type="number"
+                  min="1"
+                  value={iForm.nearExpiryDays ?? 30}
+                  onChange={(e) => setIForm({ ...iForm, nearExpiryDays: e.target.value })}
+                />
+              </Field>
+            </div>
+          )}
+
+          <div className="rounded-xl px-3.5 py-2.5 bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-200/80 dark:border-indigo-900/60 text-[11px] text-indigo-900 dark:text-indigo-200">
+            <span className="font-bold">Tracked in:</span> Purchases, Billing, Stock Adjustment &amp; Returns
+          </div>
+        </div>
+
+        <div className="pt-2 border-t border-[color:var(--border-subtle)] space-y-1">
+          <CheckboxOption
+            label="Prevent stock from going below zero"
+            hint="On: billing is blocked for any item that doesn't have enough stock on hand. Off: a sale still goes through even if it takes stock negative (you'll just see a low-stock warning). Stock adjustment always remains available either way to correct counts."
+            checked={!iForm.allowNegativeStock}
+            onChange={(v) => setIForm({ ...iForm, allowNegativeStock: !v })}
+          />
+
+          <CheckboxOption
+            label="Notify me if an item's stock reaches its reorder level to replenish"
+            checked={iForm.lowStockNotifyEnabled}
+            onChange={(v) => setIForm({ ...iForm, lowStockNotifyEnabled: v })}
+          />
+          {iForm.lowStockNotifyEnabled && (
+            <div className="ml-5 pl-3 max-w-sm">
+              <Field label="Notify to *">
+                <Input
+                  type="email"
+                  value={iForm.lowStockNotifyEmail}
+                  onChange={(e) => setIForm({ ...iForm, lowStockNotifyEmail: e.target.value })}
+                  placeholder="you@example.com"
+                />
+              </Field>
+            </div>
+          )}
         </div>
 
         <Toggle
-          label="Enable Batch Tracking"
-          hint="Lets individual products track stock by lot number, expiry date, and batch-wise cost. Turn this on first, then enable it per product from the product form."
-          checked={Boolean(iForm.enableBatchTracking)}
-          onChange={(v) => setIForm({ ...iForm, enableBatchTracking: v })}
+          label="Allow Adding Items After a Return"
+          hint="On: once a return is recorded against an invoice, the biller can continue straight into Billing to ring up an exchange item for the same customer. Off: a return is a standalone transaction — no follow-up sale is offered."
+          checked={Boolean(iForm.allowItemsAfterReturn)}
+          onChange={(v) => setIForm({ ...iForm, allowItemsAfterReturn: v })}
         />
 
-        {iForm.enableBatchTracking && (
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="Near-Expiry Alert Window (days)" hint="Batches expiring within this many days show up on the Inventory dashboard">
-              <Input
-                type="number"
-                min="1"
-                value={iForm.nearExpiryDays ?? 30}
-                onChange={(e) => setIForm({ ...iForm, nearExpiryDays: e.target.value })}
-              />
-            </Field>
-          </div>
-        )}
-
         <Toggle
-          label="Allow Billing Below Zero Stock"
-          hint="On: a sale still goes through even if it takes a product's stock negative (you'll just see a low-stock warning). Off: billing is blocked for any item that doesn't have enough stock on hand — stock adjustment always remains available either way to correct counts."
-          checked={Boolean(iForm.allowNegativeStock)}
-          onChange={(v) => setIForm({ ...iForm, allowNegativeStock: v })}
+          label="Customer-Facing Display"
+          hint="On: a 'Customer Display' button appears in Billing to open a second screen showing the live bill, total, and UPI QR code for the customer to follow along. Off: the button is hidden."
+          checked={Boolean(iForm.customerDisplayEnabled)}
+          onChange={(v) => setIForm({ ...iForm, customerDisplayEnabled: v })}
         />
 
         <div className="flex justify-end pt-2">
@@ -655,6 +834,11 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
         </div>
       </Panel>
 
+      </>
+      )}
+
+      {section === 'templates' && (
+      <>
       {/* 2. POS Bill Templates Gallery Panel */}
       <Panel className="space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-3" style={{ borderColor: 'var(--border)' }}>
@@ -941,6 +1125,11 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
         </div>
       </Panel>
 
+      </>
+      )}
+
+      {section === 'billing' && (
+      <>
       {/* 4. Customer Loyalty & Rewards Program Panel Card with Modal Trigger */}
       <Panel className="space-y-3">
         <div className="flex items-center justify-between border-b pb-2" style={{ borderColor: 'var(--border)' }}>
@@ -1016,6 +1205,11 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
         </div>
       </Panel>
 
+      </>
+      )}
+
+      {section === 'bank' && (
+      <>
       {/* 5. Bank & Payment Details Panel */}
       <Panel className="space-y-4">
         <div className="flex items-center justify-between border-b pb-2" style={{ borderColor: 'var(--border)' }}>
@@ -1039,8 +1233,59 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
           <Field label="Branch Name">
             <Input value={bForm.bankBranch || ''} onChange={(e) => setBForm({ ...bForm, bankBranch: e.target.value })} />
           </Field>
-          <Field label="UPI ID" hint="Used to generate the payment QR code on invoices">
+          <Field label="UPI ID" hint="Used to auto-generate a payment QR code when no QR image is uploaded below">
             <Input value={bForm.upiId || ''} onChange={(e) => setBForm({ ...bForm, upiId: e.target.value })} placeholder="e.g. yourstore@okbank" />
+          </Field>
+          <Field label="UPI QR Code Image (optional)" hint="Upload your bank's own QR code image to use it exactly as-is in Billing and the Customer Display — leave blank to use the auto-generated code from your UPI ID above" className="sm:col-span-2">
+            <div className="flex items-center gap-3">
+              {bForm.qrImageUrl ? (
+                <img
+                  src={bForm.qrImageUrl}
+                  alt="QR code preview"
+                  className="h-16 w-16 object-contain rounded-lg border border-[color:var(--border-subtle)] bg-white shrink-0"
+                  onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                />
+              ) : autoQrPreview ? (
+                <div className="shrink-0 text-center">
+                  <img
+                    src={autoQrPreview}
+                    alt="Auto-generated UPI QR preview"
+                    className="h-16 w-16 object-contain rounded-lg border border-[color:var(--border-subtle)] bg-white"
+                  />
+                  <div className="text-[9px] text-[color:var(--text-muted)] mt-0.5 max-w-16">Auto-generated</div>
+                </div>
+              ) : null}
+              <div className="flex-1 space-y-1.5">
+                <Input
+                  value={bForm.qrImageUrl || ''}
+                  onChange={(e) => setBForm({ ...bForm, qrImageUrl: e.target.value })}
+                  placeholder="https://... or upload a file below"
+                />
+                <div className="flex items-center gap-2">
+                  <input type="file" accept="image/*" onChange={handleQrUpload} className="hidden" id="upi-qr-upload" />
+                  <label
+                    htmlFor="upi-qr-upload"
+                    className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border border-[color:var(--border)] hover:bg-[color:var(--bg-subtle)]"
+                  >
+                    {uploadingQr ? 'Uploading…' : 'Upload QR Image'}
+                  </label>
+                  {bForm.qrImageUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setBForm({ ...bForm, qrImageUrl: '' })}
+                      className="text-[11px] font-bold text-rose-600 hover:underline"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+                {!bForm.qrImageUrl && autoQrPreview && (
+                  <p className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold">
+                    ✓ This QR scans to pay {bForm.upiId} — no image upload needed unless you want your bank's own design.
+                  </p>
+                )}
+              </div>
+            </div>
           </Field>
         </div>
 
@@ -1051,6 +1296,11 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
         </div>
       </Panel>
 
+      </>
+      )}
+
+      {section === 'billing' && (
+      <>
       {/* 6. Tax Settings Panel */}
       <Panel className="space-y-4">
         <div className="flex items-center justify-between border-b pb-2" style={{ borderColor: 'var(--border)' }}>
@@ -1098,7 +1348,11 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
         saveSection={saveSection}
         showToast={showToast}
       />
+      </>
+      )}
 
+      {section === 'templates' && (
+      <>
       {/* Thermal Bill & POS Slip Template Visual Editor Modal */}
       <BillTemplateEditorModal
         open={showTemplateEditor}
@@ -1132,13 +1386,13 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
         initialTarget={visualBuilderTarget}
         initialThemeId={visualBuilderThemeId}
       />
+      </>
+      )}
     </div>
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Bill Template Quick Editor Modal
- * ------------------------------------------------------------------ */
+/* ------------------------------- Bill Template Quick Editor Modal ------------------------------- */
 
 function BillTemplateEditorModal({
   open,
@@ -1149,11 +1403,7 @@ function BillTemplateEditorModal({
   showToast,
   initialThemeId
 }) {
-  // A theme's editable config comes ONLY from that theme's own defaults plus
-  // its own saved override (customTemplates[] entry keyed by the theme's own
-  // id) — never from the raw `billing` object, which is shared across every
-  // theme and would otherwise leak one theme's edits into every other's
-  // rendering the moment this editor is opened or saved.
+  // A theme's config comes only from its own defaults plus its own saved override, never the shared `billing` object (would leak edits across themes).
   const buildThermalConfig = (billingObj, themeId) => {
     const customList = billingObj?.customTemplates || [];
     const custom = customList.find((t) => t.id === themeId && t.type === 'thermal');
@@ -1873,9 +2123,7 @@ function BillTemplateEditorModal({
   );
 }
 
-/* ------------------------------------------------------------------ *
- * A4 / A5 Tax Invoice Bill Template Visual Editor Modal
- * ------------------------------------------------------------------ */
+/* ------------------------------- A4 / A5 Tax Invoice Bill Template Visual Editor Modal ------------------------------- */
 
 function InvoiceTemplateEditorModal({
   open,
@@ -1886,9 +2134,7 @@ function InvoiceTemplateEditorModal({
   showToast,
   initialThemeId
 }) {
-  // See the matching comment in BillTemplateEditorModal — a theme's config
-  // must come only from its own defaults plus its own saved override, never
-  // the shared `billing` object.
+  // Same rule as BillTemplateEditorModal: a theme's config comes only from its own defaults + saved override, never shared `billing`.
   const buildInvoiceConfig = (billingObj, themeId) => {
     const customList = billingObj?.customTemplates || [];
     const custom = customList.find((t) => t.id === themeId && t.type === 'invoice');
@@ -2656,9 +2902,7 @@ function InvoiceTemplateEditorModal({
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Loyalty Points & Rewards Modal Popup
- * ------------------------------------------------------------------ */
+/* ------------------------------- Loyalty Points & Rewards Modal Popup ------------------------------- */
 
 function LoyaltyModal({ open, onClose, pos, loyalty, saveSection, showToast }) {
   const initial = {
@@ -2959,9 +3203,7 @@ function LoyaltyModal({ open, onClose, pos, loyalty, saveSection, showToast }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Hardware
- * ------------------------------------------------------------------ */
+/* ------------------------------- Hardware ------------------------------- */
 
 const DEVICE_META = {
   printer: { label: 'Receipt Printer', interfaces: ['USB', 'Bluetooth'] },
@@ -3099,13 +3341,9 @@ function DeviceCard({ deviceKey, device, showToast, onSaved }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Users & Roles
- * ------------------------------------------------------------------ */
+/* ------------------------------- Users & Roles ------------------------------- */
 
-// Which subscription feature gates each module toggle. Modules absent from
-// this map (dashboard, billing, customers, settings, users) are always
-// available regardless of plan.
+// Which subscription feature gates each module toggle; modules absent here are always available regardless of plan.
 const MODULE_FEATURE_MAP = {
   products: 'products',
   inventory: 'inventory',
@@ -3426,9 +3664,7 @@ function UserModal({ open, onClose, editing, roles, showToast, onSaved }) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Permission matrix modal
- * ------------------------------------------------------------------ */
+/* ------------------------------- Permission matrix modal ------------------------------- */
 
 function OverriddenPill() {
   return <Badge tone="warning">Overridden</Badge>;
@@ -3639,9 +3875,7 @@ function PermissionsModal({
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Tables
- * ------------------------------------------------------------------ */
+/* ------------------------------- Tables ------------------------------- */
 
 function TablesTab({ enableTables, showToast }) {
   const [tables, setTables] = useState([]);
