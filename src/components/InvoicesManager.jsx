@@ -40,7 +40,8 @@ import {
   Truck,
   Package,
   Maximize2,
-  Minimize2
+  Minimize2,
+  UserPlus
 } from 'lucide-react';
 
 import api, { money, fmtDate, fmtDateTime, todayISO, monthStartISO } from '../lib/api';
@@ -1498,10 +1499,11 @@ export default function InvoicesManager({ tenant, showToast, settings: appSettin
         />
       )}
 
-      {/* Edit invoice/bill details (customer, notes, shipping — items & amounts are locked once issued) */}
+      {/* Full invoice edit — customer, notes, shipping, and now items/amounts too (reverses & reposts the ledger) */}
       {editDetailsInvoice && (
         <InvoiceEditModal
           invoice={editDetailsInvoice}
+          products={products}
           showToast={showToast}
           onClose={() => setEditDetailsInvoice(null)}
           onSaved={(updated) => {
@@ -2068,18 +2070,28 @@ function NewInvoiceModal({
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <Field label="Customer *" className="md:col-span-2">
-                <Select
-                  value={selectedCustomerId}
-                  onChange={(e) => handleCustomerDropdownChange(e.target.value)}
-                >
-                  <option value="">— Select a Customer —</option>
-                  <option value="__new__">+ Create New Customer…</option>
-                  {allCustomers.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name} {c.phone ? `(${c.phone})` : ''}
-                    </option>
-                  ))}
-                </Select>
+                <div className="flex items-center gap-2">
+                  <Select
+                    value={selectedCustomerId}
+                    onChange={(e) => handleCustomerDropdownChange(e.target.value)}
+                    className="flex-1"
+                  >
+                    <option value="">— Select a Customer —</option>
+                    {allCustomers.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name} {c.phone ? `(${c.phone})` : ''}
+                      </option>
+                    ))}
+                  </Select>
+                  <button
+                    type="button"
+                    onClick={() => setShowCustomerForm(true)}
+                    title="Create New Customer"
+                    className="shrink-0 flex h-9 w-9 items-center justify-center rounded-xl border border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 transition-colors"
+                  >
+                    <UserPlus className="h-4 w-4" />
+                  </button>
+                </div>
               </Field>
 
               <Field label="Phone Number">
@@ -2090,6 +2102,38 @@ function NewInvoiceModal({
                 />
               </Field>
             </div>
+
+            {selectedCustomerId && (() => {
+              const cust = allCustomers.find((c) => c.id === selectedCustomerId);
+              if (!cust) return null;
+              const out = Number(cust.outstanding || 0);
+              const adv = Number(cust.advance || 0);
+              return (
+                <div className="-mt-1 p-2.5 px-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)]/70 flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-bold text-[color:var(--text-primary)] flex items-center gap-1.5">
+                      <User className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                      {cust.name}
+                    </span>
+                    {cust.gstin && <span className="text-[11px] font-mono text-[color:var(--text-muted)]">GSTIN: {cust.gstin}</span>}
+                  </div>
+                  {out > 0 ? (
+                    <span className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 px-2.5 py-1 rounded-lg border border-rose-200 dark:border-rose-900/60 font-mono">
+                      <span>Current Outstanding:</span><span>{money(out)}</span>
+                    </span>
+                  ) : adv > 0 ? (
+                    <span className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-700 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 px-2.5 py-1 rounded-lg border border-indigo-200 dark:border-indigo-900/60 font-mono">
+                      <span>Advance Credit Available:</span><span>{money(adv)}</span>
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 px-2.5 py-1 rounded-lg border border-emerald-200 dark:border-emerald-900/60">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>No Dues Outstanding</span>
+                    </span>
+                  )}
+                </div>
+              );
+            })()}
 
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
               <Field label="GSTIN / Tax ID">
@@ -2532,16 +2576,17 @@ function NewInvoiceModal({
               >
                 {invoice?.status === 'DRAFT' ? 'Update Draft' : 'Save as Draft'}
               </Button>
-              <Button
-                type="button"
-                variant="secondary"
-                loading={loading}
-                icon={Clock}
-                onClick={() => handleSaveWithStatus('UNPAID')}
-              >
-                Issue as Unpaid
-              </Button>
-              {paymentType === 'PARTIAL' ? (
+              {paymentType === 'UNPAID' ? (
+                <Button
+                  type="button"
+                  variant="primary"
+                  loading={loading}
+                  icon={Clock}
+                  onClick={() => handleSaveWithStatus('UNPAID')}
+                >
+                  Issue as Unpaid
+                </Button>
+              ) : paymentType === 'PARTIAL' ? (
                 <Button
                   type="button"
                   variant="primary"

@@ -708,6 +708,7 @@ export default function PurchaseManager({ tenant, token, showToast }) {
         <InvoiceEditModal
           invoice={editTarget}
           kind="purchase"
+          products={products}
           showToast={showToast}
           onClose={() => setEditTarget(null)}
           onSaved={(updated) => {
@@ -1432,7 +1433,6 @@ function NewPurchaseModal({
   useEffect(() => {
     if (open) {
       setLoading(false);
-      setActivePickerIndex(null);
       setNewProductLineIndex(null);
       setCharges([]);
       setIsRoundOff(true);
@@ -2989,35 +2989,38 @@ function NewPurchaseModal({
               Cancel
             </Button>
             <div className="flex flex-wrap items-center gap-2">
-              <Button
-                type="button"
-                variant="secondary"
-                loading={loading}
-                icon={Clock}
-                onClick={() => handleSaveWithStatus('UNPAID')}
-              >
-                Record as Unpaid (Due)
-              </Button>
-              {paymentType === 'PARTIAL' && (
+              {paymentType === 'UNPAID' ? (
                 <Button
                   type="button"
-                  variant="outline"
+                  variant="primary"
+                  loading={loading}
+                  icon={Clock}
+                  onClick={() => handleSaveWithStatus('UNPAID')}
+                >
+                  Record as Unpaid (Due)
+                </Button>
+              ) : paymentType === 'PARTIAL' ? (
+                <Button
+                  type="button"
+                  variant="primary"
                   loading={loading}
                   icon={CreditCard}
+                  className="bg-amber-600 hover:bg-amber-700 text-white"
                   onClick={() => handleSaveWithStatus('PARTIALLY_PAID', initialPaidAmount)}
                 >
                   Record Partial Payment ({money(Number(initialPaidAmount) || 0)})
                 </Button>
+              ) : (
+                <Button
+                  type="button"
+                  variant="primary"
+                  loading={loading}
+                  icon={CheckCircle2}
+                  onClick={() => handleSaveWithStatus('PAID')}
+                >
+                  Save as Paid ({money(totals.total)})
+                </Button>
               )}
-              <Button
-                type="button"
-                variant="primary"
-                loading={loading}
-                icon={CheckCircle2}
-                onClick={() => handleSaveWithStatus('PAID')}
-              >
-                Save as Paid ({money(totals.total)})
-              </Button>
             </div>
           </div>
         </form>
@@ -3133,7 +3136,6 @@ function PurchaseOrderModal({
       setSupplierRef('');
       setNotes('');
       setLines([blankPOLine()]);
-      setActivePickerIndex(null);
       setNewProductLineIndex(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

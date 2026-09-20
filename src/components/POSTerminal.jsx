@@ -3358,7 +3358,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         decimalPlaces={decimalPlaces}
       />
 
-      <RecentBillsModal open={showRecent} onClose={() => setShowRecent(false)} onReprint={setReceipt} showToast={showToast} decimalPlaces={decimalPlaces} />
+      <RecentBillsModal open={showRecent} onClose={() => setShowRecent(false)} onReprint={setReceipt} showToast={showToast} decimalPlaces={decimalPlaces} products={products} />
 
       <QuickCustomerModal
         open={showAddCustomer}
@@ -3657,6 +3657,7 @@ function ReceiptModal({ receipt, settings, tenant, onClose, showToast, onUpdated
       {editOpen && (
         <InvoiceEditModal
           invoice={receipt}
+          products={products}
           showToast={showToast}
           onClose={() => setEditOpen(false)}
           onSaved={(updated) => {
@@ -5955,7 +5956,7 @@ function TablesModal({ open, tables, selectedId, onSelect, onClose, showToast, o
   );
 }
 
-function RecentBillsModal({ open, onClose, onReprint, showToast, decimalPlaces = 2 }) {
+function RecentBillsModal({ open, onClose, onReprint, showToast, decimalPlaces = 2, products = [] }) {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
@@ -6100,6 +6101,7 @@ function RecentBillsModal({ open, onClose, onReprint, showToast, decimalPlaces =
       {editTarget && (
         <InvoiceEditModal
           invoice={editTarget}
+          products={products}
           showToast={showToast}
           onClose={() => setEditTarget(null)}
           onSaved={(updated) => {
