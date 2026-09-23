@@ -70,7 +70,7 @@ export default function ReportsManager({ showToast }) {
       sessions: '/reports/sessions',
       'customer-outstanding': '/reports/customers/outstanding',
       'vendor-payables': '/reports/vendors/payables',
-      'collective-ledger': '/reports/collective-ledger',
+      'collective-ledger': '/accounts/reports/general-ledger',
       expenses: '/reports/expenses',
       'cash-summary': '/reports/cash-summary'
     };
@@ -751,52 +751,89 @@ function VendorPayables({ data }) {
 }
 
 /** REQ-34 — Customers and vendors together in one ledger, rather than two separate reports. */
+/** REQ-34 — a single consolidated view across every account's ledger (including every customer/vendor sub-ledger), each expandable into its own transaction entries, with a grand total across the whole report. */
 function CollectiveLedger({ data }) {
-  const netPosition = (data.totalReceivable || 0) - (data.totalPayable || 0);
+  const [open, setOpen] = useState({});
+  const ledgers = data?.ledgers || [];
+
+  if (!ledgers.length) return <EmptyState icon={BookOpen} title="No ledger activity in this period" />;
+
+  const totals = ledgers.reduce(
+    (acc, l) => ({
+      debit: acc.debit + (Number(l.totalDebit) || 0),
+      credit: acc.credit + (Number(l.totalCredit) || 0),
+      entries: acc.entries + l.entries.length
+    }),
+    { debit: 0, credit: 0, entries: 0 }
+  );
+
   return (
     <>
       <div className="mb-3 grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <Mini label="Total receivable" value={money(data.totalReceivable)} tone="danger" />
-        <Mini label="Total payable" value={money(data.totalPayable)} tone="danger" />
-        <Mini
-          label="Net position"
-          value={money(Math.abs(netPosition))}
-          tone={netPosition >= 0 ? 'success' : 'danger'}
-        />
-        <Mini label="Parties with a balance" value={data.partyCount} tone="neutral" />
+        <Mini label="Accounts with activity" value={ledgers.length} tone="neutral" />
+        <Mini label="Total entries" value={totals.entries} tone="neutral" />
+        <Mini label="Total debit" value={money(totals.debit)} tone="danger" />
+        <Mini label="Total credit" value={money(totals.credit)} tone="success" />
       </div>
 
-      <DataTable
-        maxHeight="none"
-        dense
-        columns={[
-          {
-            key: 'name',
-            label: 'Party',
-            render: (r) => (
-              <span className="flex items-center gap-1.5 font-semibold">
-                {r.name}
-                <Badge tone={r.partyType === 'CUSTOMER' ? 'info' : 'accent'}>
-                  {r.partyType === 'CUSTOMER' ? 'Customer' : 'Vendor'}
-                </Badge>
-              </span>
-            )
-          },
-          { key: 'phone', label: 'Phone', width: 120, render: (r) => <span className="text-[color:var(--text-muted)]">{r.phone || '—'}</span> },
-          { key: 'due', label: 'Due', align: 'right', width: 130, render: (r) => <Money value={r.due} className="font-bold" /> },
-          {
-            key: 'advance',
-            label: 'Advance',
-            align: 'right',
-            width: 110,
-            render: (r) => <Money value={r.advance} showZero={false} className="text-emerald-600 dark:text-emerald-400" />
-          }
-        ]}
-        rows={data.rows}
-        rowKey={(r) => `${r.partyType}_${r.id}`}
-        empty={<EmptyState icon={BookOpen} title="No party balances in this period" />}
-        footer={['Total', '', money((data.totalReceivable || 0) + (data.totalPayable || 0)), '']}
-      />
+      <div className="space-y-2">
+        {ledgers.map((ledger) => {
+          const isOpen = open[ledger.account.id];
+          return (
+            <div key={ledger.account.id} className="rounded-xl" style={{ border: '1px solid var(--border)' }}>
+              <button
+                type="button"
+                onClick={() => setOpen((p) => ({ ...p, [ledger.account.id]: !p[ledger.account.id] }))}
+                className="flex w-full items-center gap-3 px-3 py-2 text-left"
+              >
+                <span className="tabular w-16 shrink-0 text-[11px] font-bold text-[color:var(--text-muted)]">
+                  {ledger.account.code}
+                </span>
+                <span className="flex-1 truncate text-[12.5px] font-semibold text-[color:var(--text-primary)]">
+                  {ledger.account.name}
+                </span>
+                <Badge>{ledger.entries.length} entries</Badge>
+                <Money value={ledger.closing} className="w-28 shrink-0 text-right text-[12.5px] font-bold" />
+              </button>
+
+              {isOpen && (
+                <div className="overflow-x-auto" style={{ borderTop: '1px solid var(--border)' }}>
+                  <table className="ledger-table w-full">
+                    <thead>
+                      <tr>
+                        <th style={{ width: 100 }}>Date</th>
+                        <th style={{ width: 100 }}>Voucher</th>
+                        <th>Particulars</th>
+                        <th style={{ width: 110, textAlign: 'right' }}>Debit</th>
+                        <th style={{ width: 110, textAlign: 'right' }}>Credit</th>
+                        <th style={{ width: 120, textAlign: 'right' }}>Balance</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ledger.entries.map((e, i) => (
+                        <tr key={`${e.voucherId}_${i}`}>
+                          <td>{fmtDate(e.date)}</td>
+                          <td className="tabular font-bold text-[color:var(--accent)]">{e.voucherNo}</td>
+                          <td className="text-[color:var(--text-secondary)]">{e.narration || '—'}</td>
+                          <td className="tabular text-right">
+                            <Money value={e.debit} showZero={false} />
+                          </td>
+                          <td className="tabular text-right">
+                            <Money value={e.credit} showZero={false} />
+                          </td>
+                          <td className="tabular text-right font-semibold">
+                            <Money value={e.balance} />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </>
   );
 }
@@ -1112,19 +1149,37 @@ function buildExport(id, data, title) {
         totals: ['TOTAL', '', '', num(data.totalPayable), num(data.totalAdvance), '', '', '']
       };
 
-    case 'collective-ledger':
+    case 'collective-ledger': {
+      const flatRows = (data.ledgers || []).flatMap((l) =>
+        l.entries.map((e) => ({
+          accountCode: l.account.code,
+          accountName: l.account.name,
+          date: e.date,
+          voucherNo: e.voucherNo,
+          narration: e.narration,
+          debit: e.debit,
+          credit: e.credit,
+          balance: e.balance
+        }))
+      );
+      const grandDebit = (data.ledgers || []).reduce((s, l) => s + (Number(l.totalDebit) || 0), 0);
+      const grandCredit = (data.ledgers || []).reduce((s, l) => s + (Number(l.totalCredit) || 0), 0);
       return {
         title,
         columns: [
-          { key: 'partyType', label: 'Type', value: (r) => (r.partyType === 'CUSTOMER' ? 'Customer' : 'Vendor') },
-          { key: 'name', label: 'Party' },
-          { key: 'phone', label: 'Phone' },
-          { key: 'due', label: 'Due', align: 'right', value: (r) => num(r.due) },
-          { key: 'advance', label: 'Advance', align: 'right', value: (r) => num(r.advance) }
+          { key: 'accountCode', label: 'Code' },
+          { key: 'accountName', label: 'Account' },
+          { key: 'date', label: 'Date', value: (r) => fmtDate(r.date) },
+          { key: 'voucherNo', label: 'Voucher' },
+          { key: 'narration', label: 'Particulars' },
+          { key: 'debit', label: 'Debit', align: 'right', value: (r) => num(r.debit) },
+          { key: 'credit', label: 'Credit', align: 'right', value: (r) => num(r.credit) },
+          { key: 'balance', label: 'Balance', align: 'right', value: (r) => num(r.balance) }
         ],
-        rows: data.rows,
-        totals: ['TOTAL', '', '', num((data.totalReceivable || 0) + (data.totalPayable || 0)), num((data.totalCustomerAdvance || 0) + (data.totalVendorAdvance || 0))]
+        rows: flatRows,
+        totals: ['TOTAL', '', '', '', '', num(grandDebit), num(grandCredit), '']
       };
+    }
 
     case 'expenses':
       return {

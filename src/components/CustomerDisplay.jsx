@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import QRCode from 'qrcode';
-import { ShoppingBag } from 'lucide-react';
+import { ShoppingBag, User, Award } from 'lucide-react';
 import { money, resolveAssetUrl } from '../lib/api';
 
 /** Front-facing customer screen, kept in sync purely via BroadcastChannel; intentionally has no API access of its own. */
@@ -8,6 +8,26 @@ export default function CustomerDisplay() {
   const [state, setState] = useState(null);
   const [completed, setCompleted] = useState(null);
   const [qrDataUrl, setQrDataUrl] = useState('');
+  const [isDark, setIsDark] = useState(() => {
+    try {
+      return localStorage.getItem('pos_theme') === 'dark';
+    } catch {
+      return true;
+    }
+  });
+
+  // Same theme toggle App.jsx applies to the main window — this is a separate popup window, so it needs its own copy, kept live via the 'storage' event (fires here whenever the main POS tab changes pos_theme).
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', isDark);
+  }, [isDark]);
+
+  useEffect(() => {
+    const onStorage = (e) => {
+      if (e.key === 'pos_theme') setIsDark(e.newValue === 'dark');
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   useEffect(() => {
     if (typeof BroadcastChannel === 'undefined') return undefined;
@@ -44,17 +64,44 @@ export default function CustomerDisplay() {
   const hasItems = items.length > 0;
 
   return (
-    <div className="min-h-screen w-full bg-gradient-to-br from-indigo-950 via-slate-950 to-slate-900 text-white flex flex-col font-sans">
-      <header className="flex items-center justify-center gap-3 py-6 border-b border-white/10 shrink-0">
+    <div className="min-h-screen w-full bg-gradient-to-br from-indigo-50 via-white to-slate-100 dark:from-indigo-950 dark:via-slate-950 dark:to-slate-900 text-slate-900 dark:text-white flex flex-col font-sans">
+      <header className="flex items-center justify-center gap-3 py-6 border-b border-slate-200 dark:border-white/10 shrink-0">
         {state?.logoUrl && (
           <img
             src={resolveAssetUrl(state.logoUrl)}
             alt=""
-            className="h-12 w-12 rounded-xl object-contain bg-white/5"
+            className="h-12 w-12 rounded-xl object-contain bg-slate-100 dark:bg-white/5"
           />
         )}
         <h1 className="text-2xl font-extrabold tracking-tight">{state?.companyName || 'Welcome'}</h1>
       </header>
+
+      {/* Only rendered when a real customer is selected in billing — a walk-in sale sends no customerName, so this stays absent and the screen looks exactly as it always did. */}
+      {state?.customerName && (
+        <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-1.5 py-2.5 px-6 bg-indigo-50/80 dark:bg-white/5 border-b border-slate-200 dark:border-white/10 text-sm shrink-0">
+          <div className="flex items-center gap-1.5 font-bold">
+            <User className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+            {state.customerName}
+            {state.customerPhone && <span className="font-normal opacity-70">· {state.customerPhone}</span>}
+          </div>
+          {state.loyaltyPoints !== null && state.loyaltyPoints !== undefined && (
+            <div className="flex items-center gap-1.5 font-bold text-amber-600 dark:text-amber-400">
+              <Award className="w-4 h-4" />
+              {state.loyaltyPoints} Loyalty Points
+            </div>
+          )}
+          {state.customerOutstanding > 0 && (
+            <div className="text-rose-600 dark:text-rose-400 font-semibold">
+              Due: {money(state.customerOutstanding)}
+            </div>
+          )}
+          {state.customerAdvance > 0 && (
+            <div className="text-emerald-600 dark:text-emerald-400 font-semibold">
+              Advance: {money(state.customerAdvance)}
+            </div>
+          )}
+        </div>
+      )}
 
       {completed ? (
         <div className="flex-1 flex flex-col items-center justify-center gap-4">
@@ -77,7 +124,7 @@ export default function CustomerDisplay() {
         <div className="flex-1 flex flex-col lg:flex-row gap-6 p-8 max-w-6xl mx-auto w-full overflow-hidden">
           <div className="flex-1 space-y-2 overflow-y-auto pr-1">
             {items.map((it, idx) => (
-              <div key={idx} className="flex items-center justify-between bg-white/5 rounded-xl px-4 py-3">
+              <div key={idx} className="flex items-center justify-between bg-slate-100 dark:bg-white/5 rounded-xl px-4 py-3">
                 <div className="min-w-0 pr-3">
                   <div className="font-bold text-lg truncate">{it.name}</div>
                   <div className="text-sm opacity-70">
@@ -90,18 +137,18 @@ export default function CustomerDisplay() {
           </div>
 
           <div className="w-full lg:w-96 shrink-0 space-y-4">
-            <div className="bg-white/10 rounded-2xl p-5 space-y-2">
+            <div className="bg-slate-100 dark:bg-white/10 rounded-2xl p-5 space-y-2">
               <SummaryRow label="Subtotal" value={state.subtotal} />
               {state.discount > 0 && <SummaryRow label="Discount" value={-state.discount} />}
               {state.tax > 0 && <SummaryRow label="Tax" value={state.tax} />}
-              <div className="border-t border-white/20 pt-2 mt-2 flex items-center justify-between">
+              <div className="border-t border-slate-300 dark:border-white/20 pt-2 mt-2 flex items-center justify-between">
                 <span className="text-lg font-bold">Total</span>
                 <span className="text-3xl font-extrabold font-mono">{money(state.total)}</span>
               </div>
             </div>
 
             {state.paymentMode && (
-              <div className="bg-white/10 rounded-2xl p-5 text-center space-y-3">
+              <div className="bg-slate-100 dark:bg-white/10 rounded-2xl p-5 text-center space-y-3">
                 <div className="text-sm uppercase tracking-wider opacity-70">Payment Method</div>
                 <div className="text-xl font-bold">{state.paymentMode}</div>
                 {state.showQr && (state.qrImageUrl || qrDataUrl) && (

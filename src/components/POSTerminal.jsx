@@ -628,6 +628,78 @@ export function resolveProductPricing(product, customer, priceSheets = [], overr
   return { price: finalPrice, discountPercent, ruleSource };
 }
 
+const DEFAULT_BARCODE_SEGMENTS = [
+  { type: 'prefix', length: 2, value: '21' },
+  { type: 'sku', length: 5 },
+  { type: 'weight', length: 5, precision: 3 }
+];
+
+/** Mirrors the backend's decodeEmbeddedBarcode() so a weight-embedded scan resolves instantly, without waiting on the network. */
+function decodeEmbeddedBarcodeLocal(settings, code, products) {
+  const segments = settings?.hardware?.weighingScale?.barcodeSegments;
+  const list = Array.isArray(segments) && segments.length ? segments : DEFAULT_BARCODE_SEGMENTS;
+
+  let pos = 0;
+  let skuTail = null;
+  let weightDirect = null;
+  let mode = null;
+  let kg = 0;
+  let grams = 0;
+  let pieces = null;
+
+  for (const seg of list) {
+    const appliesWhen = seg.appliesWhen || 'ANY';
+    if (appliesWhen !== 'ANY' && appliesWhen !== mode) continue;
+
+    const len = Number(seg.length) || 0;
+    if (!len || pos + len > code.length) return null;
+    const chunk = code.slice(pos, pos + len);
+    pos += len;
+
+    if (seg.type === 'prefix') {
+      const expected = seg.value !== undefined && seg.value !== '' ? String(seg.value).padStart(len, '0') : null;
+      if (expected && chunk !== expected) return null;
+    } else if (seg.type === 'sku') {
+      skuTail = chunk;
+    } else if (seg.type === 'weight') {
+      const raw = Number(chunk);
+      if (!Number.isFinite(raw)) return null;
+      weightDirect = raw / Math.pow(10, Number(seg.precision) || 0);
+    } else if (seg.type === 'flag') {
+      const val = chunk.trim().toUpperCase();
+      if (val === String(seg.weightValue || 'W').toUpperCase()) mode = 'WEIGHT';
+      else if (val === String(seg.pieceValue || 'P').toUpperCase()) mode = 'PIECES';
+      else return null;
+    } else if (seg.type === 'custom') {
+      const raw = Number(chunk);
+      if (seg.role === 'kg') {
+        if (!Number.isFinite(raw)) return null;
+        kg = raw;
+      } else if (seg.role === 'grams') {
+        if (!Number.isFinite(raw)) return null;
+        grams = raw;
+      } else if (seg.role === 'pieces') {
+        if (!Number.isFinite(raw)) return null;
+        pieces = raw;
+      }
+    }
+  }
+
+  if (!skuTail) return null;
+
+  let quantity;
+  if (mode === 'WEIGHT') quantity = kg + grams / 1000;
+  else if (mode === 'PIECES') quantity = pieces !== null ? pieces : 1;
+  else if (weightDirect !== null) quantity = weightDirect;
+  else quantity = 1;
+
+  const product = products.find(
+    (p) => String(p.barcode).slice(-skuTail.length) === skuTail || (p.barcodes || []).some((b) => String(b).slice(-skuTail.length) === skuTail)
+  );
+  if (!product || !Number.isFinite(quantity)) return null;
+  return { product, quantity: Math.round(quantity * 1000) / 1000 };
+}
+
 /** The billing terminal (SOW Module 3) — barcode scanner is a keyboard wedge, so keystrokes are captured globally rather than requiring the search box to hold focus. */
 export default function POSTerminal({ tenant, showToast, settings: appSettings, onSaleCompleted, isFullscreen }) {
   // Trust App.jsx's fullscreen state rather than a second listener here that can desync from it.
@@ -1134,20 +1206,15 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         return;
       }
 
-      const prefix = settings?.hardware?.weighingScale?.embeddedBarcodePrefix || '21';
-
-      if (trimmed.length >= 12 && trimmed.startsWith(prefix)) {
-        const itemPart = trimmed.slice(prefix.length, prefix.length + 5);
-        const grams = Number(trimmed.slice(prefix.length + 5, prefix.length + 10));
-        const match = products.find(
-          (p) => String(p.barcode).slice(-5) === itemPart || (p.barcodes || []).some((b) => String(b).slice(-5) === itemPart)
-        );
-        if (match && Number.isFinite(grams)) {
-          addToCart(match, grams / 1000);
-          playScanSound('add');
-          showToast(`${match.name} — ${(grams / 1000).toFixed(3)} kg added from label.`);
-          return;
-        }
+      const decodedLocal = decodeEmbeddedBarcodeLocal(settings, trimmed, products);
+      if (decodedLocal) {
+        addToCart(decodedLocal.product, decodedLocal.quantity);
+        playScanSound('add');
+        const qtyLabel = decodedLocal.product.requiresWeight
+          ? `${decodedLocal.quantity.toFixed(3)} kg`
+          : `${decodedLocal.quantity} pcs`;
+        showToast(`${decodedLocal.product.name} — ${qtyLabel} added from label.`);
+        return;
       }
 
       const local = products.find(
@@ -1503,13 +1570,20 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
       upiId: settings?.billing?.upiId || settings?.company?.upiId || '',
       qrImageUrl: settings?.billing?.qrImageUrl || '',
       companyName: settings?.company?.name || '',
-      logoUrl: settings?.company?.logoUrl || ''
+      logoUrl: settings?.company?.logoUrl || '',
+      // Walk-in (no customer selected) intentionally sends none of this — the display falls back to its plain welcome/default screen.
+      customerName: customer ? customer.name : '',
+      customerPhone: customer ? customer.phone || '' : '',
+      loyaltyPoints: customer ? customer.loyaltyPoints || 0 : null,
+      customerOutstanding: customer ? customer.outstanding || 0 : 0,
+      customerAdvance: customer ? customer.advance || 0 : 0
     };
     displayStateRef.current = payload;
     displayChannelRef.current?.postMessage({ type: 'STATE', payload });
   }, [
     customerDisplayEnabled,
     cart,
+    customer,
     totals.subtotal,
     totals.discountAmount,
     totals.tax,
@@ -3358,7 +3432,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         decimalPlaces={decimalPlaces}
       />
 
-      <RecentBillsModal open={showRecent} onClose={() => setShowRecent(false)} onReprint={setReceipt} showToast={showToast} decimalPlaces={decimalPlaces} products={products} />
+      <RecentBillsModal open={showRecent} onClose={() => setShowRecent(false)} onReprint={setReceipt} showToast={showToast} decimalPlaces={decimalPlaces} products={products} settings={settings} />
 
       <QuickCustomerModal
         open={showAddCustomer}
@@ -3658,6 +3732,7 @@ function ReceiptModal({ receipt, settings, tenant, onClose, showToast, onUpdated
         <InvoiceEditModal
           invoice={receipt}
           products={products}
+          settings={settings}
           showToast={showToast}
           onClose={() => setEditOpen(false)}
           onSaved={(updated) => {
@@ -5956,7 +6031,7 @@ function TablesModal({ open, tables, selectedId, onSelect, onClose, showToast, o
   );
 }
 
-function RecentBillsModal({ open, onClose, onReprint, showToast, decimalPlaces = 2, products = [] }) {
+function RecentBillsModal({ open, onClose, onReprint, showToast, decimalPlaces = 2, products = [], settings }) {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
@@ -6102,6 +6177,7 @@ function RecentBillsModal({ open, onClose, onReprint, showToast, decimalPlaces =
         <InvoiceEditModal
           invoice={editTarget}
           products={products}
+          settings={settings}
           showToast={showToast}
           onClose={() => setEditTarget(null)}
           onSaved={(updated) => {

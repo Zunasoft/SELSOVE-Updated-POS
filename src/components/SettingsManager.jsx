@@ -5,7 +5,7 @@ import {
   Star, Award, Gift, Sparkles, Calculator, TrendingUp, HelpCircle,
   Printer, Receipt, LayoutTemplate, Palette, Sliders, CheckCircle2, Eye, Edit3,
   Copy, RefreshCw, FileText, CheckCircle, ChevronRight, ChevronLeft, Layers, Maximize2, Minimize2, Type,
-  Building2, Users, LayoutGrid, Landmark
+  Building2, Users, LayoutGrid, Landmark, Percent
 } from 'lucide-react';
 
 import api, { API_BASE } from '../lib/api';
@@ -23,7 +23,8 @@ import { VisualTemplateBuilderModal } from './VisualTemplateBuilderModal';
 
 const TABS = [
   { key: 'company', label: 'Company', icon: Building2 },
-  { key: 'billing', label: 'Billing & Tax', icon: Receipt },
+  { key: 'billing', label: 'Billing', icon: Receipt },
+  { key: 'tax', label: 'Tax & GST', icon: Percent },
   { key: 'templates', label: 'Templates', icon: LayoutTemplate },
   { key: 'bank', label: 'Bank & Payment', icon: Landmark },
   { key: 'hardware', label: 'Hardware', icon: Sliders },
@@ -99,7 +100,7 @@ export default function SettingsManager({ tenant, token, showToast, onSettingsCh
         {/* Right content — whichever settings page is selected on the left. */}
         <div className="flex-1 min-w-0 w-full space-y-4">
           {tab === 'company' && <CompanyTab company={settings.company} saveSection={saveSection} showToast={showToast} />}
-          {(tab === 'billing' || tab === 'templates' || tab === 'bank') && (
+          {(tab === 'billing' || tab === 'tax' || tab === 'templates' || tab === 'bank') && (
             <BillingTaxTab
               section={tab}
               company={settings.company}
@@ -1301,22 +1302,41 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
 
       {section === 'billing' && (
       <>
-      {/* 6. Tax Settings Panel */}
+      {/* Loyalty Points Configuration Modal */}
+      <LoyaltyModal
+        open={showLoyaltyModal}
+        onClose={() => setShowLoyaltyModal(false)}
+        pos={pos}
+        loyalty={loyalty}
+        saveSection={saveSection}
+        showToast={showToast}
+      />
+      </>
+      )}
+
+      {section === 'tax' && (
+      <>
+      {/* Every tax-related setting lives here, on its own — this used to be buried inside Billing, mixed in with unrelated config. */}
       <Panel className="space-y-4">
         <div className="flex items-center justify-between border-b pb-2" style={{ borderColor: 'var(--border)' }}>
           <div className="label-eyebrow">Tax & GST Configuration</div>
           <span className="text-[11px] text-[color:var(--text-muted)]">GST slabs and calculation rules</span>
         </div>
 
-        <Toggle label="Enable GST" checked={Boolean(tForm.enableGst)} onChange={(v) => setTForm({ ...tForm, enableGst: v })} />
+        <Toggle
+          label="Enable GST"
+          hint="Turns tax calculation off entirely (POS billing, invoices and purchases all stop applying tax) when disabled"
+          checked={Boolean(tForm.enableGst)}
+          onChange={(v) => setTForm({ ...tForm, enableGst: v })}
+        />
         <div className="grid gap-3 sm:grid-cols-3">
-          <Field label="Tax mode">
+          <Field label="Tax mode" hint="Whether product prices already include tax, or tax is added on top at billing">
             <Select value={tForm.taxMode || 'EXCLUSIVE'} onChange={(e) => setTForm({ ...tForm, taxMode: e.target.value })}>
               <option value="EXCLUSIVE">Exclusive (Tax added on top of price)</option>
               <option value="INCLUSIVE">Inclusive (Price includes tax)</option>
             </Select>
           </Field>
-          <Field label="Default tax rate (%)">
+          <Field label="Default tax rate (%)" hint="Applied automatically to every newly added product — can still be changed per product">
             <Input type="number" value={tForm.defaultTaxRate ?? ''} onChange={(e) => setTForm({ ...tForm, defaultTaxRate: e.target.value })} placeholder="18" />
           </Field>
           <Field label="GST scheme">
@@ -1338,16 +1358,6 @@ function BillingTaxTab({ company, billing, tax, pos, loyalty, saveSection, showT
           </Button>
         </div>
       </Panel>
-
-      {/* Loyalty Points Configuration Modal */}
-      <LoyaltyModal
-        open={showLoyaltyModal}
-        onClose={() => setShowLoyaltyModal(false)}
-        pos={pos}
-        loyalty={loyalty}
-        saveSection={saveSection}
-        showToast={showToast}
-      />
       </>
       )}
 
@@ -3340,6 +3350,7 @@ function DeviceCard({ deviceKey, device, showToast, onSaved }) {
     </Panel>
   );
 }
+
 
 /* ------------------------------- Users & Roles ------------------------------- */
 

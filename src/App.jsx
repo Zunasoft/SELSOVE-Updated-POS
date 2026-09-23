@@ -288,6 +288,7 @@ export default function App() {
         {...shared}
         products={products}
         categories={categories}
+        settings={settings}
         onRefresh={fetchStoreData}
       />
     ),

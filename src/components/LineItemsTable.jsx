@@ -85,14 +85,19 @@ export default function LineItemsTable({
   priceField = 'price',
   showDiscount = true,
   hsnLabel = 'HSN/SAC',
-  minRows = 1
+  minRows = 1,
+  taxInclusive = false,
+  gstEnabled = true
 }) {
+  // A price under an INCLUSIVE tax mode already contains its tax — don't add tax again on top of it. Mirrors POS billing's and Create Invoice's tax math.
   const recompute = (item) => {
     const qty = Number(item.qty) || 0;
     const price = Number(item[priceField]) || 0;
-    const taxRate = Number(item.taxRate) || 0;
+    const taxRate = gstEnabled ? Number(item.taxRate) || 0 : 0;
     const discount = showDiscount ? Number(item.discount) || 0 : 0;
-    return round2(qty * price + (qty * price * taxRate) / 100 - discount);
+    const gross = qty * price;
+    const taxAmt = taxInclusive ? 0 : (gross * taxRate) / 100;
+    return round2(gross + taxAmt - discount);
   };
 
   const handleFieldChange = (index, field, value) => {

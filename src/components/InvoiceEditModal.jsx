@@ -128,10 +128,12 @@ function toDateInputValue(value) {
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
 /** Full edit modal shared across InvoicesManager, POSTerminal and PurchaseManager — header/party fields, line items, and a Change History & Audit tab. */
-export default function InvoiceEditModal({ invoice, kind = 'sale', products = [], onClose, onSaved, showToast }) {
+export default function InvoiceEditModal({ invoice, kind = 'sale', products = [], settings, onClose, onSaved, showToast }) {
   const config = KIND_CONFIG[kind] || KIND_CONFIG.sale;
   const fieldGroups = config.fieldGroups;
   const allFields = fieldGroups.flatMap((g) => g.fields);
+  const taxInclusive = settings?.tax?.taxMode === 'INCLUSIVE';
+  const gstEnabled = settings?.tax?.enableGst !== false;
 
   const [activeTab, setActiveTab] = useState('edit');
   const [values, setValues] = useState({});
@@ -164,9 +166,12 @@ export default function InvoiceEditModal({ invoice, kind = 'sale', products = []
     items.forEach((it) => {
       const qty = Number(it.qty) || 0;
       const price = Number(it[config.priceField]) || 0;
-      const lineSub = qty * price;
-      subtotal += lineSub;
-      tax += (lineSub * (Number(it.taxRate) || 0)) / 100;
+      const taxRate = gstEnabled ? Number(it.taxRate) || 0 : 0;
+      const gross = qty * price;
+      // A price under an INCLUSIVE tax mode already contains its tax — extract the taxable value rather than adding tax again on top.
+      const taxable = taxInclusive && taxRate > 0 ? gross / (1 + taxRate / 100) : gross;
+      subtotal += taxable;
+      tax += (taxable * taxRate) / 100;
       if (config.showDiscount) discount += Number(it.discount) || 0;
     });
     return {
@@ -175,7 +180,7 @@ export default function InvoiceEditModal({ invoice, kind = 'sale', products = []
       discount: round2(discount),
       total: round2(Math.max(0, subtotal + tax - discount))
     };
-  }, [items, config.priceField, config.showDiscount]);
+  }, [items, config.priceField, config.showDiscount, taxInclusive, gstEnabled]);
 
   if (!invoice) return null;
 
@@ -268,6 +273,8 @@ export default function InvoiceEditModal({ invoice, kind = 'sale', products = []
               products={products}
               priceField={config.priceField}
               showDiscount={config.showDiscount}
+              taxInclusive={taxInclusive}
+              gstEnabled={gstEnabled}
             />
             <div className="flex items-center justify-end gap-4 rounded-xl bg-[color:var(--bg-subtle)] px-4 py-2.5 text-xs font-semibold">
               <span>Subtotal: <span className="font-mono">{money(itemTotals.subtotal, { decimals: false })}</span></span>

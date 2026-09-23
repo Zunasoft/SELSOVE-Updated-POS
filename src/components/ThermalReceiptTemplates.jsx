@@ -371,8 +371,8 @@ export const SAMPLE_RECEIPT_DATA = {
   customerName: 'Ananya Sharma',
   customerPhone: '+91 98765 43210',
   customerGstin: '29ABCDE1234F1Z5',
-  customerLoyaltyPoints: 120,
-  loyaltyPointsEarned: 15,
+  loyaltyBalance: 120,
+  loyaltyEarned: 15,
   subtotal: 1250.00,
   discount: 100.00,
   tax: 150.00,
@@ -732,10 +732,10 @@ export function ThermalReceiptView({
       {cfg.showCustomerGstin && receipt.customerGstin && (
         <div className="font-bold">Cust GSTIN: {receipt.customerGstin}</div>
       )}
-      {cfg.showLoyaltySummary && receipt.customerLoyaltyPoints !== undefined && (
+      {cfg.showLoyaltySummary && receipt.loyaltyBalance !== undefined && (
         <div className="flex justify-between text-slate-700">
-          <span>Points Balance: {receipt.customerLoyaltyPoints} pts</span>
-          {receipt.loyaltyPointsEarned > 0 && <span>+Earned: {receipt.loyaltyPointsEarned} pts</span>}
+          <span>Points Balance: {receipt.loyaltyBalance} pts</span>
+          {receipt.loyaltyEarned > 0 && <span>+Earned: {receipt.loyaltyEarned} pts</span>}
         </div>
       )}
     </div>

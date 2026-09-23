@@ -1504,6 +1504,7 @@ export default function InvoicesManager({ tenant, showToast, settings: appSettin
         <InvoiceEditModal
           invoice={editDetailsInvoice}
           products={products}
+          settings={settings}
           showToast={showToast}
           onClose={() => setEditDetailsInvoice(null)}
           onSaved={(updated) => {
@@ -1801,17 +1802,24 @@ function NewInvoiceModal({
     if (cust) handleSelectCustomer(cust);
   };
 
+  // Tax mode/GST-on-off live in Settings > Tax and must be respected the same way POS billing does — a price marked INCLUSIVE already has its tax baked in, so tax isn't added again on top of it.
+  const taxInclusive = settings?.tax?.taxMode === 'INCLUSIVE';
+  const gstEnabled = settings?.tax?.enableGst !== false;
+  const computeLineTotal = ({ qty, price, taxRate, discount }) => {
+    const gross = (Number(qty) || 0) * (Number(price) || 0);
+    const taxAmt = taxInclusive ? 0 : (gross * (Number(taxRate) || 0)) / 100;
+    return Math.max(0, Math.round((gross + taxAmt - (Number(discount) || 0)) * 100) / 100);
+  };
+
   // When picking a product from the Solid Picker Modal
   const handleProductSelect = (index, prod) => {
     setItems((prev) => {
       const next = [...prev];
       const qty = Number(next[index]?.qty) || 1;
       const price = Number(prod.price) || 0;
-      const taxRate = Number(prod.taxRate || prod.gstRate) || 0;
+      const taxRate = gstEnabled ? Number(prod.taxRate || prod.gstRate) || 0 : 0;
       const discount = Number(next[index]?.discount) || 0;
-      const sub = qty * (Number(price) || 0);
-      const taxAmt = (sub * taxRate) / 100;
-      const total = Math.max(0, Math.round((sub + taxAmt - discount) * 100) / 100);
+      const total = computeLineTotal({ qty, price, taxRate, discount });
 
       next[index] = {
         ...next[index],
@@ -1855,13 +1863,7 @@ function NewInvoiceModal({
     setItems((prev) => {
       const next = [...prev];
       const updated = { ...next[index], [field]: value };
-      const qty = Number(updated.qty) || 0;
-      const price = Number(updated.price) || 0;
-      const taxRate = Number(updated.taxRate) || 0;
-      const discount = Number(updated.discount) || 0;
-      const sub = qty * price;
-      const taxAmt = (sub * taxRate) / 100;
-      updated.total = Math.max(0, Math.round((sub + taxAmt - discount) * 100) / 100);
+      updated.total = computeLineTotal({ qty: updated.qty, price: updated.price, taxRate: updated.taxRate, discount: updated.discount });
 
       next[index] = updated;
       return next;
@@ -1900,13 +1902,15 @@ function NewInvoiceModal({
     items.forEach((item) => {
       const qty = Number(item.qty) || 0;
       const price = Number(item.price) || 0;
-      const taxRate = Number(item.taxRate) || 0;
+      const taxRate = gstEnabled ? Number(item.taxRate) || 0 : 0;
       const disc = Number(item.discount) || 0;
+      const gross = qty * price;
 
-      const lineSub = qty * price;
-      const lineTax = (lineSub * taxRate) / 100;
+      // A price under an INCLUSIVE tax mode already contains its tax — extract the taxable value rather than adding tax again on top.
+      const taxable = taxInclusive && taxRate > 0 ? gross / (1 + taxRate / 100) : gross;
+      const lineTax = (taxable * taxRate) / 100;
 
-      subtotal += lineSub;
+      subtotal += taxable;
       taxTotal += lineTax;
       discountTotal += disc;
     });
@@ -1922,7 +1926,7 @@ function NewInvoiceModal({
       roundOff,
       total: roundedGrand
     };
-  }, [items, isRoundOff]);
+  }, [items, isRoundOff, taxInclusive, gstEnabled]);
 
   const handleSaveWithStatus = async (targetStatus, customPaidAmount) => {
     const validItems = items.filter((i) => {
@@ -2760,17 +2764,24 @@ function QuotationEditorModal({
     if (cust) handleSelectCustomer(cust);
   };
 
+  // Tax mode/GST-on-off must be respected the same way the Invoice form and POS billing do — a price marked INCLUSIVE already has its tax baked in.
+  const taxInclusive = settings?.tax?.taxMode === 'INCLUSIVE';
+  const gstEnabled = settings?.tax?.enableGst !== false;
+  const computeLineTotal = ({ qty, price, taxRate, discount }) => {
+    const gross = (Number(qty) || 0) * (Number(price) || 0);
+    const taxAmt = taxInclusive ? 0 : (gross * (Number(taxRate) || 0)) / 100;
+    return Math.max(0, Math.round((gross + taxAmt - (Number(discount) || 0)) * 100) / 100);
+  };
+
   // When picking a product
   const handleProductSelect = (index, prod) => {
     setItems((prev) => {
       const next = [...prev];
       const qty = Number(next[index]?.qty) || 1;
       const price = Number(prod.price) || 0;
-      const taxRate = Number(prod.taxRate || prod.gstRate) || 0;
+      const taxRate = gstEnabled ? Number(prod.taxRate || prod.gstRate) || 0 : 0;
       const discount = Number(next[index]?.discount) || 0;
-      const sub = qty * (Number(price) || 0);
-      const taxAmt = (sub * taxRate) / 100;
-      const total = Math.max(0, Math.round((sub + taxAmt - discount) * 100) / 100);
+      const total = computeLineTotal({ qty, price, taxRate, discount });
 
       next[index] = {
         ...next[index],
@@ -2814,13 +2825,7 @@ function QuotationEditorModal({
     setItems((prev) => {
       const next = [...prev];
       const updated = { ...next[index], [field]: value };
-      const qty = Number(updated.qty) || 0;
-      const price = Number(updated.price) || 0;
-      const taxRate = Number(updated.taxRate) || 0;
-      const discount = Number(updated.discount) || 0;
-      const sub = qty * price;
-      const taxAmt = (sub * taxRate) / 100;
-      updated.total = Math.max(0, Math.round((sub + taxAmt - discount) * 100) / 100);
+      updated.total = computeLineTotal({ qty: updated.qty, price: updated.price, taxRate: updated.taxRate, discount: updated.discount });
 
       next[index] = updated;
       return next;
@@ -2859,12 +2864,15 @@ function QuotationEditorModal({
     items.forEach((item) => {
       const qty = Number(item.qty) || 0;
       const price = Number(item.price) || 0;
-      const rate = Number(item.taxRate) || 0;
+      const rate = gstEnabled ? Number(item.taxRate) || 0 : 0;
       const disc = Number(item.discount) || 0;
-      const lineSub = qty * price;
-      const lineTax = (lineSub * rate) / 100;
+      const gross = qty * price;
 
-      subtotal += lineSub;
+      // A price under an INCLUSIVE tax mode already contains its tax — extract the taxable value rather than adding tax again on top.
+      const taxable = taxInclusive && rate > 0 ? gross / (1 + rate / 100) : gross;
+      const lineTax = (taxable * rate) / 100;
+
+      subtotal += taxable;
       taxTotal += lineTax;
       discountTotal += disc;
     });
@@ -2876,7 +2884,7 @@ function QuotationEditorModal({
       discount: Math.round(discountTotal * 100) / 100,
       total: grandTotal
     };
-  }, [items]);
+  }, [items, taxInclusive, gstEnabled]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();

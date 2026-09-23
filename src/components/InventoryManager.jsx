@@ -66,12 +66,13 @@ const PRODUCT_TYPE_LABELS = {
   composite: { label: 'Composite (Recipe)', tone: 'success' }
 };
 
-export default function InventoryManager({ products, categories, onRefresh, showToast, tenant }) {
+export default function InventoryManager({ products, categories, onRefresh, showToast, tenant, settings }) {
   const [tab, setTab] = useState('products');
   const [units, setUnits] = useState([]);
   const [warehouses, setWarehouses] = useState([]);
   const [summary, setSummary] = useState(null);
   const [posSettings, setPosSettings] = useState({});
+  const defaultTaxRate = Number(settings?.tax?.defaultTaxRate) || 5;
 
   const fetchAuxData = () => {
     api.get('/units').then((res) => setUnits(Array.isArray(res) ? res : res?.data || [])).catch(() => {});
@@ -146,6 +147,7 @@ export default function InventoryManager({ products, categories, onRefresh, show
           warehouses={warehouses}
           showToast={showToast}
           onRefresh={refreshAll}
+          defaultTaxRate={defaultTaxRate}
           batchTrackingEnabled={Boolean(posSettings.enableBatchTracking)}
           serialTrackingEnabled={Boolean(posSettings.enableSerialTracking)}
           storeNearExpiryDays={posSettings.nearExpiryDays}
@@ -512,7 +514,7 @@ const randomBarcode = () => Math.floor(1000000000 + Math.random() * 9000000000).
 // Mirrors DEFAULT_CUSTOM_LABELS in the backend's controllers/serials.js.
 const DEFAULT_SERIAL_CUSTOM_LABELS = ['Custom Field 1', 'Custom Field 2', 'Custom Field 3', 'Custom Field 4'];
 
-const blankProduct = (categories) => ({
+const blankProduct = (categories, defaultTaxRate = 5) => ({
   name: '',
   regionalName: '',
   printName: '',
@@ -531,14 +533,13 @@ const blankProduct = (categories) => ({
   mrp: '',
   purchasePrice: '',
   marginPercent: '',
-  wholesalePrice: '',
   specialPrice: '',
   stock: '',
   minStock: '5',
   imageUrl: '',
   warehouses: { wh_main: 0, wh_shop: 0 },
   requiresWeight: false,
-  taxRate: 5,
+  taxRate: defaultTaxRate,
   dozenQuantity: 12,
   recipeItems: [],
   recipeNotes: '',
@@ -923,6 +924,7 @@ export function ProductFormModal({
   units,
   warehouses,
   products,
+  defaultTaxRate = 5,
   batchTrackingEnabled,
   serialTrackingEnabled,
   storeNearExpiryDays,
@@ -932,7 +934,7 @@ export function ProductFormModal({
   onCategoryCreated,
   hideBatches = false
 }) {
-  const [form, setForm] = useState(() => blankProduct(categories));
+  const [form, setForm] = useState(() => blankProduct(categories, defaultTaxRate));
   const [localCategories, setLocalCategories] = useState(categories || []);
   const [showCategoryModal, setShowCategoryModal] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -978,7 +980,7 @@ export function ProductFormModal({
   useEffect(() => {
     if (!open) return;
     if (!editing) {
-      setForm(blankProduct(categories));
+      setForm(blankProduct(categories, defaultTaxRate));
       return;
     }
     const product = editing;
@@ -2094,8 +2096,8 @@ export function ProductFormModal({
               </div>
             ) : form.productType !== 'combo' && form.productType !== 'composite' ? (
               <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
-                <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">Multiple Selling Prices</h4>
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">Pricing &amp; Margin</h4>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   <Field label="Purchase Price (₹)" hint={form.productType === 'composite' ? 'Calculated from the recipe' : undefined}>
                     <Input
                       type="number"
@@ -2109,9 +2111,11 @@ export function ProductFormModal({
                         const pp = e.target.value;
                         const margin = Number(form.marginPercent);
                         const next = { ...form, purchasePrice: pp };
-                        // Keep Selling Price in step with an already-configured margin so a cost change doesn't leave it stale.
+                        // Keep Selling Price and MRP in step with an already-configured margin so a cost change doesn't leave them stale.
                         if (form.marginPercent !== '' && Number(pp) > 0) {
-                          next.price = (Number(pp) * (1 + margin / 100)).toFixed(2);
+                          const computed = (Number(pp) * (1 + margin / 100)).toFixed(2);
+                          next.price = computed;
+                          next.mrp = computed;
                         }
                         setForm(next);
                       }}
@@ -2119,7 +2123,7 @@ export function ProductFormModal({
                       className={form.productType === 'composite' && !form.useCustomPricing ? 'opacity-70 cursor-not-allowed' : ''}
                     />
                   </Field>
-                  <Field label="Margin %" hint="Type a margin to auto-fill Selling Price from Purchase Price">
+                  <Field label="Margin %" hint="Type a margin to auto-fill Selling Price and MRP from Purchase Price">
                     <Input
                       type="number"
                       step="0.1"
@@ -2129,7 +2133,9 @@ export function ProductFormModal({
                         const pp = Number(form.purchasePrice) || 0;
                         const next = { ...form, marginPercent: marginVal };
                         if (marginVal !== '' && pp > 0) {
-                          next.price = (pp * (1 + Number(marginVal) / 100)).toFixed(2);
+                          const computed = (pp * (1 + Number(marginVal) / 100)).toFixed(2);
+                          next.price = computed;
+                          next.mrp = computed;
                         }
                         setForm(next);
                       }}
@@ -2156,8 +2162,7 @@ export function ProductFormModal({
                         const priceVal = e.target.value;
                         const pp = Number(form.purchasePrice) || 0;
                         const next = { ...form, price: priceVal };
-                        // Editing Selling Price directly re-derives the margin
-                        // shown, rather than leaving a now-inaccurate figure in place.
+                        // Editing Selling Price directly re-derives the margin shown, rather than leaving a now-inaccurate figure in place.
                         next.marginPercent = pp > 0 && priceVal !== '' ? (((Number(priceVal) - pp) / pp) * 100).toFixed(1) : '';
                         setForm(next);
                       }}
@@ -2166,11 +2171,20 @@ export function ProductFormModal({
                       className={form.productType === 'combo' && !form.useCustomPricing ? 'opacity-70 cursor-not-allowed' : ''}
                     />
                   </Field>
-                  <Field label="MRP (₹)">
-                    <Input type="number" step="0.01" value={form.mrp} onChange={(e) => setForm({ ...form, mrp: e.target.value })} />
-                  </Field>
-                  <Field label="Wholesale Price (₹)">
-                    <Input type="number" step="0.01" value={form.wholesalePrice} onChange={(e) => setForm({ ...form, wholesalePrice: e.target.value })} />
+                  <Field label="MRP (₹)" hint="Auto-fills from margin; edit directly to detect its own margin over cost">
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={form.mrp}
+                      onChange={(e) => {
+                        const mrpVal = e.target.value;
+                        const pp = Number(form.purchasePrice) || 0;
+                        const next = { ...form, mrp: mrpVal };
+                        // Editing MRP directly re-derives the margin shown, same as Selling Price does.
+                        next.marginPercent = pp > 0 && mrpVal !== '' ? (((Number(mrpVal) - pp) / pp) * 100).toFixed(1) : form.marginPercent;
+                        setForm(next);
+                      }}
+                    />
                   </Field>
                 </div>
                 {(form.productType === 'composite' || form.productType === 'combo') && (
@@ -2760,7 +2774,7 @@ export function ProductFormModal({
   );
 }
 
-function ProductsTab({ products, categories, units, warehouses, showToast, onRefresh, batchTrackingEnabled, serialTrackingEnabled, storeNearExpiryDays, tenant }) {
+function ProductsTab({ products, categories, units, warehouses, showToast, onRefresh, batchTrackingEnabled, serialTrackingEnabled, storeNearExpiryDays, tenant, defaultTaxRate }) {
   const [query, setQuery] = useState('');
   const [categoryId, setCategoryId] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
@@ -2965,7 +2979,6 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                   <th className="py-3 px-3">SKU / Barcodes</th>
                   <th className="py-3 px-3 text-right">Purchase Price</th>
                   <th className="py-3 px-3 text-right">Selling Price</th>
-                  <th className="py-3 px-3 text-right">Wholesale / Special</th>
                   <th className="py-3 px-3 text-center">Stock Level</th>
                   <th className="py-3 px-3 text-right">Actions</th>
                 </tr>
@@ -3153,7 +3166,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                       </td>
 
                       {p.productType === 'service' ? (
-                        <td colSpan={3} className="py-3 px-3">
+                        <td colSpan={2} className="py-3 px-3">
                           <div className="flex items-center justify-center gap-2 bg-[color:var(--bg-subtle)]/30 rounded-lg p-2 border border-[color:var(--border-subtle)]">
                             <span className="text-xs font-medium text-[color:var(--text-muted)]">Service Price:</span>
                             <span className="font-bold text-emerald-600 text-base">{money(p.price)}</span>
@@ -3181,10 +3194,6 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                               }
                               return null;
                             })()}
-                          </td>
-
-                          <td className="py-3 px-3 text-right text-xs">
-                            <div className="text-[color:var(--text-secondary)]">WS: {money(p.wholesalePrice)}</div>
                           </td>
                         </>
                       )}
@@ -3257,6 +3266,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
         units={units}
         warehouses={warehouses}
         products={products}
+        defaultTaxRate={defaultTaxRate}
         batchTrackingEnabled={batchTrackingEnabled}
         serialTrackingEnabled={serialTrackingEnabled}
         storeNearExpiryDays={storeNearExpiryDays}
@@ -5451,7 +5461,6 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
                       <th className="py-2.5 px-3 text-right">Purchase Price (₹)</th>
                       <th className="py-2.5 px-3 text-right">Selling Price (₹)</th>
                       <th className="py-2.5 px-3 text-right">MRP (₹)</th>
-                      <th className="py-2.5 px-3 text-right">Wholesale (₹)</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[color:var(--border-subtle)]">
@@ -5468,7 +5477,7 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
                           </td>
                           <td className="py-2 px-3 font-medium text-[color:var(--text-primary)]">{r.category} {isService && <Badge tone="info" className="ml-1">Service</Badge>}</td>
                           {isService ? (
-                            <td colSpan={4} className="py-2 px-3">
+                            <td colSpan={3} className="py-2 px-3">
                               <div className="flex items-center justify-end gap-3 bg-[color:var(--bg-subtle)]/30 rounded-lg p-1.5 border border-[color:var(--border-subtle)] mr-2">
                                 <span className="text-sm uppercase font-bold text-[color:var(--text-primary)] tracking-wider">Service Price:</span>
                                 <Input type="number" step="0.01" value={r.price} onChange={(e) => updatePrice(r.id, 'price', e.target.value)} className="w-32 text-right font-bold bg-white dark:bg-black" />
@@ -5484,9 +5493,6 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
                               </td>
                               <td className="py-2 px-3 text-right">
                                 <Input type="number" step="0.01" value={r.mrp} onChange={(e) => updatePrice(r.id, 'mrp', e.target.value)} className="w-24 text-right ml-auto" />
-                              </td>
-                              <td className="py-2 px-3 text-right">
-                                <Input type="number" step="0.01" value={r.wholesalePrice} onChange={(e) => updatePrice(r.id, 'wholesalePrice', e.target.value)} className="w-24 text-right ml-auto" />
                               </td>
                             </>
                           )}

@@ -1144,6 +1144,11 @@ export function VisualTemplateBuilderModal({
                         onChange={(v) => isThermal && setThermalConfig({ ...thermalConfig, showCustomerDetails: v })}
                       />
                       <Toggle
+                        label="Loyalty Points (Balance & Earned)"
+                        checked={Boolean(isThermal ? thermalConfig.showLoyaltySummary !== false : invoiceConfig.showInvoiceLoyaltySummary !== false)}
+                        onChange={(v) => isThermal ? setThermalConfig({ ...thermalConfig, showLoyaltySummary: v }) : setInvoiceConfig({ ...invoiceConfig, showInvoiceLoyaltySummary: v })}
+                      />
+                      <Toggle
                         label="HSN / SAC Code column"
                         checked={Boolean(isThermal ? thermalConfig.showHsn !== false : invoiceConfig.showItemHsn !== false)}
                         onChange={(v) => isThermal ? setThermalConfig({ ...thermalConfig, showHsn: v }) : setInvoiceConfig({ ...invoiceConfig, showItemHsn: v })}

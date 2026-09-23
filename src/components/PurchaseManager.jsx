@@ -61,6 +61,7 @@ export default function PurchaseManager({ tenant, token, showToast }) {
   const [units, setUnits] = useState([]);
   const [warehouses, setWarehouses] = useState([]);
   const [posSettings, setPosSettings] = useState({});
+  const [settingsFull, setSettingsFull] = useState({});
 
   const loadPurchases = () => api.get('/purchases', { from: range.from, to: range.to }).then((d) => setPurchases(d || []));
   const loadVendors = () => api.get('/vendors').then((d) => setVendors(d || []));
@@ -102,6 +103,7 @@ export default function PurchaseManager({ tenant, token, showToast }) {
       setUnits(un || []);
       setWarehouses(wh || []);
       setPosSettings(settings?.pos || {});
+      setSettingsFull(settings || {});
     } catch (err) {
       if (seq !== loadSeq.current) return;
       showToast(api.message(err, 'Could not load purchase data.'), 'error');
@@ -651,6 +653,7 @@ export default function PurchaseManager({ tenant, token, showToast }) {
         warehouses={warehouses}
         batchTrackingEnabled={Boolean(posSettings.enableBatchTracking)}
         storeNearExpiryDays={posSettings.nearExpiryDays}
+        settings={settingsFull}
         showToast={showToast}
         onProductCreated={loadProducts}
         onSaved={() => {
@@ -673,6 +676,7 @@ export default function PurchaseManager({ tenant, token, showToast }) {
         warehouses={warehouses}
         batchTrackingEnabled={Boolean(posSettings.enableBatchTracking)}
         storeNearExpiryDays={posSettings.nearExpiryDays}
+        settings={settingsFull}
         showToast={showToast}
         onProductCreated={loadProducts}
         poContext={receivePO}
@@ -709,6 +713,7 @@ export default function PurchaseManager({ tenant, token, showToast }) {
           invoice={editTarget}
           kind="purchase"
           products={products}
+          settings={settingsFull}
           showToast={showToast}
           onClose={() => setEditTarget(null)}
           onSaved={(updated) => {
@@ -1372,7 +1377,8 @@ function NewPurchaseModal({
   showToast,
   onSaved,
   onProductCreated,
-  poContext = null
+  poContext = null,
+  settings
 }) {
   const [loading, setLoading] = useState(false);
   const [newProductLineIndex, setNewProductLineIndex] = useState(null);
@@ -1556,17 +1562,24 @@ function NewPurchaseModal({
     if (ven) handleSelectVendor(ven);
   };
 
+  // Tax mode/GST-on-off must be respected the same way billing and invoices do — a rate marked INCLUSIVE already has its tax baked in.
+  const taxInclusive = settings?.tax?.taxMode === 'INCLUSIVE';
+  const gstEnabled = settings?.tax?.enableGst !== false;
+  const computeLineTotal = ({ qty, rate, taxRate, discount }) => {
+    const gross = (Number(qty) || 0) * (Number(rate) || 0);
+    const taxAmt = taxInclusive ? 0 : (gross * (Number(taxRate) || 0)) / 100;
+    return Math.max(0, Math.round((gross + taxAmt - (Number(discount) || 0)) * 100) / 100);
+  };
+
   // Product selection
   const handleProductSelect = (index, prod) => {
     setItems((prev) => {
       const next = [...prev];
       const qty = Number(next[index]?.qty) || 1;
       const rate = prod.purchasePrice !== undefined && prod.purchasePrice !== '' ? Number(prod.purchasePrice) : Number(prod.price) || 0;
-      const taxRate = Number(prod.taxRate || prod.gstRate) || 0;
+      const taxRate = gstEnabled ? Number(prod.taxRate || prod.gstRate) || 0 : 0;
       const discount = Number(next[index]?.discount) || 0;
-      const sub = qty * rate;
-      const taxAmt = (sub * taxRate) / 100;
-      const total = Math.max(0, Math.round((sub + taxAmt - discount) * 100) / 100);
+      const total = computeLineTotal({ qty, rate, taxRate, discount });
 
       next[index] = {
         ...next[index],
@@ -1625,12 +1638,7 @@ function NewPurchaseModal({
       const cleanValue = field === 'qty' && isWholeNumberUnit(next[index]?.unit) ? String(value).replace(/\./g, '') : value;
       const updated = { ...next[index], [field]: cleanValue };
       const qty = Number(updated.qty) || 0;
-      const rate = Number(updated.rate) || 0;
-      const taxRate = Number(updated.taxRate) || 0;
-      const discount = Number(updated.discount) || 0;
-      const sub = qty * rate;
-      const taxAmt = (sub * taxRate) / 100;
-      updated.total = Math.max(0, Math.round((sub + taxAmt - discount) * 100) / 100);
+      updated.total = computeLineTotal({ qty: updated.qty, rate: updated.rate, taxRate: updated.taxRate, discount: updated.discount });
 
       if (field === 'qty' && Array.isArray(updated.batches) && updated.batches.length === 1) {
         updated.batches = [{ ...updated.batches[0], qty }];
@@ -1864,13 +1872,15 @@ function NewPurchaseModal({
     items.forEach((item) => {
       const qty = Number(item.qty) || 0;
       const rate = Number(item.rate) || 0;
-      const taxRate = Number(item.taxRate) || 0;
+      const taxRate = gstEnabled ? Number(item.taxRate) || 0 : 0;
       const disc = Number(item.discount) || 0;
+      const gross = qty * rate;
 
-      const lineSub = qty * rate;
-      const lineTax = (lineSub * taxRate) / 100;
+      // A rate under an INCLUSIVE tax mode already contains its tax — extract the taxable value rather than adding tax again on top.
+      const taxable = taxInclusive && taxRate > 0 ? gross / (1 + taxRate / 100) : gross;
+      const lineTax = (taxable * taxRate) / 100;
 
-      subtotal += lineSub;
+      subtotal += taxable;
       taxTotal += lineTax;
       discountTotal += disc;
     });
@@ -1888,7 +1898,7 @@ function NewPurchaseModal({
       roundOff,
       total: roundedGrand
     };
-  }, [items, charges, isRoundOff]);
+  }, [items, charges, isRoundOff, taxInclusive, gstEnabled]);
 
   const handleSaveWithStatus = async (targetStatus, customPaidAmount) => {
     const validItems = items.filter((i) => {

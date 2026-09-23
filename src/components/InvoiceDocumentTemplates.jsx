@@ -41,6 +41,7 @@ export const INVOICE_THEMES = [
       showPaymentQr: true,
       showInvoiceWordsTotal: true,
       showInvoiceSignature: true,
+      showInvoiceLoyaltySummary: true,
       showInvoiceTerms: true,
       sections: DEFAULT_INVOICE_SECTIONS,
       customLabels: {
@@ -89,6 +90,7 @@ export const INVOICE_THEMES = [
       showPaymentQr: true,
       showInvoiceWordsTotal: true,
       showInvoiceSignature: true,
+      showInvoiceLoyaltySummary: true,
       showInvoiceTerms: true,
       sections: DEFAULT_INVOICE_SECTIONS,
       customLabels: {
@@ -137,6 +139,7 @@ export const INVOICE_THEMES = [
       showPaymentQr: true,
       showInvoiceWordsTotal: true,
       showInvoiceSignature: true,
+      showInvoiceLoyaltySummary: true,
       showInvoiceTerms: true,
       sections: DEFAULT_INVOICE_SECTIONS,
       customLabels: {
@@ -185,6 +188,7 @@ export const INVOICE_THEMES = [
       showPaymentQr: true,
       showInvoiceWordsTotal: true,
       showInvoiceSignature: true,
+      showInvoiceLoyaltySummary: true,
       showInvoiceTerms: true,
       sections: DEFAULT_INVOICE_SECTIONS,
       customLabels: {
@@ -233,6 +237,7 @@ export const INVOICE_THEMES = [
       showPaymentQr: true,
       showInvoiceWordsTotal: false,
       showInvoiceSignature: true,
+      showInvoiceLoyaltySummary: true,
       showInvoiceTerms: false,
       sections: DEFAULT_INVOICE_SECTIONS,
       customLabels: {
@@ -296,6 +301,8 @@ export const SAMPLE_INVOICE_DATA = {
   customerPan: 'AABCT1234F',
   customerState: 'Karnataka',
   customerStateCode: '29',
+  loyaltyBalance: 120,
+  loyaltyEarned: 15,
   consigneeName: 'TechNova Bengaluru Hub',
   consigneeAddress: 'Plot 42, Industrial Suburb, Peenya 2nd Stage, Bengaluru, Karnataka 560058',
   consigneeGstin: '29AABCT1234F1Z8',
@@ -677,6 +684,12 @@ export function InvoiceDocumentView({
       {(invoice.customerState || invoice.customerStateCode) && (
         <div className="text-slate-600">
           State: {invoice.customerState || '—'}{invoice.customerStateCode ? ` (Code: ${invoice.customerStateCode})` : ''}
+        </div>
+      )}
+      {cfg.showInvoiceLoyaltySummary && invoice.loyaltyBalance !== undefined && (
+        <div className="text-slate-600">
+          Points Balance: {invoice.loyaltyBalance} pts
+          {invoice.loyaltyEarned > 0 && ` (+Earned: ${invoice.loyaltyEarned} pts)`}
         </div>
       )}
 

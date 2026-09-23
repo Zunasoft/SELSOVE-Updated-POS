@@ -7,6 +7,9 @@ import {
   Badge, Money, Spinner, EmptyState, DataTable
 } from '../../lib/ui';
 
+const accountLabel = (a) =>
+  a.kind === 'CASH' ? `Counter (${a.name})` : a.kind === 'COMPANY_LOCKER' ? a.name : `Company · ${a.name}`;
+
 /** Fund transfer (contra voucher): moves money between cash/bank ledgers, never touching income or expenses (except bank charges). */
 export default function FundTransfer({ showToast }) {
   const [data, setData] = useState(null);
@@ -103,7 +106,7 @@ export default function FundTransfer({ showToast }) {
                 <option value="">— Select account —</option>
                 {accounts.map((a) => (
                   <option key={a.id} value={a.id}>
-                    {a.kind === 'CASH' ? `Counter (${a.name})` : `Company · ${a.name}`} · {money(a.balance, { decimals: false })}
+                    {accountLabel(a)} · {money(a.balance, { decimals: false })}
                   </option>
                 ))}
               </Select>
@@ -133,7 +136,7 @@ export default function FundTransfer({ showToast }) {
                 <option value="">— Select account —</option>
                 {accounts.map((a) => (
                   <option key={a.id} value={a.id}>
-                    {a.kind === 'CASH' ? `Counter (${a.name})` : `Company · ${a.name}`} · {money(a.balance, { decimals: false })}
+                    {accountLabel(a)} · {money(a.balance, { decimals: false })}
                   </option>
                 ))}
               </Select>

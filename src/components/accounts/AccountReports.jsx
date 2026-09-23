@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  FileBarChart2, Scale, TrendingUp, Landmark, Waves, BookOpen, Users, Truck,
+  FileBarChart2, Scale, TrendingUp, Landmark, Waves, Users, Truck,
   Wallet, Receipt, Percent, AlertTriangle, CheckCircle2
 } from 'lucide-react';
 
@@ -17,7 +17,6 @@ const REPORTS = [
   { id: 'profit-loss', label: 'Profit & Loss', icon: TrendingUp, group: 'Statements' },
   { id: 'balance-sheet', label: 'Balance Sheet', icon: Landmark, group: 'Statements' },
   { id: 'cash-flow', label: 'Cash Flow', icon: Waves, group: 'Statements' },
-  { id: 'general-ledger', label: 'General Ledger', icon: BookOpen, group: 'Ledgers' },
   { id: 'cash-book', label: 'Cash Book', icon: Wallet, group: 'Ledgers' },
   { id: 'bank-book', label: 'Bank Book', icon: Landmark, group: 'Ledgers' },
   { id: 'outstanding-customers', label: 'Outstanding Customers', icon: Users, group: 'Parties' },
@@ -67,8 +66,6 @@ export default function AccountReports({ showToast }) {
         return ['/accounts/reports/balance-sheet', { asOf: range.to || undefined }];
       case 'cash-flow':
         return ['/accounts/reports/cash-flow', q];
-      case 'general-ledger':
-        return ['/accounts/reports/general-ledger', q];
       case 'cash-book':
       case 'bank-book':
         return bookAccountId ? [`/accounts/reports/day-book/${bookAccountId}`, q] : null;
@@ -205,8 +202,6 @@ function renderReport(id, data) {
       return <BalanceSheet data={data} />;
     case 'cash-flow':
       return <CashFlow data={data} />;
-    case 'general-ledger':
-      return <GeneralLedger data={data} />;
     case 'cash-book':
     case 'bank-book':
       return <DayBook data={data} />;
@@ -420,72 +415,6 @@ function CashFlow({ data }) {
         <Money value={data.netChange} colored className="text-[18px] font-bold" />
       </div>
     </>
-  );
-}
-
-function GeneralLedger({ data }) {
-  const [open, setOpen] = useState({});
-
-  if (!data.ledgers.length) return <EmptyState title="No ledger activity in this period" />;
-
-  return (
-    <div className="space-y-2">
-      {data.ledgers.map((ledger) => {
-        const isOpen = open[ledger.account.id];
-        return (
-          <div key={ledger.account.id} className="rounded-xl" style={{ border: '1px solid var(--border)' }}>
-            <button
-              onClick={() => setOpen((p) => ({ ...p, [ledger.account.id]: !p[ledger.account.id] }))}
-              className="flex w-full items-center gap-3 px-3 py-2 text-left"
-            >
-              <span className="tabular w-16 shrink-0 text-[11px] font-bold text-[color:var(--text-muted)]">
-                {ledger.account.code}
-              </span>
-              <span className="flex-1 truncate text-[12.5px] font-semibold text-[color:var(--text-primary)]">
-                {ledger.account.name}
-              </span>
-              <Badge>{ledger.entries.length} entries</Badge>
-              <Money value={ledger.closing} className="w-28 shrink-0 text-right text-[12.5px] font-bold" />
-            </button>
-
-            {isOpen && (
-              <div className="overflow-x-auto" style={{ borderTop: '1px solid var(--border)' }}>
-                <table className="ledger-table w-full">
-                  <thead>
-                    <tr>
-                      <th style={{ width: 100 }}>Date</th>
-                      <th style={{ width: 100 }}>Voucher</th>
-                      <th>Particulars</th>
-                      <th style={{ width: 110, textAlign: 'right' }}>Debit</th>
-                      <th style={{ width: 110, textAlign: 'right' }}>Credit</th>
-                      <th style={{ width: 120, textAlign: 'right' }}>Balance</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {ledger.entries.map((e, i) => (
-                      <tr key={`${e.voucherId}_${i}`}>
-                        <td>{fmtDate(e.date)}</td>
-                        <td className="tabular font-bold text-[color:var(--accent)]">{e.voucherNo}</td>
-                        <td className="text-[color:var(--text-secondary)]">{e.narration || '—'}</td>
-                        <td className="tabular text-right">
-                          <Money value={e.debit} showZero={false} />
-                        </td>
-                        <td className="tabular text-right">
-                          <Money value={e.credit} showZero={false} />
-                        </td>
-                        <td className="tabular text-right font-semibold">
-                          <Money value={e.balance} />
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
   );
 }
 
@@ -787,31 +716,6 @@ function buildExport(id, data, title) {
         rows
       };
     }
-
-    case 'general-ledger':
-      return {
-        title,
-        columns: [
-          { key: 'account', label: 'Account' },
-          { key: 'date', label: 'Date' },
-          { key: 'voucherNo', label: 'Voucher' },
-          { key: 'narration', label: 'Particulars' },
-          { key: 'debit', label: 'Debit', align: 'right' },
-          { key: 'credit', label: 'Credit', align: 'right' },
-          { key: 'balance', label: 'Balance', align: 'right' }
-        ],
-        rows: data.ledgers.flatMap((l) =>
-          l.entries.map((e) => ({
-            account: `${l.account.code} ${l.account.name}`,
-            date: fmtDate(e.date),
-            voucherNo: e.voucherNo,
-            narration: e.narration,
-            debit: num(e.debit),
-            credit: num(e.credit),
-            balance: num(e.balance)
-          }))
-        )
-      };
 
     case 'cash-book':
     case 'bank-book':
