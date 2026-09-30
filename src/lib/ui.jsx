@@ -159,22 +159,23 @@ export function Select({ className = '', children, value, onChange, ...rest }) {
     };
   }, [open]);
 
-  // Parse children options
+  // Parse children options. An option can carry `data-short` for a compact trigger display
+  // (e.g. "W") while its full children text ("W — Weight") only shows in the open list.
   const options = [];
   React.Children.forEach(children, child => {
     if (child && child.type === 'option') {
-      options.push({ value: child.props.value, label: child.props.children });
+      options.push({ value: child.props.value, label: child.props.children, short: child.props['data-short'] });
     } else if (child && Array.isArray(child)) {
       child.forEach(c => {
          if (c && c.type === 'option') {
-           options.push({ value: c.props.value, label: c.props.children });
+           options.push({ value: c.props.value, label: c.props.children, short: c.props['data-short'] });
          }
       })
     }
   });
 
   const selectedOption = options.find(o => String(o.value) === String(value));
-  const selectedLabel = selectedOption ? selectedOption.label : 'Select...';
+  const selectedLabel = selectedOption ? (selectedOption.short ?? selectedOption.label) : 'Select...';
 
   const filtered = options.filter(o =>
     String(o.label || '').toLowerCase().includes(search.toLowerCase())
@@ -364,17 +365,28 @@ export function MultiSelect({ className = '', children, value, onChange, placeho
   );
 }
 
-export function SearchInput({ value, onChange, placeholder = 'Search…', className = '' }) {
+export function SearchInput({ value, onChange, placeholder = 'Search…', className = '', ...rest }) {
   return (
-    <div className={cx('relative flex-1', className)}>
+    <div className={cx('relative', className)}>
       <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[color:var(--text-muted)]" />
       <input
-        className="field-input pl-8.5"
-        style={{ paddingLeft: '2.1rem' }}
+        className="field-input text-xs"
+        style={{ paddingLeft: '2.1rem', paddingRight: value ? '2rem' : undefined }}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
+        {...rest}
       />
+      {value && (
+        <button
+          type="button"
+          onClick={() => onChange('')}
+          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[color:var(--text-muted)] hover:text-[color:var(--text-primary)] transition-colors p-0.5 rounded-full"
+          aria-label="Clear search"
+        >
+          <X className="w-3.5 h-3.5" />
+        </button>
+      )}
     </div>
   );
 }

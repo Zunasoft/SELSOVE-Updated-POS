@@ -1,14 +1,43 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import QRCode from 'qrcode';
 import {
-  Settings, Plus, Trash2, ShieldCheck, RotateCcw, Check, X as XIcon,
-  Star, Award, Gift, Sparkles, Calculator, TrendingUp, HelpCircle,
-  Printer, Receipt, LayoutTemplate, Palette, Sliders, CheckCircle2, Eye, Edit3,
-  Copy, RefreshCw, FileText, CheckCircle, ChevronRight, ChevronLeft, Layers, Maximize2, Minimize2, Type,
-  Building2, Users, LayoutGrid, Landmark, Percent
+  Settings,
+  Plus,
+  Trash2,
+  ShieldCheck,
+  RotateCcw,
+  Check,
+  X as XIcon,
+  Star,
+  Gift,
+  Calculator,
+  TrendingUp,
+  HelpCircle,
+  Printer,
+  Receipt,
+  LayoutTemplate,
+  Palette,
+  Sliders,
+  CheckCircle2,
+  Eye,
+  Edit3,
+  RefreshCw,
+  FileText,
+  ChevronRight,
+  ChevronLeft,
+  Layers,
+  Maximize2,
+  Type,
+  Building2,
+  Users,
+  LayoutGrid,
+  Landmark,
+  Percent,
+  Barcode
 } from 'lucide-react';
 
 import api, { API_BASE } from '../lib/api';
+import useLiveScale, { describeFeed } from '../lib/useLiveScale';
 import {
   Panel, SectionHeader, Button, Modal, Field, Input, Select, Textarea,
   Badge, Money, Spinner, EmptyState, StatTile, DataTable, cx
@@ -28,6 +57,7 @@ const TABS = [
   { key: 'templates', label: 'Templates', icon: LayoutTemplate },
   { key: 'bank', label: 'Bank & Payment', icon: Landmark },
   { key: 'hardware', label: 'Hardware', icon: Sliders },
+  { key: 'barcode', label: 'Barcode', icon: Barcode },
   { key: 'users', label: 'Users & Roles', icon: Users },
   { key: 'tables', label: 'Tables', icon: LayoutGrid }
 ];
@@ -112,7 +142,8 @@ export default function SettingsManager({ tenant, token, showToast, onSettingsCh
               showToast={showToast}
             />
           )}
-          {tab === 'hardware' && <HardwareTab showToast={showToast} />}
+          {tab === 'hardware' && <HardwareTab showToast={showToast} onSettingsChange={onSettingsChange} />}
+          {tab === 'barcode' && <BarcodeFormatTab barcodeFormat={settings.barcodeFormat} saveSection={saveSection} showToast={showToast} />}
           {tab === 'users' && <UsersTab showToast={showToast} />}
           {tab === 'tables' && <TablesTab enableTables={settings.pos?.enableTables} showToast={showToast} />}
         </div>
@@ -3215,17 +3246,322 @@ function LoyaltyModal({ open, onClose, pos, loyalty, saveSection, showToast }) {
 
 /* ------------------------------- Hardware ------------------------------- */
 
+// Keys must match settings.hardware on the backend (store.js) — the receipt printer is `posPrinter`.
+// Card titles come from here, not the name stored with each shop's settings (older shops hold
+// names like "Thermal Receipt Printer" / "RJ11 Cash Drawer").
 const DEVICE_META = {
-  printer: { label: 'Receipt Printer', interfaces: ['USB', 'Bluetooth'] },
-  weighingScale: { label: 'Weighing Scale', interfaces: ['USB', 'RS232', 'Bluetooth'] },
-  barcodeScanner: { label: 'Barcode Scanner', interfaces: ['USB HID', 'Bluetooth'] },
-  barcodePrinter: { label: 'Barcode Printer', interfaces: ['USB', 'Bluetooth'] },
-  cashDrawer: { label: 'Cash Drawer', interfaces: ['Printer Kick-out', 'USB'] }
+  posPrinter: { label: 'Printer' },
+  weighingScale: { label: 'Weighing Scale' },
+  barcodeScanner: { label: 'Barcode Scanner' },
+  barcodePrinter: { label: 'Barcode Label Printer' },
+  cashDrawer: { label: 'Cash Drawer' }
 };
 
-function HardwareTab({ showToast }) {
+/* ------------------------------- Barcode Format ------------------------------- */
+
+// Mirrors modules/barcodeFormat.js's DEFAULT_BARCODE_FORMAT on the backend. One shared shape for
+// the whole store — every weighed product prints through this same structure; only its own id
+// number and W/P/custom flag letter (set on the product itself) are per-product.
+const DEFAULT_BARCODE_FORMAT_FIELDS = [
+  { type: 'id', length: 5 },
+  { type: 'sku', enabled: false, length: 5 },
+  { type: 'flag', length: 1 },
+  { type: 'value', length: 5, precision: 3 },
+  { type: 'pieces', length: 4 }
+];
+
+const BARCODE_FIELD_LABEL = { id: 'Product ID', sku: 'SKU (optional)', flag: 'Type Flag', value: 'Weight', pieces: 'Piece Count' };
+
+/** Mirrors modules/barcodeFormat.js's encodeBarcodeFormat() — a fixed sample product, purely for the live preview. */
+/** Returns each field's own chunk separately (not joined) — product id and SKU are two different ids for the same product, so the preview shows them as visibly distinct segments instead of one continuous run of digits. `omit` drops field types entirely, e.g. showing the SKU-as-identifier variant without Product ID. */
+function previewBarcodeSegments(fields, sample, omit = []) {
+  // Weight labels (W) carry the Weight digits, piece labels (P) the Piece Count digits — never both.
+  const isPiece = String(sample.flag || 'W').toUpperCase() === 'P';
+  return fields
+    .map((f) => {
+      if (omit.includes(f.type)) return null;
+      if (f.type === (isPiece ? 'value' : 'pieces')) return null;
+      const len = Number(f.length) || 0;
+      if (!len) return null;
+      if (f.type === 'sku' && f.enabled === false) return null;
+      let chunk = '';
+      if (f.type === 'id') chunk = String(sample.id || '').padStart(len, '0').slice(-len);
+      else if (f.type === 'sku') chunk = String(sample.sku || '').padStart(len, '0').slice(-len);
+      else if (f.type === 'flag') chunk = String(sample.flag || 'W').toUpperCase().padStart(len, '0').slice(-len);
+      else if (f.type === 'value') {
+        const raw = Math.round(Number(sample.value || 0) * Math.pow(10, Number(f.precision) || 0));
+        const maxRaw = Math.pow(10, len) - 1;
+        chunk = String(Math.min(Math.max(0, raw), maxRaw)).padStart(len, '0');
+      } else if (f.type === 'pieces') {
+        const raw = Math.round(Number(sample.pieces || 0));
+        chunk = String(Math.min(Math.max(0, raw), Math.pow(10, len) - 1)).padStart(len, '0');
+      }
+      return { type: f.type, chunk };
+    })
+    .filter(Boolean);
+}
+
+const BARCODE_SEGMENT_STYLE = {
+  id: 'bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-800',
+  sku: 'bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800',
+  flag: 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800',
+  value: 'bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800',
+  pieces: 'bg-sky-100 dark:bg-sky-950 text-sky-700 dark:text-sky-300 border-sky-200 dark:border-sky-800'
+};
+
+/** Renders a preview's segments as separate labeled chips instead of one run-together string. */
+function BarcodeSegmentPreview({ segments }) {
+  if (!segments.length) return <span>—</span>;
+  return (
+    <span className="inline-flex items-center gap-1.5 flex-wrap align-middle">
+      {segments.map((s, i) => (
+        <span
+          key={`${s.type}-${i}`}
+          className={`inline-flex items-baseline gap-1 whitespace-nowrap px-2 py-1 rounded-md border font-mono font-bold ${BARCODE_SEGMENT_STYLE[s.type] || ''}`}
+          title={BARCODE_FIELD_LABEL[s.type] || s.type}
+        >
+          <span className="text-[8px] font-sans font-semibold uppercase tracking-wide">{s.type}</span>
+          <span>{s.chunk}</span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function BarcodeFormatTab({ barcodeFormat, saveSection, showToast }) {
+  const normalise = (value) => {
+    const list = (Array.isArray(value) && value.length ? value : DEFAULT_BARCODE_FORMAT_FIELDS).map((f) => ({ ...f }));
+    // Stores saved before Weight and Piece Count were split have no pieces row — add one below Weight.
+    if (!list.some((f) => f.type === 'pieces')) {
+      const at = list.findIndex((f) => f.type === 'value');
+      list.splice(at < 0 ? list.length : at + 1, 0, { type: 'pieces', length: 4 });
+    }
+    return list;
+  };
+  const [fields, setFields] = useState(() => normalise(barcodeFormat));
+  const [saving, setSaving] = useState(false);
+  // Live test numbers, capped to each field's own configured length — lets you check "does a real
+  // number of this length actually fit" right here instead of guessing from the length number alone.
+  const [testId, setTestId] = useState('');
+  const [testSku, setTestSku] = useState('');
+  const [testValue, setTestValue] = useState('');
+  const [testPieces, setTestPieces] = useState('');
+
+  useEffect(() => {
+    setFields(normalise(barcodeFormat));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [barcodeFormat]);
+
+  const updateField = (type, patch) => setFields((prev) => prev.map((f) => (f.type === type ? { ...f, ...patch } : f)));
+
+  /** Reorders the fields — the store's printed barcode follows this array order, e.g. Flag, then Product ID, then Value instead of the default Product ID-first order. Encode/decode both read each field by its `type`, not its position, so any order works. */
+  const moveField = (type, dir) => {
+    setFields((prev) => {
+      const list = [...prev];
+      const idx = list.findIndex((f) => f.type === type);
+      const swapWith = idx + dir;
+      if (idx < 0 || swapWith < 0 || swapWith >= list.length) return prev;
+      [list[idx], list[swapWith]] = [list[swapWith], list[idx]];
+      return list;
+    });
+  };
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await saveSection('barcodeFormat', fields);
+      showToast('Barcode format saved — every weighed product now prints through this shape.');
+    } catch (err) {
+      showToast(api.message(err, 'Could not save barcode format.'), 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const valueField = fields.find((f) => f.type === 'value') || {};
+  const skuField = fields.find((f) => f.type === 'sku');
+  const skuIsIdentifier = skuField && skuField.enabled !== false;
+  // Falls back to a demo value whenever the matching test box above is empty; a typed test value
+  // (raw digits, same as what a scale would print) converts through the field's own precision.
+  const testValueDecimal = testValue !== '' ? Number(testValue) / Math.pow(10, Number(valueField.precision) || 0) : 1.235;
+  const sample = { id: testId || '10001', sku: testSku || '54321', value: testValueDecimal, pieces: testPieces !== '' ? Number(testPieces) : 12 };
+  // SKU is a second id for the same product, not extra digits packed in alongside Product ID — when
+  // it's on, the main line identifies by Product ID (SKU left out of it) and a separate "OR" line
+  // shows the alternative code that identifies by SKU instead, rather than both run together in one.
+  const previewW = previewBarcodeSegments(fields, { ...sample, flag: 'W' }, skuIsIdentifier ? ['sku'] : []);
+  const previewP = previewBarcodeSegments(fields, { ...sample, flag: 'P' }, skuIsIdentifier ? ['sku'] : []);
+  const previewWBySku = skuIsIdentifier ? previewBarcodeSegments(fields, { ...sample, flag: 'W' }, ['id']) : null;
+  const previewPBySku = skuIsIdentifier ? previewBarcodeSegments(fields, { ...sample, flag: 'P' }, ['id']) : null;
+
+  return (
+    <Panel className="space-y-4">
+      <div className="text-[13px] font-bold text-[color:var(--text-primary)]">Barcode Format</div>
+
+      <div className="overflow-x-auto rounded-xl border border-[color:var(--border)]">
+        <table className="w-full text-[12px]">
+          <thead>
+            <tr className="bg-[color:var(--bg-subtle)] text-left text-[10.5px] font-bold uppercase text-[color:var(--text-muted)]">
+              <th className="px-3 py-2">Field</th>
+              <th className="px-3 py-2 w-24">Length</th>
+              <th className="px-3 py-2">Additional Info</th>
+              <th className="px-3 py-2 w-16 text-right">Order</th>
+            </tr>
+          </thead>
+          <tbody>
+            {fields.map((f, idx) => (
+              <tr key={f.type} className="border-t border-[color:var(--border-subtle)]">
+                <td className="px-3 py-2 font-semibold">
+                  <div className="flex items-center gap-2">
+                    {f.type === 'sku' && (
+                      <input
+                        type="checkbox"
+                        checked={f.enabled !== false}
+                        onChange={(e) => updateField('sku', { enabled: e.target.checked })}
+                        className="h-3.5 w-3.5 rounded border-[color:var(--border-strong)] text-indigo-600"
+                        title="Include this field in the barcode"
+                      />
+                    )}
+                    <span className={f.type === 'sku' && f.enabled === false ? 'opacity-40' : ''}>{BARCODE_FIELD_LABEL[f.type] || f.type}</span>
+                  </div>
+                </td>
+                <td className="px-3 py-2">
+                  {f.type === 'flag' ? null : (
+                    <Input
+                      type="number"
+                      min="1"
+                      max="10"
+                      value={f.length ?? ''}
+                      disabled={f.type === 'sku' && f.enabled === false}
+                      onChange={(e) => updateField(f.type, { length: Number(e.target.value) || 0 })}
+                    />
+                  )}
+                </td>
+                <td className="px-3 py-2 text-[color:var(--text-muted)]">
+                  {f.type === 'id' && (
+                    <Input
+                      inputMode="numeric"
+                      value={testId}
+                      maxLength={Number(f.length) || 1}
+                      onChange={(e) => setTestId(e.target.value.replace(/\D/g, '').slice(0, Number(f.length) || 1))}
+                      placeholder={'0'.repeat(Number(f.length) || 1)}
+                      className="w-24 font-mono"
+                    />
+                  )}
+                  {f.type === 'sku' && (
+                    f.enabled === false ? (
+                      'Not included'
+                    ) : (
+                      <Input
+                        inputMode="numeric"
+                        value={testSku}
+                        maxLength={Number(f.length) || 1}
+                        onChange={(e) => setTestSku(e.target.value.replace(/\D/g, '').slice(0, Number(f.length) || 1))}
+                        placeholder={'0'.repeat(Number(f.length) || 1)}
+                        className="w-24 font-mono"
+                      />
+                    )
+                  )}
+                  {f.type === 'flag' && 'W/P'}
+                  {f.type === 'pieces' && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span>Whole number, up to {(Math.pow(10, Number(f.length) || 0) - 1).toLocaleString()}</span>
+                      <Input
+                        inputMode="numeric"
+                        value={testPieces}
+                        maxLength={Number(f.length) || 1}
+                        onChange={(e) => setTestPieces(e.target.value.replace(/\D/g, '').slice(0, Number(f.length) || 1))}
+                        placeholder={'0'.repeat(Number(f.length) || 1)}
+                        className="w-24 font-mono"
+                      />
+                    </div>
+                  )}
+                  {f.type === 'value' && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span>Precision</span>
+                      <Input
+                        type="number"
+                        min="0"
+                        max="6"
+                        value={f.precision ?? 0}
+                        onChange={(e) => updateField('value', { precision: Number(e.target.value) || 0 })}
+                        className="w-16"
+                      />
+                      <span className="text-[10.5px]">decimal places · up to {((Math.pow(10, Number(f.length) || 0) - 1) / Math.pow(10, Number(f.precision) || 0)).toLocaleString()}</span>
+                      <Input
+                        inputMode="numeric"
+                        value={testValue}
+                        maxLength={Number(f.length) || 1}
+                        onChange={(e) => setTestValue(e.target.value.replace(/\D/g, '').slice(0, Number(f.length) || 1))}
+                        placeholder={'0'.repeat(Number(f.length) || 1)}
+                        className="w-24 font-mono"
+                      />
+                    </div>
+                  )}
+                </td>
+                <td className="px-3 py-2">
+                  <div className="flex items-center justify-end gap-1">
+                    <button
+                      type="button"
+                      disabled={idx === 0}
+                      onClick={() => moveField(f.type, -1)}
+                      className="disabled:opacity-30 text-[color:var(--text-muted)] hover:text-[color:var(--text-primary)]"
+                      title="Move up"
+                    >
+                      <ChevronLeft className="h-3.5 w-3.5 rotate-90" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={idx === fields.length - 1}
+                      onClick={() => moveField(f.type, 1)}
+                      className="disabled:opacity-30 text-[color:var(--text-muted)] hover:text-[color:var(--text-primary)]"
+                      title="Move down"
+                    >
+                      <ChevronRight className="h-3.5 w-3.5 rotate-90" />
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="rounded-xl p-2.5 bg-[color:var(--bg-subtle)] text-[11px] text-[color:var(--text-primary)] space-y-2.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="shrink-0">A weighed item (e.g. {Number(1.235).toFixed(Number(valueField.precision) || 0)}kg) scans as</span>
+          <BarcodeSegmentPreview segments={previewW} />
+        </div>
+        {previewWBySku && (
+          <div className="flex flex-wrap items-center gap-2 pl-4">
+            <span className="shrink-0 font-bold">OR, identified by SKU instead</span>
+            <BarcodeSegmentPreview segments={previewWBySku} />
+          </div>
+        )}
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="shrink-0">A piece-counted item (e.g. 12 pcs) scans as</span>
+          <BarcodeSegmentPreview segments={previewP} />
+        </div>
+        {previewPBySku && (
+          <div className="flex flex-wrap items-center gap-2 pl-4">
+            <span className="shrink-0 font-bold">OR, identified by SKU instead</span>
+            <BarcodeSegmentPreview segments={previewPBySku} />
+          </div>
+        )}
+      </div>
+
+      <div className="flex justify-end">
+        <Button variant="primary" onClick={save} loading={saving}>Save Barcode Format</Button>
+      </div>
+    </Panel>
+  );
+}
+
+function HardwareTab({ showToast, onSettingsChange }) {
   const [hardware, setHardware] = useState(null);
   const [loading, setLoading] = useState(true);
+  // Live device status from /hardware/status — checked now, never the stored "READY"/"CONNECTED".
+  const [live, setLive] = useState(null);
+  const [checking, setChecking] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -3238,43 +3574,292 @@ function HardwareTab({ showToast }) {
     }
   };
 
+  const checkStatus = async () => {
+    setChecking(true);
+    try {
+      setLive(await api.get('/hardware/status'));
+    } catch {
+      setLive(null);
+    } finally {
+      setChecking(false);
+    }
+  };
+
   useEffect(() => {
     load();
+    checkStatus();
   }, []);
 
   if (loading || !hardware) return <Spinner label="Loading hardware…" />;
 
   return (
-    <div className="grid gap-3 sm:grid-cols-2">
-      {Object.keys(DEVICE_META).map((key) => (
-        <DeviceCard
-          key={key}
-          deviceKey={key}
-          device={hardware[key] || {}}
-          showToast={showToast}
-          onSaved={(d) => setHardware((h) => ({ ...h, [key]: d }))}
-        />
-      ))}
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11.5px] text-[color:var(--text-muted)]">
+          Status is checked live on this PC. Plug a device in, then check again.
+        </span>
+        <Button size="sm" icon={RefreshCw} onClick={checkStatus} loading={checking}>
+          Check devices
+        </Button>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {Object.keys(DEVICE_META).map((key) => (
+          <DeviceCard
+            key={key}
+            deviceKey={key}
+            device={hardware[key] || {}}
+            liveStatus={live?.devices?.[key]}
+            checking={checking && !live}
+            printers={live?.printers || []}
+            showToast={showToast}
+            onSaved={(d) => {
+              setHardware((h) => ({ ...h, [key]: d }));
+              // Billing reads hardware from the app-wide settings — refresh them so the change applies without a reload.
+              onSettingsChange?.();
+              checkStatus();
+            }}
+          />
+        ))}
+      </div>
     </div>
   );
 }
 
-function DeviceCard({ deviceKey, device, showToast, onSaved }) {
+// 'none' = no device set up. Older settings store 'simulated' for the same thing (it used to hand out
+// random weights), so both read as "Not connected".
+const connValue = (t) => (!t || t === 'simulated' ? 'none' : t);
+
+// What each device's on/off switch does — shown under the switch so "off" is never a mystery.
+const POWER_HINTS = {
+  barcodeScanner: ['Scans add items in Billing.', 'Off — scanning in Billing switches it back on by itself.'],
+  posPrinter: ['Receipts print after a sale (when "print after checkout" is on in Billing).', 'No automatic receipt printing — Print is still on each receipt.'],
+  weighingScale: ['Weights are read from the scale in Billing.', 'The scale is not read — weights are typed by hand.'],
+  cashDrawer: ['The drawer opens after cash sales.', 'The POS never opens the drawer.']
+};
+
+const SCALE_CONNECTION_TYPES = [
+  { value: 'none', label: 'Not connected (type weights by hand)' },
+  { value: 'serial', label: 'USB / Serial (COM port)' },
+  { value: 'network', label: 'Network (TCP)' },
+  { value: 'keyboard-wedge', label: 'Keyboard-wedge (types the reading)' }
+];
+
+const DRAWER_CONNECTION_TYPES = [
+  { value: 'none', label: 'Not connected' },
+  { value: 'windows-share', label: 'USB printer (Windows shared printer)' },
+  { value: 'serial', label: 'USB / Serial (printer’s COM port)' },
+  { value: 'network', label: 'Network printer (TCP, e.g. port 9100)' }
+];
+
+// Request commands for scales that only answer when asked (Read mode → Poll).
+const SCALE_POLL_PRESETS = [
+  { value: '\\x05', label: 'CAS / ENQ (\\x05)' },
+  { value: 'W', label: 'Toledo / Avery (W)' },
+  { value: 'P', label: 'Print (P)' },
+  { value: 'SI\\r\\n', label: 'Mettler MT-SICS (SI)' },
+  { value: 'R', label: 'Read (R)' }
+];
+
+// Every device reads the same way: Connected / Not connected / Off — the reason goes in the line below.
+const liveLabel = (st) => (!st ? '—' : st.state === 'off' ? 'Off' : st.state === 'connected' ? 'Connected' : 'Not connected');
+
+const LIVE_TONES = {
+  connected: 'success',
+  offline: 'danger',
+  not_found: 'danger',
+  not_set: 'warning',
+  not_selected: 'warning',
+  not_connected: 'neutral',
+  unknown: 'info',
+  off: 'neutral'
+};
+
+function SerialPortFields({ form, setForm, serialPorts, portsLoading, refreshSerialPorts, showLineSettings }) {
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      <Field label="COM port">
+        <div className="flex items-center gap-1.5">
+          <Select value={form.comPort || ''} onChange={(e) => setForm({ ...form, comPort: e.target.value })} className="flex-1">
+            <option value="">Select…</option>
+            {!serialPorts.some((p) => p.path === form.comPort) && form.comPort && (
+              <option value={form.comPort}>{form.comPort} (not detected)</option>
+            )}
+            {serialPorts.map((p) => (
+              <option key={p.path} value={p.path}>{p.path}{p.manufacturer ? ` — ${p.manufacturer}` : ''}</option>
+            ))}
+          </Select>
+          <Button size="sm" onClick={refreshSerialPorts} loading={portsLoading} title="Rescan COM ports">↻</Button>
+        </div>
+      </Field>
+      <Field label="Baud rate">
+        <Select value={String(form.baudRate ?? 9600)} onChange={(e) => setForm({ ...form, baudRate: Number(e.target.value) })}>
+          {[1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200].map((b) => (
+            <option key={b} value={String(b)}>{b}</option>
+          ))}
+        </Select>
+      </Field>
+      {showLineSettings && (
+        <>
+          <Field label="Data bits / Parity / Stop bits" hint="Most scales: 8-N-1. Toledo/Avery: often 7-E-1.">
+            <div className="grid grid-cols-3 gap-1.5">
+              <Select value={String(form.dataBits ?? 8)} onChange={(e) => setForm({ ...form, dataBits: Number(e.target.value) })}>
+                {[7, 8].map((b) => <option key={b} value={String(b)}>{b}</option>)}
+              </Select>
+              <Select value={form.parity || 'none'} onChange={(e) => setForm({ ...form, parity: e.target.value })}>
+                <option value="none">None</option>
+                <option value="even">Even</option>
+                <option value="odd">Odd</option>
+              </Select>
+              <Select value={String(form.stopBits ?? 1)} onChange={(e) => setForm({ ...form, stopBits: Number(e.target.value) })}>
+                {[1, 2].map((b) => <option key={b} value={String(b)}>{b}</option>)}
+              </Select>
+            </div>
+          </Field>
+          <div />
+        </>
+      )}
+    </div>
+  );
+}
+
+function DeviceCard({ deviceKey, device, liveStatus, checking, printers = [], showToast, onSaved }) {
   const meta = DEVICE_META[deviceKey];
   const [form, setForm] = useState(device);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [serialPorts, setSerialPorts] = useState([]);
+  const [portsLoading, setPortsLoading] = useState(false);
+  const [readingScale, setReadingScale] = useState(false);
+  const [scaleReadResult, setScaleReadResult] = useState(null);
+  const [rawLines, setRawLines] = useState(null);
+  const [sampleLine, setSampleLine] = useState('');
+  const [sampleResult, setSampleResult] = useState(null);
+  const [scanTest, setScanTest] = useState('');
+  const [scanResult, setScanResult] = useState(null);
 
   useEffect(() => {
     setForm(device);
   }, [device]);
 
+  const refreshSerialPorts = async () => {
+    setPortsLoading(true);
+    try {
+      const ports = await api.get('/hardware/serial-ports');
+      setSerialPorts(Array.isArray(ports) ? ports : []);
+    } catch (err) {
+      showToast(api.message(err, 'Could not list serial ports.'), 'error');
+    } finally {
+      setPortsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if ((deviceKey === 'weighingScale' || deviceKey === 'cashDrawer') && form.connectionType === 'serial') refreshSerialPorts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviceKey, form.connectionType]);
+
+  // Tests run against the saved config on the server, so unsaved edits are saved first — otherwise
+  // "Test" would silently check the old COM port / host.
+  const persist = async () => {
+    const res = await api.put(`/hardware/${deviceKey}`, form);
+    onSaved(res.data);
+    return res;
+  };
+
+  // The scale's live feed follows the SAVED settings, so a changed port / baud rate / host is applied on
+  // its own a moment after it is picked (format fields too) — no need to press Save or "Read weight now".
+  const scaleConnKey = (c = {}) =>
+    [c.connectionType, c.comPort, c.baudRate, c.dataBits, c.parity, c.stopBits, c.host, c.port, c.readMode, c.pollCommand, c.pollIntervalMs, c.unit, c.decimals, c.stabilityTolerance ?? '', c.confirmReadings ?? ''].join('|');
+  useEffect(() => {
+    if (deviceKey !== 'weighingScale') return undefined;
+    if (scaleConnKey(form) === scaleConnKey(device)) return undefined;
+    if (form.connectionType === 'serial' && !form.comPort) return undefined;
+    if (form.connectionType === 'network' && (!form.host || !form.port)) return undefined;
+    const timer = setTimeout(() => {
+      persist()
+        .then(() => showToast('Scale connection updated.'))
+        .catch((err) => showToast(api.message(err, 'Could not update the scale connection.'), 'error'));
+    }, 900);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviceKey, form.connectionType, form.comPort, form.baudRate, form.dataBits, form.parity, form.stopBits, form.host, form.port, form.readMode, form.pollCommand, form.pollIntervalMs, form.unit, form.decimals, form.stabilityTolerance, form.confirmReadings]);
+
+  const [openingDrawer, setOpeningDrawer] = useState(false);
+  const [drawerResult, setDrawerResult] = useState(null);
+
+  const openDrawerNow = async () => {
+    setOpeningDrawer(true);
+    setDrawerResult(null);
+    try {
+      await persist();
+      const res = await api.post('/hardware/cash-drawer/open');
+      setDrawerResult({ ok: true, message: res.message || 'Drawer opened.' });
+    } catch (err) {
+      setDrawerResult({ ok: false, message: api.message(err, 'Could not open the cash drawer.') });
+    } finally {
+      setOpeningDrawer(false);
+    }
+  };
+
+  const loadRawLines = async () => {
+    try {
+      const diag = await api.get('/hardware/weight/diagnostics');
+      setRawLines(diag);
+    } catch {
+      setRawLines(null);
+    }
+  };
+
+  const readScaleNow = async () => {
+    setReadingScale(true);
+    setScaleReadResult(null);
+    try {
+      await persist();
+      const data = await api.get('/hardware/weight');
+      setScaleReadResult({ ok: true, ...data });
+    } catch (err) {
+      setScaleReadResult({ ok: false, message: api.message(err, 'Scale did not respond.') });
+    } finally {
+      setReadingScale(false);
+      loadRawLines();
+    }
+  };
+
+  const testSampleLine = async () => {
+    setSampleResult(null);
+    try {
+      const { weightPattern, decimals, unit } = form;
+      const res = await api.post('/hardware/weight/parse-test', { line: sampleLine, weightPattern, decimals, unit });
+      setSampleResult(res.data);
+    } catch (err) {
+      setSampleResult({ matched: false, error: api.message(err, 'Could not test that line.') });
+    }
+  };
+
+  const runScanTest = async (e) => {
+    e.preventDefault();
+    const code = scanTest.trim();
+    if (!code) return;
+    try {
+      const res = await api.get(`/hardware/decode-barcode/${encodeURIComponent(code)}`);
+      setScanResult({
+        ok: true,
+        code,
+        message: res.embedded
+          ? `${res.product.name} — ${Number(res.quantity).toFixed(3)} ${res.product.unit} (weight label)`
+          : res.product.name
+      });
+    } catch (err) {
+      setScanResult({ ok: false, code, message: api.message(err, 'No product matches that barcode.') });
+    }
+    setScanTest('');
+  };
+
   const save = async () => {
     setSaving(true);
     try {
-      const res = await api.put(`/hardware/${deviceKey}`, form);
+      const res = await persist();
       showToast(res.message || `${meta.label} saved.`);
-      onSaved(res.data);
     } catch (err) {
       showToast(api.message(err, `Could not save ${meta.label}.`), 'error');
     } finally {
@@ -3285,52 +3870,415 @@ function DeviceCard({ deviceKey, device, showToast, onSaved }) {
   const test = async () => {
     setTesting(true);
     try {
+      await persist();
       const res = await api.post(`/hardware/${deviceKey}/test`);
       showToast(res.message || 'Connection test complete.');
       onSaved(res.data);
     } catch (err) {
       showToast(api.message(err, 'Connection test failed.'), 'error');
+      if (err?.response?.data?.data) onSaved(err.response.data.data);
     } finally {
       setTesting(false);
+      if (deviceKey === 'weighingScale') loadRawLines();
+    }
+  };
+
+  const isScaleConnection = form.connectionType === 'serial' || form.connectionType === 'network';
+
+  const [scannerSeen, setScannerSeen] = useState(() => {
+    try {
+      return localStorage.getItem('pos_scanner_seen') === '1';
+    } catch {
+      return false;
+    }
+  });
+  // Saved scale settings are what the server reads, so the live feed follows the saved (not the edited) state.
+  const scaleSaved = device;
+  const scaleFeedOn = deviceKey === 'weighingScale' && scaleSaved?.enabled !== false && (scaleSaved?.connectionType === 'serial' || scaleSaved?.connectionType === 'network');
+  const liveFeed = useLiveScale(scaleFeedOn, `${scaleSaved?.connectionType}|${scaleSaved?.comPort}|${scaleSaved?.baudRate}|${scaleSaved?.host}|${scaleSaved?.port}`);
+  const scaleFeed = describeFeed(liveFeed);
+  const status =
+    deviceKey === 'barcodeScanner' && liveStatus?.state !== 'off' && scannerSeen
+      ? { state: 'connected', label: 'Detected', detail: 'This PC has seen the scanner scan — it is working.' }
+      : scaleFeedOn && liveStatus?.state !== 'off'
+        ? scaleFeed.connected
+          ? { state: 'connected', label: 'Connected', detail: 'The scale is sending weights.' }
+          : scaleFeed.tone === 'idle'
+            ? liveStatus
+            : { state: 'offline', label: 'Not connected', detail: scaleFeed.sub }
+        : liveStatus;
+
+  // On/off switch: saves at once (with any other edits on the card). A missing `enabled` means on.
+  const powerHints = POWER_HINTS[deviceKey];
+  const isOn = form.enabled !== false;
+  const [switching, setSwitching] = useState(false);
+  const switchPower = async () => {
+    setSwitching(true);
+    try {
+      const res = await api.put(`/hardware/${deviceKey}`, { ...form, enabled: !isOn });
+      onSaved(res.data);
+      showToast(`${meta.label} switched ${!isOn ? 'on' : 'off'}.`);
+    } catch (err) {
+      showToast(api.message(err, `Could not switch ${meta.label} ${!isOn ? 'on' : 'off'}.`), 'error');
+    } finally {
+      setSwitching(false);
+    }
+  };
+
+  const [detecting, setDetecting] = useState(false);
+  const [detectResult, setDetectResult] = useState(null);
+  const detectScale = async () => {
+    setDetecting(true);
+    setDetectResult(null);
+    try {
+      const res = await api.post('/hardware/weight/detect', { force: true });
+      const found = res.data?.found || [];
+      setDetectResult({
+        ok: found.length === 1,
+        message: found.length > 1
+          ? `${res.message} Found on: ${found.map((f) => `${f.path} (${f.baudRate})`).join(', ')}.`
+          : res.message
+      });
+      if (res.data?.applied) onSaved(res.data.scale);
+    } catch (err) {
+      setDetectResult({ ok: false, message: api.message(err, 'Could not look for a scale.') });
+    } finally {
+      setDetecting(false);
     }
   };
 
   return (
     <Panel className="space-y-3">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[13px] font-bold text-[color:var(--text-primary)]">{form.name || meta.label}</span>
-        <Badge tone={form.status === 'connected' ? 'success' : 'neutral'}>{form.status || 'unknown'}</Badge>
+        <span className="text-[13px] font-bold text-[color:var(--text-primary)]">{meta.label}</span>
+        <div className="flex items-center gap-2">
+          <span title={status?.detail || ''}>
+            <Badge tone={LIVE_TONES[status?.state] || 'neutral'}>{checking ? 'Checking…' : liveLabel(status)}</Badge>
+          </span>
+          {powerHints && (
+            <button
+              type="button"
+              role="switch"
+              aria-checked={isOn}
+              aria-label={`${meta.label} ${isOn ? 'on' : 'off'}`}
+              onClick={switchPower}
+              disabled={switching}
+              className={`relative inline-flex h-7 w-[62px] shrink-0 items-center rounded-full text-[11px] font-bold transition-colors disabled:opacity-60 ${
+                isOn ? 'bg-emerald-600 text-white' : 'bg-slate-300 text-slate-700 dark:bg-slate-700 dark:text-slate-200'
+              }`}
+            >
+              <span className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow transition-all ${isOn ? 'left-[38px]' : 'left-1'}`} />
+              <span className={`w-full ${isOn ? 'pl-2.5 text-left' : 'pr-2.5 text-right'}`}>{isOn ? 'ON' : 'OFF'}</span>
+            </button>
+          )}
+        </div>
       </div>
 
-      <Toggle label="Enabled" checked={Boolean(form.enabled)} onChange={(v) => setForm({ ...form, enabled: v })} />
+      {powerHints && (
+        <div className={`-mt-1 text-[11px] ${isOn ? 'text-[color:var(--text-muted)]' : 'text-amber-700 dark:text-amber-400'}`}>
+          {isOn ? powerHints[0] : powerHints[1]}
+        </div>
+      )}
 
-      <Field label="Interface">
-        <Select value={form.interface || ''} onChange={(e) => setForm({ ...form, interface: e.target.value })}>
-          {meta.interfaces.map((i) => (
-            <option key={i} value={i}>
-              {i}
-            </option>
-          ))}
-        </Select>
-      </Field>
+      {status?.detail && status.state !== 'off' && (
+        <div
+          data-testid={`status-${deviceKey}`}
+          className={`rounded-lg px-2.5 py-1.5 text-[11.5px] font-medium ${
+            status.state === 'connected'
+              ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300'
+              : ['offline', 'not_found'].includes(status.state)
+                ? 'bg-rose-50 text-rose-700 dark:bg-rose-950/50 dark:text-rose-300'
+                : 'bg-[color:var(--bg-subtle)] text-[color:var(--text-secondary)]'
+          }`}
+        >
+          {status.detail}
+        </div>
+      )}
+
+      {(deviceKey === 'posPrinter' || deviceKey === 'barcodePrinter') && (
+        <Field
+          label="Printer"
+          hint={
+            printers.some((p) => !p.virtual)
+              ? 'The printer as installed in Windows.'
+              : 'No printer found on this PC — connect it, install its driver, then press Check devices.'
+          }
+        >
+          <Select value={form.printerName || ''} onChange={(e) => setForm({ ...form, printerName: e.target.value })}>
+            <option value="">Select…</option>
+            {form.printerName && !printers.some((p) => p.name === form.printerName) && (
+              <option value={form.printerName}>{form.printerName} (not found)</option>
+            )}
+            {[...printers]
+              .sort((a, b) => Number(a.virtual) - Number(b.virtual))
+              .map((p) => (
+                <option key={p.name} value={p.name}>
+                  {p.name}
+                  {p.virtual ? ' (virtual)' : ''}
+                  {!p.online ? ' — offline' : ''}
+                </option>
+              ))}
+          </Select>
+        </Field>
+      )}
+
+      {deviceKey === 'weighingScale' && isOn && (
+        <div className="rounded-xl p-2.5 bg-[color:var(--bg-subtle)] space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-semibold text-[color:var(--text-muted)]">Plug the scale in and switch it on, then</span>
+            <Button size="sm" onClick={detectScale} loading={detecting}>Detect scale</Button>
+          </div>
+          {detectResult && (
+            <div className={`text-[11.5px] ${detectResult.ok ? 'text-emerald-600' : 'text-rose-600'}`}>{detectResult.message}</div>
+          )}
+        </div>
+      )}
+
 
       {deviceKey === 'cashDrawer' && (
-        <Toggle
-          label="Open on cash payments only"
-          checked={Boolean(form.openOnCashOnly)}
-          onChange={(v) => setForm({ ...form, openOnCashOnly: v })}
-        />
+        <div className="space-y-3">
+          <Toggle
+            label="Open on cash payments only"
+            checked={Boolean(form.openOnCashOnly)}
+            onChange={(v) => setForm({ ...form, openOnCashOnly: v })}
+          />
+
+          <Field label="Connection (via the printer it's wired into)">
+            <Select
+              value={connValue(form.connectionType)}
+              onChange={(e) => setForm({ ...form, connectionType: e.target.value })}
+            >
+              {DRAWER_CONNECTION_TYPES.map((t) => (
+                <option key={t.value} value={t.value}>{t.label}</option>
+              ))}
+            </Select>
+          </Field>
+
+          {form.connectionType === 'windows-share' && (
+            <Field
+              label="Printer share name"
+              hint="Windows: Printers & scanners → your receipt printer → Printer properties → Sharing → Share this printer. Enter that share name."
+            >
+              <Input value={form.shareName || ''} onChange={(e) => setForm({ ...form, shareName: e.target.value })} placeholder="POS80" />
+            </Field>
+          )}
+
+          {form.connectionType === 'serial' && (
+            <SerialPortFields
+              form={form}
+              setForm={setForm}
+              serialPorts={serialPorts}
+              portsLoading={portsLoading}
+              refreshSerialPorts={refreshSerialPorts}
+            />
+          )}
+
+          {form.connectionType === 'network' && (
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Printer host / IP">
+                <Input value={form.host || ''} onChange={(e) => setForm({ ...form, host: e.target.value })} placeholder="192.168.1.87" />
+              </Field>
+              <Field label="Port">
+                <Input type="number" value={form.port ?? ''} onChange={(e) => setForm({ ...form, port: e.target.value })} placeholder="9100" />
+              </Field>
+            </div>
+          )}
+
+          {connValue(form.connectionType) !== 'none' && (
+            <div className="rounded-xl p-2.5 bg-[color:var(--bg-subtle)] space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-semibold text-[color:var(--text-muted)]">Kick the drawer</span>
+                <Button size="sm" onClick={openDrawerNow} loading={openingDrawer}>Open drawer now</Button>
+              </div>
+              {drawerResult && (
+                <div className={`text-[11.5px] ${drawerResult.ok ? 'text-emerald-600' : 'text-rose-600'}`}>{drawerResult.message}</div>
+              )}
+            </div>
+          )}
+        </div>
       )}
 
       {deviceKey === 'weighingScale' && (
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Baud rate">
-            <Input type="number" value={form.baudRate ?? ''} onChange={(e) => setForm({ ...form, baudRate: e.target.value })} />
+        <div className="space-y-3">
+          <Field label="Connection">
+            <Select
+              value={connValue(form.connectionType)}
+              onChange={(e) => setForm({ ...form, connectionType: e.target.value })}
+            >
+              {SCALE_CONNECTION_TYPES.map((t) => (
+                <option key={t.value} value={t.value}>{t.label}</option>
+              ))}
+            </Select>
           </Field>
-          <Field label="Stable delay (ms)">
-            <Input type="number" value={form.stableDelayMs ?? ''} onChange={(e) => setForm({ ...form, stableDelayMs: e.target.value })} />
-          </Field>
+
+          {form.connectionType === 'serial' && (
+            <SerialPortFields
+              form={form}
+              setForm={setForm}
+              serialPorts={serialPorts}
+              portsLoading={portsLoading}
+              refreshSerialPorts={refreshSerialPorts}
+              showLineSettings
+            />
+          )}
+
+          {form.connectionType === 'network' && (
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Host / IP">
+                <Input value={form.host || ''} onChange={(e) => setForm({ ...form, host: e.target.value })} placeholder="192.168.1.50" />
+              </Field>
+              <Field label="Port">
+                <Input type="number" value={form.port ?? ''} onChange={(e) => setForm({ ...form, port: e.target.value })} placeholder="4001" />
+              </Field>
+            </div>
+          )}
+
+          {form.connectionType === 'keyboard-wedge' && (
+            <div className="text-[11px] text-[color:var(--text-muted)]">
+              No connection settings needed — this scale types its reading directly into the focused field, the same way a barcode scanner does.
+            </div>
+          )}
+
+          {isScaleConnection && (
+            <div className="space-y-3 rounded-xl border border-[color:var(--border-subtle)] p-2.5">
+              <div className="text-[11px] font-bold uppercase tracking-wide text-[color:var(--text-muted)]">Data format</div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Read mode" hint={form.readMode === 'poll' ? 'Asks the scale each interval.' : 'Scale sends by itself.'}>
+                  <Select value={form.readMode || 'continuous'} onChange={(e) => setForm({ ...form, readMode: e.target.value })}>
+                    <option value="continuous">Continuous (scale streams)</option>
+                    <option value="poll">Poll (send a request)</option>
+                  </Select>
+                </Field>
+                <Field label="Weight unit for billing">
+                  <Select value={form.unit || 'kg'} onChange={(e) => setForm({ ...form, unit: e.target.value })}>
+                    <option value="kg">Kilograms (kg)</option>
+                    <option value="g">Grams (g)</option>
+                    <option value="lb">Pounds (lb)</option>
+                  </Select>
+                </Field>
+              </div>
+
+              {form.readMode === 'poll' && (
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Request command" hint="Escapes allowed: \r \n \x05">
+                    <div className="flex items-center gap-1.5">
+                      <Input value={form.pollCommand || ''} onChange={(e) => setForm({ ...form, pollCommand: e.target.value })} placeholder="\x05" className="flex-1 font-mono" />
+                      <Select value="" onChange={(e) => e.target.value && setForm({ ...form, pollCommand: e.target.value })} className="w-28">
+                        <option value="">Preset…</option>
+                        {SCALE_POLL_PRESETS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+                      </Select>
+                    </div>
+                  </Field>
+                  <Field label="Interval (ms)">
+                    <Input type="number" value={form.pollIntervalMs ?? 500} onChange={(e) => setForm({ ...form, pollIntervalMs: e.target.value })} />
+                  </Field>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Implied decimals" hint='Only for lines with no point, e.g. 001250.'>
+                  <Select value={String(form.decimals ?? 0)} onChange={(e) => setForm({ ...form, decimals: Number(e.target.value) })}>
+                    {[0, 1, 2, 3].map((d) => <option key={d} value={String(d)}>{d === 0 ? 'None (as sent)' : d}</option>)}
+                  </Select>
+                </Field>
+                <Field label="Custom pattern (advanced)" hint="Advanced regex. Leave empty.">
+                  <Input value={form.weightPattern || ''} onChange={(e) => setForm({ ...form, weightPattern: e.target.value })} placeholder="auto" className="font-mono" />
+                </Field>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Stability tolerance" hint="Allowed wobble. Empty = auto (15 g).">
+                  <Input type="number" step="any" min="0" value={form.stabilityTolerance ?? ''} placeholder="auto" onChange={(e) => setForm({ ...form, stabilityTolerance: e.target.value })} />
+                </Field>
+                <Field label="Readings to confirm" hint="Readings that must agree. Empty = auto (5).">
+                  <Input type="number" min="1" max="100" value={form.confirmReadings ?? ''} placeholder="auto" onChange={(e) => setForm({ ...form, confirmReadings: e.target.value })} />
+                </Field>
+              </div>
+
+              <Field label="Check a sample line" hint='Paste one scale line to test.'>
+                <div className="flex items-center gap-1.5">
+                  <Input value={sampleLine} onChange={(e) => setSampleLine(e.target.value)} placeholder="ST,GS,+001.250kg" className="flex-1 font-mono" />
+                  <Button size="sm" onClick={testSampleLine} disabled={!sampleLine.trim()}>Check</Button>
+                </div>
+              </Field>
+              {sampleResult && (
+                <div className={`text-[11.5px] ${sampleResult.matched && !sampleResult.overload ? 'text-emerald-600' : 'text-rose-600'}`}>
+                  {sampleResult.error
+                    || (!sampleResult.matched
+                      ? 'No weight found in that line — adjust the pattern.'
+                      : sampleResult.overload
+                        ? 'Read as OVERLOAD.'
+                        : `Reads as ${sampleResult.weight} ${sampleResult.unit}${sampleResult.stable === true ? ' · stable' : sampleResult.stable === false ? ' · unstable' : ''}`)}
+                </div>
+              )}
+            </div>
+          )}
+
+          {isScaleConnection && (
+            <div className="rounded-xl p-2.5 bg-[color:var(--bg-subtle)] space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-2 text-[11px] font-semibold text-[color:var(--text-muted)]">
+                  Live reading
+                  {scaleFeedOn && (
+                    <span className={`font-mono text-[13px] font-bold ${scaleFeed.connected ? 'text-[color:var(--text-primary)]' : 'text-[color:var(--text-muted)]'}`}>
+                      {scaleFeed.connected ? `${scaleFeed.text} · ${scaleFeed.sub}` : scaleFeed.text}
+                    </span>
+                  )}
+                </span>
+                <Button size="sm" onClick={readScaleNow} loading={readingScale}>Read weight now</Button>
+              </div>
+              {scaleReadResult && (
+                scaleReadResult.ok ? (
+                  <div className="text-[13px] font-mono font-bold text-[color:var(--text-primary)]">
+                    {scaleReadResult.weight} {scaleReadResult.unit || 'kg'}
+                    <span className={`ml-2 text-[10px] font-sans font-semibold ${scaleReadResult.stable ? 'text-emerald-600' : 'text-amber-600'}`}>
+                      {scaleReadResult.stable ? 'STABLE' : 'settling…'}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="text-[11.5px] text-rose-600">{scaleReadResult.message}</div>
+                )
+              )}
+              {/* Live from the stream while the scale is on (newest line on top); the one-off snapshot only when it is not. */}
+              {(scaleFeedOn && liveFeed.rawLines?.length > 0 || rawLines?.rawLines?.length > 0) && (
+                <div className="space-y-0.5">
+                  <div className="text-[10px] font-semibold uppercase tracking-wide text-[color:var(--text-muted)]">
+                    Raw data from scale
+                    {scaleFeedOn && liveFeed.rawLines?.length ? (
+                      <span className="ml-1.5 inline-flex items-center gap-1 normal-case text-emerald-600">
+                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" /> Live
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="max-h-40 overflow-auto rounded-lg bg-[color:var(--surface)] p-1.5 font-mono text-[10.5px] leading-snug text-[color:var(--text-secondary)]">
+                    {/* Newest first; the server keeps the last 100 lines and the older ones fade out. */}
+                    {(scaleFeedOn && liveFeed.rawLines?.length ? [...liveFeed.rawLines].reverse() : rawLines.rawLines.map((l) => l.line).reverse()).map((line, i, all) => (
+                      <div key={all.length - i} style={{ opacity: Math.max(0.15, 1 - (i / all.length) * 0.85) }}>{line}</div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {!scaleFeedOn && rawLines && rawLines.configured && !rawLines.rawLines?.length && (
+                <div className="text-[11px] text-[color:var(--text-muted)]">
+                  No data received from the scale yet{rawLines.error ? ` — ${rawLines.error}` : '. Check the cable, baud rate and read mode.'}
+                </div>
+              )}
+            </div>
+          )}
         </div>
+      )}
+
+      {deviceKey === 'barcodeScanner' && (
+        <form onSubmit={runScanTest} className="rounded-xl p-2.5 bg-[color:var(--bg-subtle)] space-y-1.5">
+          <Field label="Scanner test" hint="Click the box and scan any product or scale label.">
+            <Input value={scanTest} onChange={(e) => setScanTest(e.target.value)} placeholder="Scan here…" className="font-mono" />
+          </Field>
+          {scanResult && (
+            <div className={`text-[11.5px] ${scanResult.ok ? 'text-emerald-600' : 'text-rose-600'}`}>
+              <span className="font-mono">{scanResult.code}</span> → {scanResult.message}
+            </div>
+          )}
+        </form>
       )}
 
       {deviceKey === 'barcodePrinter' && (
@@ -3340,9 +4288,11 @@ function DeviceCard({ deviceKey, device, showToast, onSaved }) {
       )}
 
       <div className="flex items-center justify-end gap-2 pt-1">
-        <Button size="sm" onClick={test} loading={testing}>
-          Test Connection
-        </Button>
+        {deviceKey !== 'barcodeScanner' && (
+          <Button size="sm" onClick={test} loading={testing}>
+            {{ posPrinter: 'Print test page', barcodePrinter: 'Print test page', cashDrawer: 'Test (opens drawer)' }[deviceKey] || 'Test Connection'}
+          </Button>
+        )}
         <Button size="sm" variant="primary" onClick={save} loading={saving}>
           Save
         </Button>
@@ -3350,7 +4300,6 @@ function DeviceCard({ deviceKey, device, showToast, onSaved }) {
     </Panel>
   );
 }
-
 
 /* ------------------------------- Users & Roles ------------------------------- */
 

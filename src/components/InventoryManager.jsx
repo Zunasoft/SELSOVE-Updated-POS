@@ -1,16 +1,55 @@
-import React, { useEffect, useMemo, useState, useDeferredValue } from 'react';
+import React, { useEffect, useMemo, useState, useDeferredValue, useRef } from 'react';
 import {
-  Package, Plus, Edit3, Trash2, Upload, AlertTriangle, Barcode, Tag,
-  Boxes, History, IndianRupee, Save, Printer, Layers, ScanLine, Building2,
-  FileSpreadsheet, Download, RefreshCw, Eye, CheckCircle, ArrowRightLeft,
-  XCircle, Image as ImageIcon, Sliders, Scissors, FileText, Check, Search,
-  ChevronLeft, ArrowRight
+  Package,
+  Plus,
+  Edit3,
+  Trash2,
+  Upload,
+  AlertTriangle,
+  Barcode,
+  Tag,
+  Boxes,
+  History,
+  IndianRupee,
+  Save,
+  Printer,
+  Layers,
+  ScanLine,
+  Building2,
+  FileSpreadsheet,
+  Download,
+  RefreshCw,
+  Eye,
+  CheckCircle,
+  ArrowRightLeft,
+  XCircle,
+  Image as ImageIcon,
+  Sliders,
+  Scissors,
+  Check,
+  Search,
+  ChevronLeft,
+  ArrowRight,
+  X as XIcon
 } from 'lucide-react';
 
 import api, { money, API_BASE, fmtDateTime } from '../lib/api';
 import {
-  Panel, SectionHeader, StatTile, Button, Modal, Field, Input, Select, MultiSelect, Textarea,
-  Badge, Money, Spinner, EmptyState, SearchInput, DataTable
+  Panel,
+  SectionHeader,
+  StatTile,
+  Button,
+  Modal,
+  Field,
+  Input,
+  Select,
+  MultiSelect,
+  Textarea,
+  Badge,
+  Spinner,
+  EmptyState,
+  SearchInput,
+  cx
 } from '../lib/ui';
 import { exportReport } from '../lib/exporters';
 import BarcodePrinterModal from './BarcodePrinterModal';
@@ -152,6 +191,7 @@ export default function InventoryManager({ products, categories, onRefresh, show
           serialTrackingEnabled={Boolean(posSettings.enableSerialTracking)}
           storeNearExpiryDays={posSettings.nearExpiryDays}
           tenant={tenant}
+          settings={settings}
         />
       )}
 
@@ -189,7 +229,7 @@ export default function InventoryManager({ products, categories, onRefresh, show
       )}
 
       {tab === 'importexport' && (
-        <ImportExportTab products={products} categories={categories} showToast={showToast} onRefresh={refreshAll} />
+        <ImportExportTab products={products} categories={categories} units={units} showToast={showToast} onRefresh={refreshAll} />
       )}
     </div>
   );
@@ -301,6 +341,15 @@ function DashboardTab({ summary, products, setTab, nearExpiryDays }) {
   const expiringBatches = useMemo(
     () => findExpiringBatches(products, Number(nearExpiryDays) || NEAR_EXPIRY_DAYS),
     [products, nearExpiryDays]
+  );
+
+  const recentlyUpdated = useMemo(
+    () =>
+      [...(products || [])]
+        .filter((p) => p.updatedAt)
+        .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
+        .slice(0, 8),
+    [products]
   );
 
   if (!summary) return <Spinner text="Loading inventory insights..." />;
@@ -441,6 +490,28 @@ function DashboardTab({ summary, products, setTab, nearExpiryDays }) {
           </div>
         </Panel>
       )}
+
+      {recentlyUpdated.length > 0 && (
+        <Panel
+          title="Recently Updated Products"
+          icon={RefreshCw}
+          action={<Button size="sm" variant="secondary" onClick={() => setTab('products')}>View All Products</Button>}
+        >
+          <div className="divide-y divide-[color:var(--border-subtle)] max-h-64 overflow-y-auto">
+            {recentlyUpdated.map((p) => (
+              <div key={p.id} className="py-2.5 flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-bold text-[color:var(--text-primary)]">{p.name}</div>
+                  <div className="text-xs text-[color:var(--text-muted)]">
+                    {p.isActive === false ? 'Inactive · ' : ''}Barcode: {p.barcode || '—'} · {money(p.price)} / {p.unit}
+                  </div>
+                </div>
+                <span className="text-xs font-medium text-[color:var(--text-muted)]">{fmtDateTime(p.updatedAt)}</span>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
     </div>
   );
 }
@@ -509,13 +580,13 @@ function recomputeAutoUnitPricing(f) {
 // Stable per-row key so removing a row from the middle doesn't reuse the wrong row's state (an index-based key would).
 let rowKeySeq = 0;
 const genRowKey = () => `row_${Date.now()}_${rowKeySeq++}`;
-const randomBarcode = () => Math.floor(1000000000 + Math.random() * 9000000000).toString();
 
 // Mirrors DEFAULT_CUSTOM_LABELS in the backend's controllers/serials.js.
 const DEFAULT_SERIAL_CUSTOM_LABELS = ['Custom Field 1', 'Custom Field 2', 'Custom Field 3', 'Custom Field 4'];
 
 const blankProduct = (categories, defaultTaxRate = 5) => ({
   name: '',
+  isActive: true,
   regionalName: '',
   printName: '',
   description: '',
@@ -524,7 +595,9 @@ const blankProduct = (categories, defaultTaxRate = 5) => ({
   productType: 'standard',
   productTypes: ['standard'],
   barcode: '',
-  barcodes: '',
+  // Multiple scannable barcodes for the same product (packaging, outer carton, supplier codes,
+  // ...) — the "primary" row is always kept in sync with `barcode` above, which is what every
+  // other part of the form (Generate/Scan/duplicate-check) reads and writes.
   barcodeList: [{ _key: genRowKey(), code: '', type: 'primary' }],
   sku: '',
   hsn: '',
@@ -532,13 +605,14 @@ const blankProduct = (categories, defaultTaxRate = 5) => ({
   price: '',
   mrp: '',
   purchasePrice: '',
-  marginPercent: '',
+  marginPercentSp: '',
+  marginPercentMrp: '',
   specialPrice: '',
   stock: '',
   minStock: '5',
   imageUrl: '',
   warehouses: { wh_main: 0, wh_shop: 0 },
-  requiresWeight: false,
+  
   taxRate: defaultTaxRate,
   dozenQuantity: 12,
   recipeItems: [],
@@ -929,11 +1003,17 @@ export function ProductFormModal({
   serialTrackingEnabled,
   storeNearExpiryDays,
   showToast,
+  settings,
   onClose,
   onSaved,
   onCategoryCreated,
   hideBatches = false
 }) {
+  // Scan buttons only make sense if the shop has actually set up a scanner in Settings > Hardware —
+  // there's no way for a browser to detect a real USB/Bluetooth scanner directly (it just emulates
+  // a keyboard), so this declared configuration is the closest available signal.
+  // The Settings → Hardware on/off switch; a missing `enabled` (older saved settings) means on.
+  const scannerConnected = settings?.hardware?.barcodeScanner?.enabled !== false;
   const [form, setForm] = useState(() => blankProduct(categories, defaultTaxRate));
   const [localCategories, setLocalCategories] = useState(categories || []);
   const [showCategoryModal, setShowCategoryModal] = useState(false);
@@ -943,6 +1023,20 @@ export function ProductFormModal({
   const [writeOffTarget, setWriteOffTarget] = useState(null);
   const [writeOffForm, setWriteOffForm] = useState({ qty: '', reason: 'Expired' });
   const [writingOff, setWritingOff] = useState(false);
+  const [generatingBarcode, setGeneratingBarcode] = useState(false);
+  const [scanningBarcode, setScanningBarcode] = useState(false);
+  const [barcodeWarning, setBarcodeWarning] = useState(null);
+  const [barcodeExample, setBarcodeExample] = useState(null);
+  const barcodeInputRef = useRef(null);
+  const [generatingSku, setGeneratingSku] = useState(false);
+  const [skuWarning, setSkuWarning] = useState(null);
+
+  const skuFormatField = (settings?.barcodeFormat || []).find((f) => f.type === 'sku');
+  const idFormatField = (settings?.barcodeFormat || []).find((f) => f.type === 'id');
+  const targetSkuLength = Number(skuFormatField?.enabled !== false && skuFormatField?.length ? skuFormatField.length : (idFormatField?.length || 5)) || 5;
+  const targetBarcodeLength = Number(settings?.barcode?.digits) || Number(idFormatField?.length) || 6;
+  const barcodePrefix = settings?.barcode?.prefix || '';
+  
 
   useEffect(() => {
     setLocalCategories(categories || []);
@@ -1003,11 +1097,8 @@ export function ProductFormModal({
     } else if (typeof product.barcodes === 'string' && product.barcodes.trim()) {
       rawBarcodes = product.barcodes.split(',').map((b) => b.trim()).filter(Boolean);
     }
-    if (product.barcode && !rawBarcodes.includes(String(product.barcode).trim())) {
-      rawBarcodes.unshift(String(product.barcode).trim());
-    }
-
     const primaryBarcode = String(product.barcode || rawBarcodes[0] || '').trim();
+    if (primaryBarcode && !rawBarcodes.includes(primaryBarcode)) rawBarcodes.unshift(primaryBarcode);
 
     let barcodeList = [];
     if (Array.isArray(product.barcodeDetails) && product.barcodeDetails.length > 0) {
@@ -1023,10 +1114,7 @@ export function ProductFormModal({
         type: code === primaryBarcode || (idx === 0 && !primaryBarcode) ? 'primary' : 'alternate'
       }));
     }
-
-    if (barcodeList.length === 0) {
-      barcodeList = [{ _key: genRowKey(), code: '', type: 'primary' }];
-    }
+    if (barcodeList.length === 0) barcodeList = [{ _key: genRowKey(), code: '', type: 'primary' }];
 
     setForm({
       ...blankProduct(categories),
@@ -1041,7 +1129,6 @@ export function ProductFormModal({
       regionalName: product.regionalName || product.printName || '',
       sku: product.sku || '',
       barcode: primaryBarcode,
-      barcodes: rawBarcodes.join(', '),
       barcodeList,
       warehouses: product.warehouses || {},
       dozenQuantity: product.dozenQuantity || 12,
@@ -1079,7 +1166,21 @@ export function ProductFormModal({
         : [],
 
       recipeNotes: product.recipeNotes || product.recipe?.notes || '',
-      useCustomPricing: product.useCustomPricing || false
+      useCustomPricing: product.useCustomPricing || false,
+      // Re-derive both from the actual saved Purchase Price/Selling Price/MRP whenever possible,
+      // rather than trusting a stored margin — that field only gets set by typing into one of the
+      // Margin %, Selling Price or MRP boxes in this same form, so an older product (or one priced
+      // by typing Purchase Price after Selling Price) can have real prices but a blank margin.
+      marginPercentSp: (() => {
+        const pp = Number(product.purchasePrice) || 0;
+        if (pp > 0 && product.price) return (((Number(product.price) - pp) / pp) * 100).toFixed(1);
+        return product.marginPercentSp || '';
+      })(),
+      marginPercentMrp: (() => {
+        const pp = Number(product.purchasePrice) || 0;
+        if (pp > 0 && product.mrp) return (((Number(product.mrp) - pp) / pp) * 100).toFixed(1);
+        return product.marginPercentMrp || '';
+      })()
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, editing]);
@@ -1150,24 +1251,45 @@ export function ProductFormModal({
     }));
   };
 
+  /** Reserves the next sequential barcode (Settings > Barcode Generation's prefix+digits) — for a normal, piece-sold product's own barcode. */
+  const generateBarcode = async () => {
+    setGeneratingBarcode(true);
+    try {
+      const res = await api.post('/products/generate-barcode', {});
+      const code = res.data?.barcode || res.barcode;
+      setForm((f) => ({ ...f, barcode: code }));
+      setBarcodeWarning(null);
+    } catch (err) {
+      showToast(api.message(err, 'Could not generate a barcode.'), 'error');
+    } finally {
+      setGeneratingBarcode(false);
+    }
+  };
+
+  /** Multiple scannable barcodes for the same product (packaging, outer carton, supplier codes, ...) — the "primary" row's code is always mirrored into `form.barcode`, which is what Scan/duplicate-check/save already read. */
   const addBarcodeRow = (initialCode = '') => {
     setForm((f) => {
       const list = Array.isArray(f.barcodeList) ? [...f.barcodeList] : [];
       const isFirst = list.length === 0;
-      const newRow = {
-        _key: genRowKey(),
-        code: initialCode || '',
-        type: isFirst ? 'primary' : 'alternate'
-      };
+      const newRow = { _key: genRowKey(), code: initialCode || '', type: isFirst ? 'primary' : 'alternate' };
       const nextList = [...list, newRow];
       const primaryCode = nextList.find((b) => b.type === 'primary')?.code || nextList[0]?.code || '';
-      return {
-        ...f,
-        barcodeList: nextList,
-        barcode: primaryCode,
-        barcodes: nextList.map((b) => b.code).filter(Boolean).join(', ')
-      };
+      return { ...f, barcodeList: nextList, barcode: primaryCode };
     });
+  };
+
+  /** Reserves the next sequential barcode from the server (same prefix+digits generator the single Generate button uses) and adds it as a new row. */
+  const addGeneratedBarcodeRow = async () => {
+    setGeneratingBarcode(true);
+    try {
+      const res = await api.post('/products/generate-barcode', {});
+      const code = res.data?.barcode || res.barcode;
+      addBarcodeRow(code);
+    } catch (err) {
+      showToast(api.message(err, 'Could not generate a barcode.'), 'error');
+    } finally {
+      setGeneratingBarcode(false);
+    }
   };
 
   const updateBarcodeRow = (index, patch) => {
@@ -1175,41 +1297,73 @@ export function ProductFormModal({
       const list = Array.isArray(f.barcodeList) ? [...f.barcodeList] : [];
       if (!list[index]) return f;
       const updated = { ...list[index], ...patch };
-
-      let nextList = list.map((item, i) => {
+      const nextList = list.map((item, i) => {
         if (i === index) return updated;
-        if (patch.type === 'primary' && item.type === 'primary') {
-          return { ...item, type: 'alternate' };
-        }
+        if (patch.type === 'primary' && item.type === 'primary') return { ...item, type: 'alternate' };
         return item;
       });
-
       const primaryCode = nextList.find((b) => b.type === 'primary')?.code || nextList[0]?.code || '';
-
-      return {
-        ...f,
-        barcodeList: nextList,
-        barcode: primaryCode,
-        barcodes: nextList.map((b) => b.code).filter(Boolean).join(', ')
-      };
+      return { ...f, barcodeList: nextList, barcode: primaryCode };
     });
+    setBarcodeWarning(null);
+  };
+
+  /** Regenerates one row's code from the sequential server generator (used by that row's own Generate button, including the primary row). */
+  const regenerateBarcodeRow = async (index) => {
+    setGeneratingBarcode(true);
+    try {
+      const res = await api.post('/products/generate-barcode', {});
+      const code = res.data?.barcode || res.barcode;
+      updateBarcodeRow(index, { code });
+    } catch (err) {
+      showToast(api.message(err, 'Could not generate a barcode.'), 'error');
+    } finally {
+      setGeneratingBarcode(false);
+    }
+  };
+
+  /** Everything already typed on this form that a newly generated barcode must not repeat. */
+  const formCodesInUse = () => [
+    form.sku,
+    form.customSubUnitBarcode,
+    ...(form.barcodeList || []).map((b) => b.code),
+    ...(form.altUnits || []).map((u) => u.barcode)
+  ].filter(Boolean);
+
+  /** Reserves the next sequential barcode for the Minor Unit (the smaller sub-unit). */
+  const generateMinorUnitBarcode = async () => {
+    setGeneratingBarcode(true);
+    try {
+      const res = await api.post('/products/generate-barcode', { exclude: formCodesInUse() });
+      const code = res.data?.barcode || res.barcode;
+      setForm((f) => ({ ...f, customSubUnitBarcode: code }));
+    } catch (err) {
+      showToast(api.message(err, 'Could not generate a barcode.'), 'error');
+    } finally {
+      setGeneratingBarcode(false);
+    }
+  };
+
+  /** Reserves the next sequential barcode for one Additional Unit row (bag/box/case). Everything already typed on this form is sent as `exclude`, so generating for several rows never hands out the same number twice. */
+  const generateAltUnitBarcode = async (index) => {
+    setGeneratingBarcode(true);
+    try {
+      const res = await api.post('/products/generate-barcode', { exclude: formCodesInUse() });
+      const code = res.data?.barcode || res.barcode;
+      updateAltUnit(index, { barcode: code });
+    } catch (err) {
+      showToast(api.message(err, 'Could not generate a barcode.'), 'error');
+    } finally {
+      setGeneratingBarcode(false);
+    }
   };
 
   const makePrimaryBarcode = (index) => {
     setForm((f) => {
       const list = Array.isArray(f.barcodeList) ? [...f.barcodeList] : [];
       if (!list[index]) return f;
-      const nextList = list.map((item, i) => ({
-        ...item,
-        type: i === index ? 'primary' : (item.type === 'primary' ? 'alternate' : item.type)
-      }));
-      const primaryCode = nextList[index]?.code || '';
-      return {
-        ...f,
-        barcodeList: nextList,
-        barcode: primaryCode,
-        barcodes: nextList.map((b) => b.code).filter(Boolean).join(', ')
-      };
+      const nextList = list.map((item, i) => ({ ...item, type: i === index ? 'primary' : (item.type === 'primary' ? 'alternate' : item.type) }));
+      return { ...f, barcodeList: nextList, barcode: nextList[index]?.code || '' };
     });
   };
 
@@ -1217,33 +1371,122 @@ export function ProductFormModal({
     setForm((f) => {
       const list = Array.isArray(f.barcodeList) ? [...f.barcodeList] : [];
       if (list.length <= 1) {
-        const nextList = [{ ...list[0], code: '' }];
-        return {
-          ...f,
-          barcodeList: nextList,
-          barcode: '',
-          barcodes: ''
-        };
+        return { ...f, barcodeList: [{ ...(list[0] || { _key: genRowKey() }), code: '', type: 'primary' }], barcode: '' };
       }
       const wasPrimary = list[index]?.type === 'primary';
       const nextList = list.filter((_, i) => i !== index);
-      if (wasPrimary && nextList.length > 0) {
-        nextList[0] = { ...nextList[0], type: 'primary' };
-      }
+      if (wasPrimary && nextList.length > 0) nextList[0] = { ...nextList[0], type: 'primary' };
       const primaryCode = nextList.find((b) => b.type === 'primary')?.code || nextList[0]?.code || '';
-      return {
-        ...f,
-        barcodeList: nextList,
-        barcode: primaryCode,
-        barcodes: nextList.map((b) => b.code).filter(Boolean).join(', ')
-      };
+      return { ...f, barcodeList: nextList, barcode: primaryCode };
     });
+  };
+
+  const checkBarcodeDuplicate = async (code) => {
+    const trimmed = String(code || '').trim();
+    if (!trimmed) {
+      setBarcodeWarning(null);
+      return;
+    }
+    // Instant local catalogue collision check
+    const localConflict = (products || []).find((p) => {
+      if (p.id === editing?.id) return false;
+      const mainMatch = String(p.barcode || '').trim() === trimmed;
+      const altMatch = Array.isArray(p.barcodes) && p.barcodes.some((alt) => String(alt || '').trim() === trimmed);
+      return mainMatch || altMatch;
+    });
+    if (localConflict) {
+      setBarcodeWarning(`Barcode "${trimmed}" is already used by "${localConflict.name}"`);
+      return;
+    }
+    try {
+      const found = await api.get(`/products/lookup/${encodeURIComponent(trimmed)}`);
+      const match = found?.data || found;
+      setBarcodeWarning(match && match.id && match.id !== editing?.id ? `Already used by "${match.name}"` : null);
+    } catch {
+      setBarcodeWarning(null);
+    }
+  };
+
+  const startScanningBarcode = () => {
+    setScanningBarcode(true);
+    barcodeInputRef.current?.focus();
+  };
+
+  /** Reserves the next sequential SKU from the server padded to target length. */
+  const generateSku = async () => {
+    setGeneratingSku(true);
+    try {
+      const res = await api.post('/products/generate-sku');
+      const rawSku = res.data?.sku || res.sku;
+      let clean = String(rawSku || '').replace(/\D/g, '');
+
+      // Sequence sync: ensure generated SKU strictly succeeds all existing catalog items
+      const localMax = (products || []).reduce((max, p) => {
+        const num = parseInt(String(p.sku || '').replace(/\D/g, ''), 10);
+        return Number.isFinite(num) && num > max ? num : max;
+      }, 0);
+      const serverNum = parseInt(clean, 10) || 0;
+      if (localMax >= serverNum) {
+        clean = String(localMax + 1);
+      }
+
+      const sku = clean ? clean.padStart(targetSkuLength, '0').slice(-targetSkuLength) : '';
+      setForm((f) => ({ ...f, sku }));
+      setSkuWarning(null);
+    } catch (err) {
+      showToast(api.message(err, 'Could not generate a SKU.'), 'error');
+    } finally {
+      setGeneratingSku(false);
+    }
+  };
+
+  /** Checks whether a typed/generated SKU already belongs to a different product. */
+  const checkSkuDuplicate = async (sku) => {
+    const clean = String(sku || '').replace(/\D/g, '').trim();
+    if (!clean) {
+      setSkuWarning(null);
+      return;
+    }
+    if (clean.length !== targetSkuLength) {
+      setSkuWarning(`Settings specify ${targetSkuLength} digits (currently ${clean.length} digits)`);
+      return;
+    }
+    // Instant local catalogue collision check
+    const localConflict = (products || []).find((p) => p.id !== editing?.id && String(p.sku || '').trim() === clean);
+    if (localConflict) {
+      setSkuWarning(`Already used by "${localConflict.name}"`);
+      return;
+    }
+    try {
+      const found = await api.get(`/products/lookup/${encodeURIComponent(clean)}`);
+      const match = found?.data || found;
+      setSkuWarning(match && match.id && match.id !== editing?.id ? `Already used by "${match.name}"` : null);
+    } catch {
+      setSkuWarning(null);
+    }
+  };
+
+  const handleSkuBlur = () => {
+    if (form.sku) {
+      const clean = String(form.sku).replace(/\D/g, '');
+      if (clean && clean.length < targetSkuLength) {
+        const padded = clean.padStart(targetSkuLength, '0');
+        setForm((f) => ({ ...f, sku: padded }));
+        checkSkuDuplicate(padded);
+        return;
+      }
+      checkSkuDuplicate(clean);
+    } else {
+      setSkuWarning(null);
+    }
   };
 
   // Keep every auto-tracked unit price/MRP in sync whenever the main Price or MRP changes.
   useEffect(() => {
     setForm((f) => recomputeAutoUnitPricing(f));
   }, [form.price, form.mrp]);
+
+  
 
   const addBatchRow = () => {
     setForm((f) => {
@@ -1460,13 +1703,37 @@ export function ProductFormModal({
     const cleanBarcodeList = (form.barcodeList || [])
       .map((b) => ({ ...b, code: String(b.code || '').trim() }))
       .filter((b) => b.code);
-
     const primaryRow = cleanBarcodeList.find((b) => b.type === 'primary') || cleanBarcodeList[0];
     const primaryBarcode = primaryRow ? primaryRow.code : (form.barcode ? String(form.barcode).trim() : '');
-
     const allBarcodes = [...new Set(cleanBarcodeList.map((b) => b.code))];
-    if (primaryBarcode && !allBarcodes.includes(primaryBarcode)) {
-      allBarcodes.unshift(primaryBarcode);
+    if (primaryBarcode && !allBarcodes.includes(primaryBarcode)) allBarcodes.unshift(primaryBarcode);
+
+    // --- Real-time Duplicate Monitor Checks ---
+    if (cleanBarcodeList.length !== allBarcodes.length) {
+      showToast('Duplicate barcode entered across multiple rows in this product. Each barcode row must be unique.', 'error');
+      return;
+    }
+
+    if (form.sku) {
+      const cleanSku = String(form.sku).replace(/\D/g, '');
+      const skuConflict = (products || []).find((p) => p.id !== editing?.id && String(p.sku || '').trim() === cleanSku);
+      if (skuConflict) {
+        showToast(`Cannot save: SKU "${cleanSku}" is already in use by "${skuConflict.name}".`, 'error');
+        return;
+      }
+    }
+
+    for (const b of allBarcodes) {
+      const barcodeConflict = (products || []).find((p) => {
+        if (p.id === editing?.id) return false;
+        const mainMatch = String(p.barcode || '').trim() === b;
+        const altMatch = Array.isArray(p.barcodes) && p.barcodes.some((alt) => String(alt || '').trim() === b);
+        return mainMatch || altMatch;
+      });
+      if (barcodeConflict) {
+        showToast(`Cannot save: Barcode "${b}" is already assigned to "${barcodeConflict.name}".`, 'error');
+        return;
+      }
     }
 
     const payload = {
@@ -1476,6 +1743,7 @@ export function ProductFormModal({
       barcode: primaryBarcode,
       barcodes: allBarcodes,
       barcodeDetails: cleanBarcodeList,
+      
       enableMinorUnit: Boolean(form.enableMinorUnit),
       customSubUnitName: form.enableMinorUnit ? form.customSubUnitName : '',
       customSubUnitFactor: form.enableMinorUnit ? form.customSubUnitFactor : '',
@@ -1522,8 +1790,8 @@ export function ProductFormModal({
 
   return (
     <>
-        <Modal open={open} title={editing ? 'Edit Product' : 'Create New Product'} icon={Package} onClose={onClose} className="!max-w-[clamp(728px,50vw,1100px)]">
-          <form onSubmit={save} className="space-y-4 max-h-[80vh] overflow-y-auto pr-1">
+        <Modal open={open} title={editing ? 'Edit Product' : 'Create New Product'} icon={Package} onClose={onClose} size="70" allowFullscreen>
+          <form onSubmit={save} className="space-y-4 pr-1">
             {/* Image Upload section */}
             <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] flex items-center gap-4">
               <div className="h-16 w-16 rounded-xl border-2 border-dashed border-indigo-300 dark:border-indigo-800 flex items-center justify-center bg-[color:var(--bg-surface)] overflow-hidden relative">
@@ -1573,6 +1841,28 @@ export function ProductFormModal({
               <Field label="Regional Name (Tamil/Hindi)">
                 <Input value={form.regionalName} onChange={(e) => setForm({ ...form, regionalName: e.target.value, printName: e.target.value })} placeholder="e.g. ஆப்பிள் / தமிழ் பெயர்" />
               </Field>
+            </div>
+
+            <div className="flex items-center justify-between p-2.5 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)]">
+              <div>
+                <div className="text-xs font-bold text-[color:var(--text-primary)]">Product Status</div>
+                <div className="text-[10.5px] text-[color:var(--text-muted)]">
+                  Inactive products are hidden from POS billing and search, but stay in your records.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setForm({ ...form, isActive: !(form.isActive !== false) })}
+                className={cx(
+                  'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all',
+                  form.isActive !== false
+                    ? 'bg-emerald-500/15 text-emerald-600 border border-emerald-500/30'
+                    : 'bg-red-500/10 text-red-600 border border-red-500/30'
+                )}
+              >
+                {form.isActive !== false ? <CheckCircle className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
+                {form.isActive !== false ? 'Active' : 'Inactive'}
+              </button>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -1763,11 +2053,22 @@ export function ProductFormModal({
                       </Field>
 
                       <Field label="Minor Unit Barcode">
-                        <Input
-                          value={form.customSubUnitBarcode || ''}
-                          onChange={(e) => setForm({ ...form, customSubUnitBarcode: e.target.value })}
-                          placeholder="Optional sub-unit barcode"
-                        />
+                        <div className="flex items-center gap-1">
+                          <Input
+                            value={form.customSubUnitBarcode || ''}
+                            onChange={(e) => setForm({ ...form, customSubUnitBarcode: e.target.value })}
+                            placeholder="Optional sub-unit barcode"
+                          />
+                          <button
+                            type="button"
+                            disabled={generatingBarcode}
+                            onClick={generateMinorUnitBarcode}
+                            className="shrink-0 p-2 rounded-lg border border-[color:var(--border-subtle)] text-[color:var(--text-muted)] hover:text-indigo-600 hover:bg-[color:var(--bg-subtle)] disabled:opacity-40"
+                            title="Generate the next barcode"
+                          >
+                            <RefreshCw className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       </Field>
                     </div>
 
@@ -1873,12 +2174,23 @@ export function ProductFormModal({
                         />
                       </div>
                       <div className="col-span-4 md:col-span-2">
-                        <Input
-                          value={row.barcode || ''}
-                          onChange={(e) => updateAltUnit(idx, { barcode: e.target.value })}
-                          placeholder="Optional"
-                          className="text-xs"
-                        />
+                        <div className="flex items-center gap-1">
+                          <Input
+                            value={row.barcode || ''}
+                            onChange={(e) => updateAltUnit(idx, { barcode: e.target.value })}
+                            placeholder="Optional"
+                            className="text-xs"
+                          />
+                          <button
+                            type="button"
+                            disabled={generatingBarcode}
+                            onClick={() => generateAltUnitBarcode(idx)}
+                            className="shrink-0 p-1.5 rounded-lg border border-[color:var(--border-subtle)] text-[color:var(--text-muted)] hover:text-indigo-600 hover:bg-[color:var(--bg-subtle)] disabled:opacity-40"
+                            title="Generate the next barcode"
+                          >
+                            <RefreshCw className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       </div>
                       <div className="col-span-1 text-right">
                         <button
@@ -1900,188 +2212,191 @@ export function ProductFormModal({
               </div>
             )}
 
-            {/* SKU Identification Card */}
-            <div className="p-3.5 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
-              <div className="flex items-center justify-between">
-                <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider flex items-center gap-1.5">
-                  <Tag className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
-                  Product SKU Identifier
-                </h4>
-                <button
-                  type="button"
-                  onClick={() => {
-                    // Preview only — the backend re-derives the real next SKU from the saved catalogue at save time.
-                    const highest = (products || []).reduce((max, p) => {
-                      const digits = String(p.sku || '').replace(/\D/g, '');
-                      const n = digits ? parseInt(digits, 10) : 0;
-                      return n > max ? n : max;
-                    }, 100000);
-                    setForm((f) => ({ ...f, sku: String(highest + 1) }));
-                  }}
-                  className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
-                >
-                  Auto-Generate SKU
-                </button>
-              </div>
+            {/* Barcode — SKU and Product Barcodes */}
+            <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
+              <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">Barcode</h4>
 
-              <Field label="SKU Code" hint="Numeric only — a unique internal Stock Keeping Unit number (e.g. 100001)">
-                <Input
-                  inputMode="numeric"
-                  value={form.sku || ''}
-                  onChange={(e) => setForm({ ...form, sku: e.target.value.replace(/\D/g, '') })}
-                  placeholder="e.g. 100001"
-                />
-              </Field>
-            </div>
-
-            {/* Multiple Barcodes Manifest Panel (Warehouse Transfer Style) */}
-            <div className="space-y-3 p-3.5 rounded-xl border border-indigo-200 dark:border-indigo-800/80 bg-indigo-50/40 dark:bg-indigo-950/20">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <Barcode className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
-                    <h4 className="text-xs font-bold text-[color:var(--text-primary)] uppercase tracking-wider">
-                      Product Barcodes Manifest ({(form.barcodeList || []).length})
-                    </h4>
-                  </div>
-                  <p className="text-[11px] text-[color:var(--text-muted)] mt-0.5">
-                    Create and configure multiple scannable barcodes for this same product (e.g. Primary, Packaging, Outer Carton, Supplier Barcodes). All barcodes will scan into the POS terminal.
-                  </p>
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    icon={RefreshCw}
-                    onClick={() => addBarcodeRow(randomBarcode())}
-                    className="text-xs text-indigo-600 dark:text-indigo-400 font-bold"
-                  >
-                    Generate Barcode
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="secondary"
-                    icon={Plus}
-                    onClick={() => addBarcodeRow('')}
-                  >
-                    Add Barcode
-                  </Button>
-                </div>
-              </div>
-
-              {/* Manifest Column Headers */}
-              {(form.barcodeList || []).length > 0 && (
-                <div className="hidden md:grid grid-cols-12 gap-2 px-2 text-[10px] font-bold uppercase text-[color:var(--text-muted)]">
-                  <div className="col-span-5">Scannable Barcode Number</div>
-                  <div className="col-span-3">Barcode Type / Role</div>
-                  <div className="col-span-2">Designation</div>
-                  <div className="col-span-2 text-right">Actions</div>
-                </div>
-              )}
-
-              {/* Barcode Rows */}
-              <div className="space-y-2">
-                {(form.barcodeList || []).map((row, idx) => {
-                  const isPrimary = row.type === 'primary' || idx === 0;
-                  return (
-                    <div
-                      key={row._key || idx}
-                      className={`grid grid-cols-12 gap-2 items-center p-2.5 rounded-xl border transition-all ${
-                        isPrimary
-                          ? 'border-indigo-300 dark:border-indigo-700 bg-white dark:bg-slate-900 shadow-xs'
-                          : 'border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)]'
-                      }`}
+              {/* SKU — manual entry or Generate */}
+              <Field
+                label="SKU Code"
+                hint={`Numeric only — ${targetSkuLength} digits configured in Settings > Barcode (e.g. ${'1'.padStart(targetSkuLength, '0')})`}
+              >
+                <div className="relative">
+                  <Input
+                    inputMode="numeric"
+                    maxLength={targetSkuLength}
+                    value={form.sku || ''}
+                    onChange={(e) => {
+                      const val = e.target.value.replace(/\D/g, '').slice(0, targetSkuLength);
+                      setForm({ ...form, sku: val });
+                      if (val.length === targetSkuLength) {
+                        checkSkuDuplicate(val);
+                      } else {
+                        setSkuWarning(null);
+                      }
+                    }}
+                    onBlur={handleSkuBlur}
+                    placeholder={`e.g. ${'1'.padStart(targetSkuLength, '0')}`}
+                    className="font-mono text-xs font-bold pl-8 pr-24"
+                  />
+                  <Tag className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                  <div className="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                    {form.sku ? (
+                      <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)]">
+                        {form.sku.length}/{targetSkuLength}
+                      </span>
+                    ) : null}
+                    <button
+                      type="button"
+                      title="Generate the next sequential SKU"
+                      onClick={generateSku}
+                      disabled={generatingSku}
+                      className="p-1.5 rounded-lg hover:bg-[color:var(--bg-subtle)] text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 disabled:opacity-50"
                     >
-                      {/* Barcode Input */}
-                      <div className="col-span-12 md:col-span-5">
-                        <div className="relative">
-                          <Input
-                            value={row.code || ''}
-                            onChange={(e) => updateBarcodeRow(idx, { code: e.target.value })}
-                            placeholder={isPrimary ? "Primary barcode (auto if blank)" : "e.g. 89012345002"}
-                            className="font-mono text-xs font-bold pl-8"
+                      <RefreshCw className={`h-3.5 w-3.5 ${generatingSku ? 'animate-spin' : ''}`} />
+                    </button>
+                    {form.sku && (
+                      <button
+                        type="button"
+                        title="Clear SKU"
+                        onClick={() => {
+                          setForm({ ...form, sku: '' });
+                          setSkuWarning(null);
+                        }}
+                        className="p-1.5 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)] hover:text-rose-600"
+                      >
+                        <XIcon className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {skuWarning && (
+                  <div className="mt-1 text-[10.5px] font-bold text-amber-600 dark:text-amber-400">⚠ {skuWarning}</div>
+                )}
+              </Field>
+
+              {/* Multiple barcodes for the same product */}
+              <div className="space-y-3 p-3.5 rounded-xl border border-indigo-200 dark:border-indigo-800/80 bg-indigo-50/40 dark:bg-indigo-950/20">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <Barcode className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                      <h4 className="text-xs font-bold text-[color:var(--text-primary)] uppercase tracking-wider">
+                        Product Barcodes ({(form.barcodeList || []).length})
+                      </h4>
+                    </div>
+                    <p className="text-[11px] text-[color:var(--text-muted)] mt-0.5">
+                      Add more than one scannable code for this product (e.g. Primary, Packaging, Outer Carton, Supplier). All of them scan into the POS.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <Button type="button" size="sm" variant="ghost" icon={RefreshCw} onClick={addGeneratedBarcodeRow} disabled={generatingBarcode} className="text-xs text-indigo-600 dark:text-indigo-400 font-bold">
+                      Generate Barcode
+                    </Button>
+                    <Button type="button" size="sm" variant="secondary" icon={Plus} onClick={() => addBarcodeRow('')}>
+                      Add Barcode
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  {(form.barcodeList || []).map((row, idx) => {
+                    const isPrimary = row.type === 'primary' || idx === 0;
+                    return (
+                      <div
+                        key={row._key || idx}
+                        className={`grid grid-cols-12 gap-2 items-center p-2.5 rounded-xl border transition-all ${
+                          isPrimary
+                            ? 'border-indigo-300 dark:border-indigo-700 bg-white dark:bg-slate-900 shadow-xs'
+                            : 'border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)]'
+                        }`}
+                      >
+                        <div className="col-span-12 md:col-span-5">
+                          <div className="relative">
+                            <Input
+                              ref={isPrimary ? barcodeInputRef : undefined}
+                              value={row.code || ''}
+                              onChange={(e) => updateBarcodeRow(idx, { code: e.target.value })}
+                              onFocus={() => isPrimary && setScanningBarcode(true)}
+                              onBlur={() => {
+                                if (isPrimary) setScanningBarcode(false);
+                                checkBarcodeDuplicate(row.code);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') e.currentTarget.blur();
+                              }}
+                              placeholder={isPrimary ? (scanningBarcode ? 'Ready to scan…' : 'Primary barcode (auto if blank)') : 'e.g. 89012345002'}
+                              className={`font-mono text-xs font-bold pl-8 ${isPrimary && scanningBarcode ? 'ring-2 ring-indigo-400' : ''}`}
+                            />
+                            <Barcode className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                          </div>
+                        </div>
+
+                        <div className="col-span-6 md:col-span-3">
+                          <Select value={row.type || (idx === 0 ? 'primary' : 'alternate')} onChange={(e) => updateBarcodeRow(idx, { type: e.target.value })} className="text-xs">
+                            <option value="primary">Primary Barcode</option>
+                            <option value="packaging">Packaging / Retail Pack</option>
+                            <option value="carton">Carton / Outer Case</option>
+                            <option value="inner_pack">Inner Box / Bundle</option>
+                            <option value="supplier">Supplier / Vendor Code</option>
+                            <option value="alternate">Alternate Barcode</option>
+                          </Select>
+                        </div>
+
+                        <div className="col-span-6 md:col-span-2 flex items-center">
+                          {isPrimary ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
+                              <CheckCircle className="h-3 w-3 text-indigo-600 dark:text-indigo-400" />
+                              Primary
+                            </span>
+                          ) : (
+                            <button type="button" onClick={() => makePrimaryBarcode(idx)} className="text-[10.5px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline inline-flex items-center gap-1 cursor-pointer">
+                              Set as Primary
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="col-span-12 md:col-span-2 flex items-center justify-end gap-1">
+                          {scannerConnected && isPrimary && (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              title="Scan with your barcode scanner"
+                              icon={ScanLine}
+                              onClick={startScanningBarcode}
+                              className={`h-8 px-2 ${scanningBarcode ? 'text-indigo-600 bg-indigo-50 dark:bg-indigo-950/50' : 'text-[color:var(--text-muted)] hover:text-indigo-600'}`}
+                            />
+                          )}
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            title="Generate the next sequential barcode"
+                            icon={RefreshCw}
+                            onClick={() => regenerateBarcodeRow(idx)}
+                            disabled={generatingBarcode}
+                            className="h-8 px-2 text-indigo-600 hover:text-indigo-800 dark:text-indigo-400"
                           />
-                          <Barcode className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            title="Remove this barcode"
+                            icon={Trash2}
+                            onClick={() => removeBarcodeRow(idx)}
+                            disabled={(form.barcodeList || []).length <= 1}
+                            className="h-8 px-2 text-rose-500 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/30 disabled:opacity-30 disabled:cursor-not-allowed"
+                          />
                         </div>
                       </div>
+                    );
+                  })}
+                </div>
 
-                      {/* Barcode Type */}
-                      <div className="col-span-6 md:col-span-3">
-                        <Select
-                          value={row.type || (idx === 0 ? 'primary' : 'alternate')}
-                          onChange={(e) => updateBarcodeRow(idx, { type: e.target.value })}
-                          className="text-xs"
-                        >
-                          <option value="primary">Primary Barcode</option>
-                          <option value="packaging">Packaging / Retail Pack</option>
-                          <option value="carton">Carton / Outer Case</option>
-                          <option value="inner_pack">Inner Box / Bundle</option>
-                          <option value="supplier">Supplier / Vendor Code</option>
-                          <option value="alternate">Alternate Barcode</option>
-                        </Select>
-                      </div>
-
-                      {/* Primary Badge or Set as Primary Button */}
-                      <div className="col-span-6 md:col-span-2 flex items-center">
-                        {isPrimary ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
-                            <CheckCircle className="h-3 w-3 text-indigo-600 dark:text-indigo-400" />
-                            Primary
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => makePrimaryBarcode(idx)}
-                            className="text-[10.5px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
-                          >
-                            Set as Primary
-                          </button>
-                        )}
-                      </div>
-
-                      {/* Actions */}
-                      <div className="col-span-12 md:col-span-2 flex items-center justify-end gap-1">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="ghost"
-                          title="Generate random 10-digit barcode"
-                          icon={RefreshCw}
-                          onClick={() => updateBarcodeRow(idx, { code: randomBarcode() })}
-                          className="h-8 px-2 text-indigo-600 hover:text-indigo-800 dark:text-indigo-400"
-                        />
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="ghost"
-                          title="Remove this barcode"
-                          icon={Trash2}
-                          onClick={() => removeBarcodeRow(idx)}
-                          disabled={(form.barcodeList || []).length <= 1}
-                          className="h-8 px-2 text-rose-500 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/30 disabled:opacity-30 disabled:cursor-not-allowed"
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* Bottom Quick Add & Help */}
-              <div className="flex flex-wrap items-center justify-between pt-1 text-[11px] text-[color:var(--text-muted)]">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  icon={Plus}
-                  onClick={() => addBarcodeRow('')}
-                >
-                  Add Product Barcode
-                </Button>
-                <span>
-                  Tip: Multiple barcodes allow POS scanners to identify this product regardless of pack size or vendor barcode.
-                </span>
+                {barcodeWarning && (
+                  <div className="text-[10.5px] font-bold text-amber-600 dark:text-amber-400">⚠ {barcodeWarning}</div>
+                )}
               </div>
             </div>
 
@@ -2097,7 +2412,12 @@ export function ProductFormModal({
             ) : form.productType !== 'combo' && form.productType !== 'composite' ? (
               <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
                 <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">Pricing &amp; Margin</h4>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                {(() => {
+                  const ppNum = form.productType === 'composite' && !form.useCustomPricing
+                    ? computeRecipeTotals(form.recipeItems, products).unitCost
+                    : Number(form.purchasePrice) || 0;
+                  return (
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                   <Field label="Purchase Price (₹)" hint={form.productType === 'composite' ? 'Calculated from the recipe' : undefined}>
                     <Input
                       type="number"
@@ -2109,36 +2429,19 @@ export function ProductFormModal({
                       }
                       onChange={(e) => {
                         const pp = e.target.value;
-                        const margin = Number(form.marginPercent);
+                        const ppN = Number(pp) || 0;
                         const next = { ...form, purchasePrice: pp };
-                        // Keep Selling Price and MRP in step with an already-configured margin so a cost change doesn't leave them stale.
-                        if (form.marginPercent !== '' && Number(pp) > 0) {
-                          const computed = (Number(pp) * (1 + margin / 100)).toFixed(2);
-                          next.price = computed;
-                          next.mrp = computed;
+                        // Keep Selling Price and MRP in step with their own already-configured margins so a cost change doesn't leave them stale.
+                        if (form.marginPercentSp !== '' && ppN > 0) {
+                          next.price = (ppN * (1 + Number(form.marginPercentSp) / 100)).toFixed(2);
+                        }
+                        if (form.marginPercentMrp !== '' && ppN > 0) {
+                          next.mrp = (ppN * (1 + Number(form.marginPercentMrp) / 100)).toFixed(2);
                         }
                         setForm(next);
                       }}
                       disabled={form.productType === 'composite' && !form.useCustomPricing}
                       className={form.productType === 'composite' && !form.useCustomPricing ? 'opacity-70 cursor-not-allowed' : ''}
-                    />
-                  </Field>
-                  <Field label="Margin %" hint="Type a margin to auto-fill Selling Price and MRP from Purchase Price">
-                    <Input
-                      type="number"
-                      step="0.1"
-                      value={form.marginPercent}
-                      onChange={(e) => {
-                        const marginVal = e.target.value;
-                        const pp = Number(form.purchasePrice) || 0;
-                        const next = { ...form, marginPercent: marginVal };
-                        if (marginVal !== '' && pp > 0) {
-                          const computed = (pp * (1 + Number(marginVal) / 100)).toFixed(2);
-                          next.price = computed;
-                          next.mrp = computed;
-                        }
-                        setForm(next);
-                      }}
                     />
                   </Field>
                   <Field label="Selling Price (₹) *">
@@ -2162,8 +2465,8 @@ export function ProductFormModal({
                         const priceVal = e.target.value;
                         const pp = Number(form.purchasePrice) || 0;
                         const next = { ...form, price: priceVal };
-                        // Editing Selling Price directly re-derives the margin shown, rather than leaving a now-inaccurate figure in place.
-                        next.marginPercent = pp > 0 && priceVal !== '' ? (((Number(priceVal) - pp) / pp) * 100).toFixed(1) : '';
+                        // Editing Selling Price directly re-derives its own margin, rather than leaving a now-inaccurate figure in place.
+                        next.marginPercentSp = pp > 0 && priceVal !== '' ? (((Number(priceVal) - pp) / pp) * 100).toFixed(1) : '';
                         setForm(next);
                       }}
                       required
@@ -2171,7 +2474,23 @@ export function ProductFormModal({
                       className={form.productType === 'combo' && !form.useCustomPricing ? 'opacity-70 cursor-not-allowed' : ''}
                     />
                   </Field>
-                  <Field label="MRP (₹)" hint="Auto-fills from margin; edit directly to detect its own margin over cost">
+                  <Field label="Margin % (SP)" hint="Type a margin to auto-fill Selling Price from Purchase Price">
+                    <Input
+                      type="number"
+                      step="0.1"
+                      value={form.marginPercentSp}
+                      onChange={(e) => {
+                        const marginVal = e.target.value;
+                        const pp = Number(form.purchasePrice) || 0;
+                        const next = { ...form, marginPercentSp: marginVal };
+                        if (marginVal !== '' && pp > 0) {
+                          next.price = (pp * (1 + Number(marginVal) / 100)).toFixed(2);
+                        }
+                        setForm(next);
+                      }}
+                    />
+                  </Field>
+                  <Field label="MRP (₹)">
                     <Input
                       type="number"
                       step="0.01"
@@ -2180,13 +2499,31 @@ export function ProductFormModal({
                         const mrpVal = e.target.value;
                         const pp = Number(form.purchasePrice) || 0;
                         const next = { ...form, mrp: mrpVal };
-                        // Editing MRP directly re-derives the margin shown, same as Selling Price does.
-                        next.marginPercent = pp > 0 && mrpVal !== '' ? (((Number(mrpVal) - pp) / pp) * 100).toFixed(1) : form.marginPercent;
+                        // Editing MRP directly re-derives its own margin, same as Selling Price does.
+                        next.marginPercentMrp = pp > 0 && mrpVal !== '' ? (((Number(mrpVal) - pp) / pp) * 100).toFixed(1) : '';
+                        setForm(next);
+                      }}
+                    />
+                  </Field>
+                  <Field label="Margin % (MRP)" hint="Type a margin to auto-fill MRP from Purchase Price">
+                    <Input
+                      type="number"
+                      step="0.1"
+                      value={form.marginPercentMrp}
+                      onChange={(e) => {
+                        const marginVal = e.target.value;
+                        const pp = Number(form.purchasePrice) || 0;
+                        const next = { ...form, marginPercentMrp: marginVal };
+                        if (marginVal !== '' && pp > 0) {
+                          next.mrp = (pp * (1 + Number(marginVal) / 100)).toFixed(2);
+                        }
                         setForm(next);
                       }}
                     />
                   </Field>
                 </div>
+                  );
+                })()}
                 {(form.productType === 'composite' || form.productType === 'combo') && (
                   <div className="pt-2">
                     <label className="flex items-center gap-2 cursor-pointer text-xs font-medium text-[color:var(--text-secondary)]">
@@ -2774,7 +3111,7 @@ export function ProductFormModal({
   );
 }
 
-function ProductsTab({ products, categories, units, warehouses, showToast, onRefresh, batchTrackingEnabled, serialTrackingEnabled, storeNearExpiryDays, tenant, defaultTaxRate }) {
+function ProductsTab({ products, categories, units, warehouses, showToast, onRefresh, batchTrackingEnabled, serialTrackingEnabled, storeNearExpiryDays, tenant, defaultTaxRate, settings }) {
   const [query, setQuery] = useState('');
   const [categoryId, setCategoryId] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
@@ -2787,6 +3124,9 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
   const [editing, setEditing] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [labelProduct, setLabelProduct] = useState(null);
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [labelBatch, setLabelBatch] = useState(null);
+  const [priceHistoryProduct, setPriceHistoryProduct] = useState(null);
 
   const allBatchOptions = useMemo(() => {
     const opts = [];
@@ -2863,12 +3203,15 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       }
 
       if (!needle) return true;
+      // Legacy `p.barcodes` alternates (pre-dating the single-barcode system) are long codes that
+      // can coincidentally contain a short typed number anywhere inside them, surfacing a totally
+      // unrelated product — only this product's own current `p.barcode` is checked here.
       return (
         p.name.toLowerCase().includes(needle) ||
         (p.regionalName || '').toLowerCase().includes(needle) ||
         (p.printName || '').toLowerCase().includes(needle) ||
         (p.sku || '').toLowerCase().includes(needle) ||
-        (p.barcodes || [p.barcode]).some((b) => String(b).includes(needle)) ||
+        (p.barcode && String(p.barcode).includes(needle)) ||
         (p.trackSerials && Array.isArray(p.serials) && p.serials.some((s) =>
           String(s.serialNo || '').toLowerCase().includes(needle) || String(s.imei || '').toLowerCase().includes(needle)
         ))
@@ -2909,18 +3252,23 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
   return (
     <div className="space-y-4">
       {/* Search & Action Bar */}
-      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
-        <div className="flex flex-1 flex-wrap gap-2 items-center">
-          <SearchInput value={query} onChange={setQuery} placeholder="Search by name, SKU, barcode, or serial no..." className="w-64" />
+      <div className="flex items-center justify-between gap-2 bg-[color:var(--bg-surface)] p-2.5 rounded-2xl border border-[color:var(--border-subtle)] overflow-x-auto scrollbar-thin">
+        <div className="flex flex-1 items-center gap-2 min-w-0">
+          <SearchInput
+            value={query}
+            onChange={setQuery}
+            placeholder="Search name, SKU, barcode, serial no..."
+            className="flex-1 min-w-[180px]"
+          />
 
-          <Select value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className="w-44">
+          <Select value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className="w-36 shrink-0">
             <option value="all">All Categories</option>
             {categories.map((c) => (
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}
           </Select>
 
-          <Select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="w-36">
+          <Select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="w-32 shrink-0">
             <option value="all">All Types</option>
             <option value="standard">Standard</option>
             <option value="raw">Raw Material</option>
@@ -2929,7 +3277,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
             <option value="composite">Composite</option>
           </Select>
 
-          <Select value={warehouseFilter} onChange={(e) => setWarehouseFilter(e.target.value)} className="w-44">
+          <Select value={warehouseFilter} onChange={(e) => setWarehouseFilter(e.target.value)} className="w-36 shrink-0">
             <option value="all">All Warehouses</option>
             {(warehouses || []).map((w) => (
               <option key={w.id} value={w.id}>{w.name}</option>
@@ -2937,32 +3285,45 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
           </Select>
 
           {batchTrackingEnabled && (
-            <Select value={batchFilter} onChange={(e) => setBatchFilter(e.target.value)} className="w-44">
-              <option value="all">All (Batch & Non-Batch)</option>
-              <option value="tracked">Batch-Tracked Only</option>
-              <option value="untracked">Not Batch-Tracked</option>
-              <option value="nearExpiry">Near Expiry Batches</option>
-              <option value="expired">Expired Batches</option>
+            <Select value={batchFilter} onChange={(e) => setBatchFilter(e.target.value)} className="w-32 shrink-0">
+              <option value="all">All Batches</option>
+              <option value="tracked">Tracked</option>
+              <option value="untracked">Untracked</option>
+              <option value="nearExpiry">Near Expiry</option>
+              <option value="expired">Expired</option>
             </Select>
           )}
 
           {batchTrackingEnabled && allBatchOptions.length > 0 && (
-            <Select value={batchNoFilter} onChange={(e) => setBatchNoFilter(e.target.value)} className="w-56">
-              <option value="">Search a Batch No…</option>
+            <Select value={batchNoFilter} onChange={(e) => setBatchNoFilter(e.target.value)} className="w-36 shrink-0">
+              <option value="">Batch No…</option>
               {allBatchOptions.map((opt, idx) => (
                 <option key={`${opt.value}_${idx}`} value={opt.value}>{opt.label}</option>
               ))}
             </Select>
           )}
 
-          <Select value={stockFilter} onChange={(e) => setStockFilter(e.target.value)} className="w-36">
+          <Select value={stockFilter} onChange={(e) => setStockFilter(e.target.value)} className="w-28 shrink-0">
             <option value="ALL">All Stock</option>
             <option value="LOW">Low Stock</option>
             <option value="OUT">Out of Stock</option>
           </Select>
+
+          <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-28 shrink-0">
+            <option value="all">All Status</option>
+            <option value="active">Active</option>
+            <option value="inactive">Inactive</option>
+          </Select>
         </div>
 
-        <Button icon={Plus} onClick={openAdd}>Add Product</Button>
+        <div className="flex items-center gap-2 shrink-0">
+          {selectedIds.size > 0 && (
+            <Button icon={Printer} variant="secondary" onClick={() => setLabelBatch([...selectedIds])} className="whitespace-nowrap">
+              Print ({selectedIds.size})
+            </Button>
+          )}
+          <Button icon={Plus} onClick={openAdd} className="whitespace-nowrap">Add Product</Button>
+        </div>
       </div>
 
       {/* Products Table */}
@@ -2974,6 +3335,22 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
             <table className="w-full text-xs text-left">
               <thead className="bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)] font-bold uppercase border-b border-[color:var(--border-subtle)]">
                 <tr>
+                  <th className="py-3 px-3 w-8">
+                    <input
+                      type="checkbox"
+                      className="rounded border-[color:var(--border-strong)] text-indigo-600 focus:ring-indigo-500"
+                      checked={rows.slice(0, 200).length > 0 && rows.slice(0, 200).every((p) => selectedIds.has(p.id))}
+                      onChange={(e) => {
+                        const visibleIds = rows.slice(0, 200).map((p) => p.id);
+                        setSelectedIds((prev) => {
+                          const next = new Set(prev);
+                          if (e.target.checked) visibleIds.forEach((id) => next.add(id));
+                          else visibleIds.forEach((id) => next.delete(id));
+                          return next;
+                        });
+                      }}
+                    />
+                  </th>
                   <th className="py-3 px-3">Product Info</th>
                   <th className="py-3 px-3">Category / Type</th>
                   <th className="py-3 px-3">SKU / Barcodes</th>
@@ -3037,7 +3414,22 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                     : 0;
 
                   return (
-                    <tr key={p.id} className="hover:bg-[color:var(--bg-subtle)]/50 transition-colors">
+                    <tr key={p.id} className={cx('hover:bg-[color:var(--bg-subtle)]/50 transition-colors', p.isActive === false && 'opacity-50')}>
+                      <td className="py-3 px-3">
+                        <input
+                          type="checkbox"
+                          className="rounded border-[color:var(--border-strong)] text-indigo-600 focus:ring-indigo-500"
+                          checked={selectedIds.has(p.id)}
+                          onChange={(e) =>
+                            setSelectedIds((prev) => {
+                              const next = new Set(prev);
+                              if (e.target.checked) next.add(p.id);
+                              else next.delete(p.id);
+                              return next;
+                            })
+                          }
+                        />
+                      </td>
                       <td className="py-3 px-3">
                         <div className="flex items-center gap-3">
                           {(() => {
@@ -3068,7 +3460,10 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
                             );
                           })()}
                           <div>
-                            <div className="font-bold text-sm text-[color:var(--text-primary)]">{p.name}</div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-bold text-sm text-[color:var(--text-primary)]">{p.name}</span>
+                              {p.isActive === false && <Badge tone="neutral">Inactive</Badge>}
+                            </div>
                             {(p.regionalName || p.printName) && (
                               <div className="text-xs text-indigo-600 font-medium">{p.regionalName || p.printName}</div>
                             )}
@@ -3238,6 +3633,11 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
 
                       <td className="py-3 px-3 text-right">
                         <div className="flex items-center justify-end gap-1">
+                          {Array.isArray(p.pricingHistory) && p.pricingHistory.length > 0 && (
+                            <button onClick={() => setPriceHistoryProduct(p)} title="Price History" className="p-1.5 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)] hover:text-indigo-600">
+                              <History className="h-4 w-4" />
+                            </button>
+                          )}
                           <button onClick={() => setLabelProduct(p)} title="Print Barcode Label" className="p-1.5 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)] hover:text-indigo-600">
                             <Printer className="h-4 w-4" />
                           </button>
@@ -3271,6 +3671,7 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
         serialTrackingEnabled={serialTrackingEnabled}
         storeNearExpiryDays={storeNearExpiryDays}
         showToast={showToast}
+        settings={settings}
         onClose={() => setShowForm(false)}
         onSaved={() => {
           setShowForm(false);
@@ -3282,6 +3683,43 @@ function ProductsTab({ products, categories, units, warehouses, showToast, onRef
       {/* Barcode Print Modal */}
       {labelProduct && (
         <BarcodePrinterModal product={labelProduct} companyName={tenant?.name} onClose={() => setLabelProduct(null)} showToast={showToast} />
+      )}
+
+      {labelBatch && (
+        <BarcodePrinterModal
+          products={products.filter((p) => labelBatch.includes(p.id))}
+          companyName={tenant?.name}
+          onClose={() => setLabelBatch(null)}
+          showToast={showToast}
+        />
+      )}
+
+      {/* Price History Modal */}
+      {priceHistoryProduct && (
+        <Modal open={true} title={`Price History — ${priceHistoryProduct.name}`} icon={History} onClose={() => setPriceHistoryProduct(null)}>
+          <div className="space-y-2 max-h-[60vh] overflow-y-auto">
+            {(priceHistoryProduct.pricingHistory || []).map((h, idx) => (
+              <div key={idx} className="p-2.5 rounded-lg border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-[color:var(--text-primary)]">{fmtDateTime(h.date)}</span>
+                  <span className="text-[color:var(--text-muted)]">{h.updatedBy || 'Owner'}</span>
+                </div>
+                <div className="mt-1 grid grid-cols-2 gap-2 font-mono">
+                  {h.oldPrice !== h.newPrice && (
+                    <div>
+                      Selling: {money(h.oldPrice)} <ArrowRight className="inline h-3 w-3 mx-0.5" /> <span className="font-bold">{money(h.newPrice)}</span>
+                    </div>
+                  )}
+                  {h.oldPurchasePrice !== h.newPurchasePrice && (
+                    <div>
+                      Purchase: {money(h.oldPurchasePrice)} <ArrowRight className="inline h-3 w-3 mx-0.5" /> <span className="font-bold">{money(h.newPurchasePrice)}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Modal>
       )}
 
     </div>
@@ -4469,10 +4907,18 @@ function HistoryTab({ products }) {
   const [movements, setMovements] = useState([]);
   const [type, setType] = useState('ALL');
   const [query, setQuery] = useState('');
+  const [productId, setProductId] = useState('');
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+
+  const productOptions = useMemo(
+    () => [...(products || [])].sort((a, b) => a.name.localeCompare(b.name)),
+    [products]
+  );
 
   useEffect(() => {
     let ignore = false;
-    api.get('/inventory/movements', { type })
+    api.get('/inventory/movements', { type, productId: productId || undefined, startDate: startDate || undefined, endDate: endDate || undefined })
       .then((res) => {
         if (ignore) return;
         setMovements(Array.isArray(res) ? res : res?.data || []);
@@ -4481,7 +4927,7 @@ function HistoryTab({ products }) {
     return () => {
       ignore = true;
     };
-  }, [type]);
+  }, [type, productId, startDate, endDate]);
 
   const filtered = useMemo(() => {
     if (!query) return movements;
@@ -4490,9 +4936,17 @@ function HistoryTab({ products }) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
-        <SearchInput value={query} onChange={setQuery} placeholder="Search by product name..." className="w-64" />
-        <Select value={type} onChange={(e) => setType(e.target.value)} className="w-44">
+      <div className="flex flex-wrap items-center gap-2 bg-[color:var(--bg-surface)] p-3 rounded-2xl border border-[color:var(--border-subtle)]">
+        <SearchInput value={query} onChange={setQuery} placeholder="Search by product name..." className="w-56" />
+
+        <Select value={productId} onChange={(e) => setProductId(e.target.value)} className="w-56">
+          <option value="">All Products</option>
+          {productOptions.map((p) => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </Select>
+
+        <Select value={type} onChange={(e) => setType(e.target.value)} className="w-40">
           <option value="ALL">All Types</option>
           <option value="SALE">Sale</option>
           <option value="PURCHASE">Purchase</option>
@@ -4500,6 +4954,26 @@ function HistoryTab({ products }) {
           <option value="TRANSFER">Transfer</option>
           <option value="OPENING">Opening</option>
         </Select>
+
+        <Field label="From" className="!mb-0">
+          <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-36" />
+        </Field>
+        <Field label="To" className="!mb-0">
+          <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="w-36" />
+        </Field>
+        {(startDate || endDate || productId) && (
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => {
+              setStartDate('');
+              setEndDate('');
+              setProductId('');
+            }}
+          >
+            Clear Filters
+          </Button>
+        )}
       </div>
 
       <Panel title={`Stock Movement Log (${filtered.length})`} icon={History}>
@@ -5834,10 +6308,85 @@ function parseCSVContent(text) {
   return rows;
 }
 
-function ImportExportTab({ products, categories, showToast, onRefresh }) {
-  const [fileText, setFileText] = useState('');
+/** Reads an uploaded .xlsx/.xls workbook's first sheet into the same {header: value} row shape parseCSVContent() produces, so both formats share one downstream pipeline. `xlsx` is loaded on demand here rather than a top-level import, so it's fetched only when someone actually uploads a spreadsheet, not just for opening Inventory. */
+async function parseXlsxContent(arrayBuffer) {
+  const XLSX = await import('xlsx');
+  const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+  const firstSheetName = workbook.SheetNames[0];
+  if (!firstSheetName) return [];
+  const sheet = workbook.Sheets[firstSheetName];
+  return XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+}
+
+/** Case/spacing-insensitive lookup across a row's own headers, e.g. "Selling Price" matches "price". Mirrors (a lightweight subset of) the backend's own alias matching, just for preview purposes. */
+function getRowValue(row, ...keys) {
+  const rowKeys = Object.keys(row);
+  for (const k of keys) {
+    const targetClean = k.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const match = rowKeys.find((rk) => rk.replace(/^﻿/, '').toLowerCase().replace(/[^a-z0-9]/g, '') === targetClean);
+    if (match && row[match] !== undefined && String(row[match]).trim() !== '') {
+      return String(row[match]).trim();
+    }
+  }
+  return '';
+}
+
+/** Builds a per-row preview (new vs. update, and any obvious problems) before the file is actually sent to the import endpoint. */
+function buildImportPreview(rows, existingProducts, unitNames) {
+  const seenBarcodes = new Map();
+  const knownUnits = new Set((unitNames || []).map((u) => u.toLowerCase()));
+
+  return rows.map((row, idx) => {
+    const name = getRowValue(row, 'name', 'productname', 'itemname', 'product', 'item', 'title');
+    const priceRaw = getRowValue(row, 'price', 'sellingprice', 'saleprice', 'rate', 'retailprice');
+    const unit = getRowValue(row, 'unit', 'uom', 'units', 'baseunit') || 'pcs';
+    const barcode = getRowValue(row, 'barcode', 'code', 'upc', 'ean', 'barcodeno');
+    const category = getRowValue(row, 'category', 'categoryname', 'group');
+
+    const issues = [];
+    if (!name) issues.push('Missing product name');
+    const price = Number(String(priceRaw).replace(/[₹$,\s]/g, ''));
+    if (priceRaw && !Number.isFinite(price)) issues.push('Selling price is not a valid number');
+    if (unit && !knownUnits.has(unit.toLowerCase())) issues.push(`Unit "${unit}" is new — will be created`);
+
+    let matchedExisting = null;
+    if (barcode) {
+      matchedExisting = existingProducts.find((p) => p.barcode === barcode || (p.barcodes || []).includes(barcode));
+      if (seenBarcodes.has(barcode)) issues.push(`Duplicate barcode within this file (also row ${seenBarcodes.get(barcode)})`);
+      else seenBarcodes.set(barcode, idx + 1);
+    }
+    if (!matchedExisting && name) {
+      matchedExisting = existingProducts.find((p) => p.name.toLowerCase().trim() === name.toLowerCase().trim());
+    }
+
+    return {
+      row: idx + 1,
+      name: name || '(blank)',
+      price: priceRaw || '—',
+      unit,
+      barcode: barcode || '—',
+      category: category || '—',
+      willUpdate: Boolean(matchedExisting),
+      issues,
+      blocked: !name
+    };
+  });
+}
+
+function ImportExportTab({ products, categories, units, showToast, onRefresh }) {
   const [importSummary, setImportSummary] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [pendingRows, setPendingRows] = useState(null); // parsed but not yet confirmed
+  const [exportCategory, setExportCategory] = useState('all');
+  const [exportStatus, setExportStatus] = useState('all');
+
+  const unitNames = useMemo(() => (units || []).map((u) => (typeof u === 'object' ? u.name : u)).filter(Boolean), [units]);
+
+  const preview = useMemo(
+    () => (pendingRows ? buildImportPreview(pendingRows, products, unitNames) : null),
+    [pendingRows, products, unitNames]
+  );
+  const blockedCount = preview ? preview.filter((r) => r.blocked).length : 0;
 
   const downloadSampleCSV = () => {
     const csvContent =
@@ -5856,17 +6405,35 @@ function ImportExportTab({ products, categories, showToast, onRefresh }) {
     URL.revokeObjectURL(url);
   };
 
-  const autoProcessImport = async (text) => {
-    if (!text || !text.trim()) return showToast('Selected CSV file is empty.', 'error');
+  const handleFileUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const isXlsx = /\.xlsx?$/i.test(file.name);
+    const reader = new FileReader();
+    reader.onload = async (evt) => {
+      try {
+        const rows = isXlsx ? await parseXlsxContent(evt.target.result) : parseCSVContent(evt.target.result);
+        if (rows.length === 0) {
+          showToast('File is empty or missing data rows.', 'error');
+          return;
+        }
+        setImportSummary(null);
+        setPendingRows(rows);
+      } catch (err) {
+        showToast(`Could not read file: ${err.message}`, 'error');
+      }
+    };
+    if (isXlsx) reader.readAsArrayBuffer(file);
+    else reader.readAsText(file);
+    e.target.value = ''; // Reset file input
+  };
 
-    const parsedProducts = parseCSVContent(text);
-    if (parsedProducts.length === 0) return showToast('CSV file is empty or missing data rows.', 'error');
-
+  const confirmImport = async () => {
+    if (!pendingRows) return;
     setLoading(true);
-    showToast(`Processing CSV with ${parsedProducts.length} items...`);
-
+    showToast(`Importing ${pendingRows.length} item(s)...`);
     try {
-      const res = await api.post('/products/bulk-import', { products: parsedProducts });
+      const res = await api.post('/products/bulk-import', { products: pendingRows });
       const summary = res.summary || {
         importedCount: res.data?.length || 0,
         updatedCount: 0,
@@ -5874,7 +6441,8 @@ function ImportExportTab({ products, categories, showToast, onRefresh }) {
         errors: []
       };
       setImportSummary(summary);
-      showToast(res.message || 'Bulk CSV Import & Update completed!');
+      setPendingRows(null);
+      showToast(res.message || 'Bulk import completed!');
       onRefresh();
     } catch (err) {
       showToast(api.message(err, 'Bulk import failed.'), 'error');
@@ -5883,47 +6451,54 @@ function ImportExportTab({ products, categories, showToast, onRefresh }) {
     }
   };
 
-  const handleFileUpload = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      const content = evt.target.result;
-      setFileText(content);
-      autoProcessImport(content);
-    };
-    reader.readAsText(file);
-    e.target.value = ''; // Reset file input
-  };
+  const filteredExportProducts = useMemo(() => {
+    return products.filter((p) => {
+      if (exportCategory !== 'all') {
+        const belongs = Array.isArray(p.categoryIds) && p.categoryIds.length ? p.categoryIds.includes(exportCategory) : p.categoryId === exportCategory;
+        if (!belongs) return false;
+      }
+      if (exportStatus === 'active' && p.isActive === false) return false;
+      if (exportStatus === 'inactive' && p.isActive !== false) return false;
+      return true;
+    });
+  }, [products, exportCategory, exportStatus]);
 
-  const handleExportCSV = () => {
-    const cols = [
-      { key: 'name', label: 'Product Name' },
-      { key: 'regionalName', label: 'Regional Name' },
-      { key: 'productType', label: 'Product Type' },
-      { key: 'category', label: 'Category' },
-      { key: 'sku', label: 'SKU Code' },
-      { key: 'barcode', label: 'Barcode' },
-      { key: 'unit', label: 'Unit' },
-      { key: 'purchasePrice', label: 'Purchase Price' },
-      { key: 'price', label: 'Selling Price' },
-      { key: 'stock', label: 'Current Stock' },
-      { key: 'hsn', label: 'HSN Code' }
-    ];
-
-    const exportRows = products.map((p) => {
+  const buildExportRows = () =>
+    filteredExportProducts.map((p) => {
       const typeKey = canonicalProductType(p.productType || (Array.isArray(p.productTypes) && p.productTypes.length > 1 ? 'both' : p.productTypes?.[0]));
       const typeLabel = PRODUCT_TYPE_LABELS[typeKey]?.label || 'Standard Product';
       const cat = categories.find((c) => c.id === (Array.isArray(p.categoryIds) ? p.categoryIds[0] : p.categoryId));
       return {
         ...p,
         category: cat?.name || p.categoryId || '—',
-        productType: typeLabel
+        productType: typeLabel,
+        status: p.isActive === false ? 'Inactive' : 'Active'
       };
     });
 
-    exportReport('csv', { title: 'Product Inventory Export', columns: cols, rows: exportRows });
-    showToast('Exported CSV file.');
+  const catalogCols = [
+    { key: 'name', label: 'Product Name' },
+    { key: 'regionalName', label: 'Regional Name' },
+    { key: 'productType', label: 'Product Type' },
+    { key: 'category', label: 'Category' },
+    { key: 'sku', label: 'SKU Code' },
+    { key: 'barcode', label: 'Barcode' },
+    { key: 'unit', label: 'Unit' },
+    { key: 'purchasePrice', label: 'Purchase Price' },
+    { key: 'price', label: 'Selling Price' },
+    { key: 'stock', label: 'Current Stock' },
+    { key: 'hsn', label: 'HSN Code' },
+    { key: 'status', label: 'Status' }
+  ];
+
+  const handleExportCSV = () => {
+    exportReport('csv', { title: 'Product Inventory Export', columns: catalogCols, rows: buildExportRows() });
+    showToast(`Exported ${filteredExportProducts.length} product(s) to CSV.`);
+  };
+
+  const handleExportXlsx = () => {
+    exportReport('xlsx', { title: 'Product Inventory Export', columns: catalogCols, rows: buildExportRows() });
+    showToast(`Exported ${filteredExportProducts.length} product(s) to Excel.`);
   };
 
   const handleExportPDF = () => {
@@ -5942,27 +6517,28 @@ function ImportExportTab({ products, categories, showToast, onRefresh }) {
       title: 'INVENTORY CATALOG & STOCK REPORT',
       company: { name: 'Selsolve Smart POS' },
       columns: cols,
-      rows: products
+      rows: filteredExportProducts
     });
+    showToast(`Exported ${filteredExportProducts.length} product(s) to PDF.`);
   };
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       {/* Excel / CSV Import Section */}
-      <Panel title="Auto Bulk Product & Stock CSV Import" icon={Upload}>
+      <Panel title="Bulk Product & Stock Import" icon={Upload}>
         <div className="space-y-4">
           <div className="p-3 rounded-xl bg-[color:var(--bg-subtle)] border border-[color:var(--border-subtle)] text-xs space-y-2">
-            <div className="font-bold text-[color:var(--text-primary)]">Instant Auto-Import & Update:</div>
-            <p className="text-[color:var(--text-secondary)] font-medium">Selecting a CSV file will automatically create new items or update existing items (matching barcode or name), stock balances, categories, and pricing instantly.</p>
+            <div className="font-bold text-[color:var(--text-primary)]">Preview Before Import:</div>
+            <p className="text-[color:var(--text-secondary)] font-medium">Upload a CSV or Excel (.xlsx) file — you'll see a preview with row-level checks before anything is saved. Matching by barcode or name creates new items or updates existing ones.</p>
             <Button icon={Download} size="sm" variant="secondary" onClick={downloadSampleCSV}>
               Download Sample CSV Template
             </Button>
           </div>
 
-          <Field label="Upload CSV File (Auto-Imports & Updates Instantly)">
+          <Field label="Upload CSV or Excel File">
             <input
               type="file"
-              accept=".csv"
+              accept=".csv,.xlsx,.xls"
               onChange={handleFileUpload}
               disabled={loading}
               className="block w-full text-xs text-[color:var(--text-primary)] file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-indigo-600 file:text-white hover:file:bg-indigo-700 disabled:opacity-50"
@@ -5971,7 +6547,7 @@ function ImportExportTab({ products, categories, showToast, onRefresh }) {
 
           {loading && (
             <div className="p-3 rounded-xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 text-xs font-bold text-indigo-700 dark:text-indigo-300 animate-pulse">
-              ⏳ Auto-importing items, stock balances, and categories from CSV...
+              ⏳ Importing items, stock balances, and categories...
             </div>
           )}
 
@@ -6004,22 +6580,101 @@ function ImportExportTab({ products, categories, showToast, onRefresh }) {
       {/* Inventory Export Section */}
       <Panel title="Export Inventory Reports" icon={FileSpreadsheet}>
         <div className="space-y-4">
-          <p className="text-xs text-[color:var(--text-secondary)] font-medium">Export catalog data, valuation, and stock levels to Excel CSV or print-ready PDF format.</p>
-          <div className="grid grid-cols-2 gap-3">
+          <p className="text-xs text-[color:var(--text-secondary)] font-medium">Export catalog data, valuation, and stock levels — optionally narrowed by category or status first.</p>
+
+          <div className="flex flex-wrap gap-2">
+            <Select value={exportCategory} onChange={(e) => setExportCategory(e.target.value)} className="w-44">
+              <option value="all">All Categories</option>
+              {categories.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </Select>
+            <Select value={exportStatus} onChange={(e) => setExportStatus(e.target.value)} className="w-36">
+              <option value="all">All Status</option>
+              <option value="active">Active Only</option>
+              <option value="inactive">Inactive Only</option>
+            </Select>
+            <span className="text-[11px] text-[color:var(--text-muted)] self-center font-medium">
+              {filteredExportProducts.length} of {products.length} product(s) will be exported
+            </span>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3">
             <button onClick={handleExportCSV} className="p-4 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] hover:border-indigo-500 text-left transition-all">
               <FileSpreadsheet className="h-6 w-6 text-emerald-600 mb-2" />
-              <div className="font-bold text-sm text-[color:var(--text-primary)]">Export to Excel (CSV)</div>
-              <div className="text-xs text-[color:var(--text-secondary)] font-medium">UTF-8 encoded CSV with regional text support</div>
+              <div className="font-bold text-sm text-[color:var(--text-primary)]">CSV</div>
+              <div className="text-xs text-[color:var(--text-secondary)] font-medium">UTF-8, opens in any spreadsheet app</div>
+            </button>
+
+            <button onClick={handleExportXlsx} className="p-4 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] hover:border-indigo-500 text-left transition-all">
+              <FileSpreadsheet className="h-6 w-6 text-emerald-700 mb-2" />
+              <div className="font-bold text-sm text-[color:var(--text-primary)]">Excel (.xlsx)</div>
+              <div className="text-xs text-[color:var(--text-secondary)] font-medium">Native Excel workbook</div>
             </button>
 
             <button onClick={handleExportPDF} className="p-4 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] hover:border-indigo-500 text-left transition-all">
               <Printer className="h-6 w-6 text-indigo-600 mb-2" />
-              <div className="font-bold text-sm text-[color:var(--text-primary)]">Export to PDF</div>
-              <div className="text-xs text-[color:var(--text-secondary)] font-medium">Print-formatted PDF inventory report</div>
+              <div className="font-bold text-sm text-[color:var(--text-primary)]">PDF</div>
+              <div className="text-xs text-[color:var(--text-secondary)] font-medium">Print-formatted report</div>
             </button>
           </div>
         </div>
       </Panel>
+
+      {/* Import Preview Modal */}
+      {preview && (
+        <Modal open={true} title={`Import Preview — ${preview.length} row(s)`} icon={Eye} onClose={() => setPendingRows(null)} className="!max-w-4xl">
+          <div className="space-y-3">
+            {blockedCount > 0 && (
+              <div className="p-2.5 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 text-xs font-bold text-red-700 dark:text-red-300">
+                {blockedCount} row(s) are missing a product name and will be skipped.
+              </div>
+            )}
+            <div className="max-h-[55vh] overflow-y-auto border border-[color:var(--border-subtle)] rounded-xl">
+              <table className="w-full text-[11px] text-left">
+                <thead className="bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-muted)] uppercase sticky top-0">
+                  <tr>
+                    <th className="py-2 px-2">#</th>
+                    <th className="py-2 px-2">Name</th>
+                    <th className="py-2 px-2">Category</th>
+                    <th className="py-2 px-2">Unit</th>
+                    <th className="py-2 px-2">Price</th>
+                    <th className="py-2 px-2">Barcode</th>
+                    <th className="py-2 px-2">Action</th>
+                    <th className="py-2 px-2">Notes</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                  {preview.map((r) => (
+                    <tr key={r.row} className={r.blocked ? 'bg-red-50/50 dark:bg-red-950/20' : ''}>
+                      <td className="py-1.5 px-2 text-[color:var(--text-muted)]">{r.row}</td>
+                      <td className="py-1.5 px-2 font-bold text-[color:var(--text-primary)]">{r.name}</td>
+                      <td className="py-1.5 px-2">{r.category}</td>
+                      <td className="py-1.5 px-2">{r.unit}</td>
+                      <td className="py-1.5 px-2 font-mono">{r.price}</td>
+                      <td className="py-1.5 px-2 font-mono">{r.barcode}</td>
+                      <td className="py-1.5 px-2">
+                        <Badge tone={r.blocked ? 'danger' : r.willUpdate ? 'info' : 'success'}>
+                          {r.blocked ? 'Skip' : r.willUpdate ? 'Update' : 'New'}
+                        </Badge>
+                      </td>
+                      <td className="py-1.5 px-2 text-amber-600 dark:text-amber-400">
+                        {r.issues.join('; ') || '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-[color:var(--border-subtle)]">
+              <Button variant="secondary" onClick={() => setPendingRows(null)}>Cancel</Button>
+              <Button icon={Upload} onClick={confirmImport} loading={loading}>
+                Confirm Import ({preview.length - blockedCount} row{preview.length - blockedCount === 1 ? '' : 's'})
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

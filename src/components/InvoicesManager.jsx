@@ -1,26 +1,17 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
-import QRCode from 'qrcode';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Receipt,
   Search,
-  Filter,
   Download,
   Printer,
   Calendar,
-  DollarSign,
   CheckCircle2,
   XCircle,
   Clock,
-  ChevronRight,
-  ChevronDown,
   Eye,
   RefreshCw,
-  TrendingUp,
   FileText,
-  Building2,
   User,
-  ArrowUpRight,
-  QrCode,
   X,
   CreditCard,
   Plus,
@@ -28,24 +19,30 @@ import {
   Send,
   Trash2,
   Edit3,
-  Layers,
   Tag,
-  Check,
-  Percent,
   CheckSquare,
-  Sparkles,
-  PackageCheck,
   Store,
-  Boxes,
   Truck,
-  Package,
   Maximize2,
-  Minimize2,
   UserPlus
 } from 'lucide-react';
 
 import api, { money, fmtDate, fmtDateTime, todayISO, monthStartISO } from '../lib/api';
-import { Panel, SectionHeader, StatTile, Badge, Button, Spinner, EmptyState, DataTable, Modal, Field, Input, Select, Textarea, SearchInput } from '../lib/ui';
+import {
+  Panel,
+  SectionHeader,
+  Badge,
+  Button,
+  Spinner,
+  EmptyState,
+  DataTable,
+  Modal,
+  Field,
+  Input,
+  Select,
+  Textarea,
+  SearchInput
+} from '../lib/ui';
 import { ThermalReceiptView, THERMAL_THEMES, BILLING_THERMAL_THEME_IDS } from './ThermalReceiptTemplates';
 import { InvoiceDocumentView, INVOICE_THEMES, ACCENT_COLORS } from './InvoiceDocumentTemplates';
 import { exportInvoiceToWord, exportBillToWord, exportReport } from '../lib/exporters';

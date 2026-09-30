@@ -1,7 +1,16 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  ListTree, Plus, ChevronRight, ChevronDown, Search, Lock, Trash2,
-  BookOpen, Landmark, Wallet, Users, Truck
+  ListTree,
+  Plus,
+  ChevronRight,
+  ChevronDown,
+  Lock,
+  Trash2,
+  BookOpen,
+  Landmark,
+  Wallet,
+  Users,
+  Truck
 } from 'lucide-react';
 
 import api, { money, fmtDate } from '../../lib/api';

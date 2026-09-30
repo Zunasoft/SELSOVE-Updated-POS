@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ArrowLeftRight, ArrowRight, Landmark, Wallet, Send } from 'lucide-react';
+import { ArrowLeftRight, ArrowRight, Send } from 'lucide-react';
 
 import api, { money, fmtDate, todayISO } from '../../lib/api';
 import {

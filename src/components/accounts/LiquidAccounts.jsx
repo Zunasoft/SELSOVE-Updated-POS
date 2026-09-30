@@ -4,10 +4,21 @@ import {
   ChevronRight, ChevronDown, CalendarDays
 } from 'lucide-react';
 
-import api, { money, fmtDate, fmtDateTime, todayISO } from '../../lib/api';
+import api, { money, fmtDate, todayISO } from '../../lib/api';
 import {
-  Panel, SectionHeader, StatTile, Button, Modal, Field, Input, Select,
-  Badge, Money, Spinner, EmptyState, DataTable, DateRange
+  Panel,
+  SectionHeader,
+  StatTile,
+  Button,
+  Modal,
+  Field,
+  Input,
+  Select,
+  Money,
+  Spinner,
+  EmptyState,
+  DataTable,
+  DateRange
 } from '../../lib/ui';
 
 /** Bank and cash ledgers behave identically in the journal, so one component serves both, switched by `kind`. */

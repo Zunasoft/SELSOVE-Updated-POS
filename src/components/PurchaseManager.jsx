@@ -1,12 +1,28 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  Truck, Plus, Trash2, ClipboardList, Wallet, X, Search, Boxes, FileText,
-  Undo2, Ban, AlertTriangle, Download, Printer, ChevronLeft, ChevronRight, Paperclip,
-  CreditCard, Clock, CheckCircle2, Edit3, ChevronDown, Receipt, Calendar, Building2, User, Eye, Tag
+  Truck,
+  Plus,
+  Trash2,
+  ClipboardList,
+  Wallet,
+  Boxes,
+  FileText,
+  Undo2,
+  Ban,
+  AlertTriangle,
+  Printer,
+  Paperclip,
+  CreditCard,
+  Clock,
+  CheckCircle2,
+  Edit3,
+  Receipt,
+  Eye,
+  Tag
 } from 'lucide-react';
 
-import api, { money, fmtDate, todayISO, monthStartISO, financialYearStartISO, API_BASE } from '../lib/api';
+import api, { money, fmtDate, todayISO, financialYearStartISO, API_BASE } from '../lib/api';
 import { getProductUnitOptions } from './POSTerminal';
 import { ProductFormModal } from './InventoryManager';
 import { PartyFormModal } from './CustomerVendorLedger';
@@ -1305,7 +1321,10 @@ const blankLine = () => ({
   sellPrice: '',
   trackSerials: false,
   showSerial: false,
-  serials: []
+  serials: [],
+  // Which warehouse this line's stock is received into — empty means "the shop's default", same as
+  // if this were never set (backward compatible with every purchase created before this existed).
+  warehouseId: ''
 });
 
 const r2Local = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -1991,6 +2010,7 @@ function NewPurchaseModal({
             taxRate: Number(l.taxRate) || 0,
             discount: Number(l.discount) || 0,
             total: Number(l.total) || 0,
+            warehouseId: l.warehouseId || undefined,
             batches: hasBatch && batches.length > 0
               ? batches.map((b) => ({
                   batchNo: b.batchNo || '',
@@ -2481,6 +2501,24 @@ function NewPurchaseModal({
                                 handleItemChange(i, 'name', '');
                               }}
                             />
+                            {/* Only shown once there's actually a choice to make — a single-warehouse
+                                shop (the common case) never sees this, and every existing line still
+                                defaults to the shop's default warehouse exactly as before. */}
+                            {warehouses.length > 1 && (
+                              <div className="mt-1 flex items-center gap-1.5">
+                                <span className="text-[10px] text-[color:var(--text-muted)]">Receive into</span>
+                                <select
+                                  value={item.warehouseId || ''}
+                                  onChange={(e) => handleItemChange(idx, 'warehouseId', e.target.value)}
+                                  className="text-[10.5px] rounded-lg border border-[color:var(--border)] bg-[color:var(--bg-surface)] px-1.5 py-0.5"
+                                >
+                                  <option value="">{warehouses.find((w) => w.isDefault)?.name || 'Default warehouse'}</option>
+                                  {warehouses.filter((w) => !w.isDefault).map((w) => (
+                                    <option key={w.id} value={w.id}>{w.name}</option>
+                                  ))}
+                                </select>
+                              </div>
+                            )}
                             {/* Batch entry is only ever offered for a product that's
                                 already batch-tracked in the catalog — the backend
                                 only creates batches when product.trackBatches is

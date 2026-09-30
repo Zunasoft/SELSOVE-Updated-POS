@@ -45,11 +45,15 @@ export default function ReportsManager({ showToast }) {
   const [reportId, setReportId] = useState('sales-daily');
   const [range, setRange] = useState({ from: monthStartISO(), to: todayISO() });
   const [analytics, setAnalytics] = useState(null);
-  const [data, setData] = useState(null);
+  // Tagged with the report it was fetched for — switching reports re-renders once before the new fetch
+  // starts, and the previous report's data (a list vs an object) must never reach the new report's renderer.
+  const [loaded, setLoaded] = useState({ id: null, data: null });
   const [company, setCompany] = useState(null);
   const [loading, setLoading] = useState(true);
 
   const report = REPORTS.find((r) => r.id === reportId);
+  const data = loaded.id === reportId ? loaded.data : null;
+  const ready = loaded.id === reportId;
 
   useEffect(() => {
     api.get('/analytics').then(setAnalytics).catch(() => {});
@@ -80,12 +84,13 @@ export default function ReportsManager({ showToast }) {
   useEffect(() => {
     let alive = true;
     setLoading(true);
+    const forId = reportId;
     api
       .get(endpoint[0], endpoint[1])
-      .then((d) => alive && setData(d))
+      .then((d) => alive && setLoaded({ id: forId, data: d }))
       .catch((err) => {
         if (alive) {
-          setData(null);
+          setLoaded({ id: forId, data: null });
           showToast(api.message(err, 'Could not build that report.'), 'error');
         }
       })
@@ -185,7 +190,7 @@ export default function ReportsManager({ showToast }) {
 
       <DateRange from={range.from} to={range.to} onChange={setRange} />
 
-      {loading ? (
+      {loading || !ready ? (
         <Spinner label={`Building the ${report.label.toLowerCase()} report…`} />
       ) : !data ? (
         <EmptyState icon={AlertTriangle} title="Report unavailable" hint="Adjust the period and try again." />

@@ -281,7 +281,16 @@ export default function App() {
 
   const screens = {
     dashboard: <ShopDashboard {...shared} onNavigate={handleTabClick} />,
-    pos: <POSTerminal {...shared} settings={settings} isFullscreen={isFullscreen} onSaleCompleted={fetchStoreData} />,
+    pos: (
+      <POSTerminal
+        {...shared}
+        settings={settings}
+        isFullscreen={isFullscreen}
+        onSaleCompleted={fetchStoreData}
+        // Fails open like the tab gating: unknown features (request failed) keep the scale visible.
+        scaleInPlan={!features || features.weighingScale !== false}
+      />
+    ),
     invoices: <InvoicesManager {...shared} settings={settings} onNavigate={handleTabClick} />,
     inventory: (
       <InventoryManager

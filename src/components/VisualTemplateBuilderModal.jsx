@@ -1,9 +1,28 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  Sliders, Palette, FileText, Printer, Check, X, ArrowUp, ArrowDown,
-  Eye, RefreshCw, Plus, Trash2, Copy, Download, Upload, Code,
-  Layers, Type, Layout, ShieldCheck, Sparkles, CheckCircle2, Maximize2, Minimize2,
-  Globe, Link, FileUp, FolderOpen, ExternalLink, HardDrive, FileCheck, Edit3
+  Sliders,
+  FileText,
+  Printer,
+  Check,
+  ArrowUp,
+  ArrowDown,
+  Eye,
+  RefreshCw,
+  Plus,
+  Trash2,
+  Copy,
+  Download,
+  Code,
+  Layers,
+  Type,
+  Layout,
+  Sparkles,
+  CheckCircle2,
+  Maximize2,
+  Globe,
+  FolderOpen,
+  HardDrive,
+  Edit3
 } from 'lucide-react';
 import { Modal, Button, Field, Input, Select, Textarea, Badge, cx } from '../lib/ui';
 import api from '../lib/api';

@@ -1,4 +1,12 @@
-/** Report exporters — CSV/Excel and PDF, both produced entirely in the browser with no server-side rendering dependency. */
+/**
+ * Report exporters — CSV/Excel and PDF, both produced entirely in the browser with no server-side
+ * rendering dependency. `xlsx` (SheetJS) is a genuinely large library (~450KB), and this module is
+ * statically imported from nearly every screen in the app (POS, Inventory, Reports, invoices, ...),
+ * so it's loaded via a dynamic import() inside exportXlsx() itself rather than a top-level import —
+ * that keeps it out of every screen's own bundle, fetched only the moment someone actually exports
+ * to Excel, regardless of how this module is imported elsewhere.
+ */
+
 const escapeCsv = (value) => {
   const s = value === null || value === undefined ? '' : String(value);
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -38,6 +46,40 @@ export function exportCsv({ title, columns, rows, meta = [] }) {
 
   const csv = [...header, ...body].map((line) => line.map(escapeCsv).join(',')).join('\r\n');
   download(new Blob([`﻿${csv}`], { type: 'text/csv;charset=utf-8;' }), `${slug(title)}-${stamp()}.csv`);
+}
+
+/** A real .xlsx workbook (not CSV-renamed) — one sheet, columns auto-sized, built entirely client-side via SheetJS. */
+export async function exportXlsx({ title, columns, rows, meta = [] }) {
+  const XLSX = await import('xlsx');
+  const header = [
+    [title],
+    ...meta.map((m) => [m]),
+    [`Generated ${new Date().toLocaleString('en-IN')}`],
+    [],
+    columns.map((c) => c.label ?? c)
+  ];
+
+  const body = rows.map((row) =>
+    columns.map((c) => {
+      const key = c.key ?? c;
+      const value = typeof c.value === 'function' ? c.value(row) : row[key];
+      return value === undefined || value === null ? '' : value;
+    })
+  );
+
+  const sheet = XLSX.utils.aoa_to_sheet([...header, ...body]);
+  sheet['!cols'] = columns.map((c) => ({
+    wch: Math.max(String(c.label ?? c).length + 2, 12)
+  }));
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, sheet, 'Data');
+
+  const buffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+  download(
+    new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+    `${slug(title)}-${stamp()}.xlsx`
+  );
 }
 
 /** PDF via a print-ready document in a new window — the browser's own print pipeline keeps fonts, ₹ glyphs and page breaks correct. */
@@ -109,6 +151,7 @@ export function exportPdf({ title, company, period, columns, rows, totals = null
 /** Single entry point used by every report screen's export buttons. */
 export function exportReport(format, payload) {
   if (format === 'pdf') return exportPdf(payload);
+  if (format === 'xlsx') return exportXlsx(payload);
   return exportCsv(payload);
 }
 

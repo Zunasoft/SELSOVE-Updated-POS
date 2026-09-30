@@ -25,7 +25,7 @@ export const resolveAssetUrl = (url) => {
 // Every request carries the tenant's JWT and database name, read from localStorage per-request so a page refresh doesn't lose the session.
 const client = axios.create({ baseURL: API_BASE });
 
-client.interceptors.request.use((config) => {
+const sessionHeaders = () => {
   const token = localStorage.getItem('pos_token');
   const user = localStorage.getItem('pos_user_name');
 
@@ -36,10 +36,15 @@ client.interceptors.request.use((config) => {
     dbName = null;
   }
 
-  if (token) config.headers.Authorization = `Bearer ${token}`;
-  if (dbName) config.headers['x-tenant-db'] = dbName;
-  if (user) config.headers['x-user-name'] = user;
+  const headers = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (dbName) headers['x-tenant-db'] = dbName;
+  if (user) headers['x-user-name'] = user;
+  return headers;
+};
 
+client.interceptors.request.use((config) => {
+  Object.assign(config.headers, sessionHeaders());
   return config;
 });
 
@@ -71,18 +76,69 @@ const isSessionEnded = (err) => {
   return status === 401;
 };
 
+const endSessionIfExpired = (err) => {
+  if (isSessionEnded(err)) {
+    SESSION_KEYS.forEach((k) => localStorage.removeItem(k));
+    if (onSessionExpired) {
+      onSessionExpired(err?.response?.data?.message || 'Your session has ended. Please sign in again.');
+    }
+  }
+};
+
 client.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (isSessionEnded(err)) {
-      SESSION_KEYS.forEach((k) => localStorage.removeItem(k));
-      if (onSessionExpired) {
-        onSessionExpired(err?.response?.data?.message || 'Your session has ended. Please sign in again.');
-      }
-    }
+    endSessionIfExpired(err);
     return Promise.reject(err);
   }
 );
+
+/**
+ * Reads a Server-Sent Events endpoint, calling `onMessage` with each JSON `data:` payload. Uses
+ * fetch rather than EventSource, which can't send the Authorization header. Resolves when the server
+ * ends the stream or `signal` aborts it; rejects with an axios-shaped error on an error status, so
+ * `api.message(err)` and session-expiry handling work the same as for every other request.
+ */
+const stream = async (path, onMessage, signal) => {
+  const res = await fetch(`${API_BASE}${path}`, { headers: sessionHeaders(), signal });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const err = new Error(data.message || `Request failed with status ${res.status}`);
+    err.response = { status: res.status, data };
+    endSessionIfExpired(err);
+    throw err;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    let chunk;
+    try {
+      chunk = await reader.read();
+    } catch (err) {
+      if (signal?.aborted) return;
+      throw err;
+    }
+    if (chunk.done) return;
+    buffer += decoder.decode(chunk.value, { stream: true });
+    const events = buffer.split('\n\n');
+    buffer = events.pop();
+    for (const event of events) {
+      const data = event
+        .split('\n')
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trim())
+        .join('\n');
+      if (!data) continue;
+      try {
+        onMessage(JSON.parse(data));
+      } catch {
+        /* a malformed event is skipped, not fatal */
+      }
+    }
+  }
+};
 
 /** Unwrap the { success, data, message } envelope the API always returns. */
 const unwrap = (res) => res.data?.data ?? res.data;
@@ -95,6 +151,7 @@ export const api = {
   post: (path, body) => client.post(path, body).then((r) => r.data),
   put: (path, body) => client.put(path, body).then((r) => r.data),
   del: (path) => client.delete(path).then((r) => r.data),
+  stream,
   raw: client,
   message
 };

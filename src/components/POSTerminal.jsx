@@ -1,26 +1,73 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, useDeferredValue } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import QRCode from 'qrcode';
 import {
-  Search, ShoppingCart, Trash2, Plus, Minus, Printer, Scale, Barcode,
-  QrCode, PauseCircle, X, Receipt, User, UserPlus, Lock, Unlock, ArrowDownToLine,
-  ArrowUpFromLine, LayoutGrid, Star, RotateCcw, Wallet, CheckCircle2,
-  Flame, ArrowUpDown, Clock, History, Zap, FileCheck, CreditCard,
-  Coins, Building2, Sparkles, PlusCircle, MinusCircle, AlertCircle, CheckCheck,
-  TrendingUp, TrendingDown, Filter, ArrowRight, Users, Maximize2, Minimize2,
-  FileText, Download, ChevronLeft, ChevronRight, Edit3, Tag, ChevronDown, Monitor
+  Search,
+  ShoppingCart,
+  Trash2,
+  Plus,
+  Minus,
+  Printer,
+  Scale,
+  Barcode,
+  QrCode,
+  PauseCircle,
+  X,
+  Receipt,
+  User,
+  UserPlus,
+  Lock,
+  Unlock,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  LayoutGrid,
+  Star,
+  RotateCcw,
+  Wallet,
+  CheckCircle2,
+  Clock,
+  History,
+  FileCheck,
+  CreditCard,
+  Coins,
+  Sparkles,
+  PlusCircle,
+  MinusCircle,
+  ArrowRight,
+  Users,
+  Maximize2,
+  FileText,
+  Download,
+  ChevronLeft,
+  ChevronRight,
+  Edit3,
+  Tag,
+  ChevronDown,
+  Monitor
 } from 'lucide-react';
 
-import api, { money, fmtDateTime, fmtDate, API_BASE, resolveAssetUrl } from '../lib/api';
+import api, { money, fmtDateTime, API_BASE, resolveAssetUrl } from '../lib/api';
 import {
-  Panel, Button, Modal, Field, Input, Select, Textarea, Badge, Money,
-  Spinner, EmptyState, SegmentedControl, DataTable, StatTile
+  Panel,
+  Button,
+  Modal,
+  Field,
+  Input,
+  Select,
+  Textarea,
+  Badge,
+  Money,
+  Spinner,
+  EmptyState,
+  SegmentedControl,
+  DataTable
 } from '../lib/ui';
 import { getCategoryTheme } from '../lib/categoryTheme';
 import { ThermalReceiptView, THERMAL_THEMES, BILLING_THERMAL_THEME_IDS } from './ThermalReceiptTemplates';
 import { InvoiceDocumentView, INVOICE_THEMES, ACCENT_COLORS } from './InvoiceDocumentTemplates';
 import { exportBillToWord, exportInvoiceToWord } from '../lib/exporters';
 import { isWholeNumberUnit, enforceQtyPrecision } from '../lib/units';
+import useLiveScale, { describeFeed } from '../lib/useLiveScale';
 import InvoiceEditModal from './InvoiceEditModal';
 
 const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Credit (Udhar)', 'Partial Payment', 'Multi Pay'];
@@ -408,6 +455,27 @@ export function getProductUnitOptions(product) {
   return options;
 }
 
+/** The barcodes of a product's other units (minor unit + bag/box/case rows), each with the unit it sells in. */
+export function getUnitBarcodes(product) {
+  const list = [];
+  if (product?.customSubUnitBarcode && product?.customSubUnitName) list.push({ code: String(product.customSubUnitBarcode).trim(), unit: product.customSubUnitName });
+  (product?.altUnits || []).forEach((u) => {
+    if (u?.barcode && u?.unit) list.push({ code: String(u.barcode).trim(), unit: u.unit });
+  });
+  return list.filter((u) => u.code);
+}
+
+/** Finds the product a scanned code belongs to through one of its unit barcodes, plus the unit to bill it in. */
+function findByUnitBarcode(products, code) {
+  const needle = String(code || '').trim();
+  if (!needle) return null;
+  for (const product of products || []) {
+    const hit = getUnitBarcodes(product).find((u) => u.code === needle);
+    if (hit) return { product, unit: hit.unit };
+  }
+  return null;
+}
+
 /** Renders a base-unit quantity in every other configured unit, e.g. "50 kg" -> "50000 g · 2 bag". */
 export function formatUnitBreakdown(product, baseQty) {
   const qty = Number(baseQty) || 0;
@@ -542,6 +610,8 @@ export function getProductRemainingStock(product, cart = [], allProducts = [], d
   return { remaining, rawRemaining, text, isLow, isOut, isOversold };
 }
 
+const SCAN_COOLDOWN_MS = 1000;
+
 export function playScanSound(type = 'add') {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -628,80 +698,13 @@ export function resolveProductPricing(product, customer, priceSheets = [], overr
   return { price: finalPrice, discountPercent, ruleSource };
 }
 
-const DEFAULT_BARCODE_SEGMENTS = [
-  { type: 'prefix', length: 2, value: '21' },
-  { type: 'sku', length: 5 },
-  { type: 'weight', length: 5, precision: 3 }
-];
-
-/** Mirrors the backend's decodeEmbeddedBarcode() so a weight-embedded scan resolves instantly, without waiting on the network. */
-function decodeEmbeddedBarcodeLocal(settings, code, products) {
-  const segments = settings?.hardware?.weighingScale?.barcodeSegments;
-  const list = Array.isArray(segments) && segments.length ? segments : DEFAULT_BARCODE_SEGMENTS;
-
-  let pos = 0;
-  let skuTail = null;
-  let weightDirect = null;
-  let mode = null;
-  let kg = 0;
-  let grams = 0;
-  let pieces = null;
-
-  for (const seg of list) {
-    const appliesWhen = seg.appliesWhen || 'ANY';
-    if (appliesWhen !== 'ANY' && appliesWhen !== mode) continue;
-
-    const len = Number(seg.length) || 0;
-    if (!len || pos + len > code.length) return null;
-    const chunk = code.slice(pos, pos + len);
-    pos += len;
-
-    if (seg.type === 'prefix') {
-      const expected = seg.value !== undefined && seg.value !== '' ? String(seg.value).padStart(len, '0') : null;
-      if (expected && chunk !== expected) return null;
-    } else if (seg.type === 'sku') {
-      skuTail = chunk;
-    } else if (seg.type === 'weight') {
-      const raw = Number(chunk);
-      if (!Number.isFinite(raw)) return null;
-      weightDirect = raw / Math.pow(10, Number(seg.precision) || 0);
-    } else if (seg.type === 'flag') {
-      const val = chunk.trim().toUpperCase();
-      if (val === String(seg.weightValue || 'W').toUpperCase()) mode = 'WEIGHT';
-      else if (val === String(seg.pieceValue || 'P').toUpperCase()) mode = 'PIECES';
-      else return null;
-    } else if (seg.type === 'custom') {
-      const raw = Number(chunk);
-      if (seg.role === 'kg') {
-        if (!Number.isFinite(raw)) return null;
-        kg = raw;
-      } else if (seg.role === 'grams') {
-        if (!Number.isFinite(raw)) return null;
-        grams = raw;
-      } else if (seg.role === 'pieces') {
-        if (!Number.isFinite(raw)) return null;
-        pieces = raw;
-      }
-    }
-  }
-
-  if (!skuTail) return null;
-
-  let quantity;
-  if (mode === 'WEIGHT') quantity = kg + grams / 1000;
-  else if (mode === 'PIECES') quantity = pieces !== null ? pieces : 1;
-  else if (weightDirect !== null) quantity = weightDirect;
-  else quantity = 1;
-
-  const product = products.find(
-    (p) => String(p.barcode).slice(-skuTail.length) === skuTail || (p.barcodes || []).some((b) => String(b).slice(-skuTail.length) === skuTail)
-  );
-  if (!product || !Number.isFinite(quantity)) return null;
-  return { product, quantity: Math.round(quantity * 1000) / 1000 };
-}
+import {
+  SCALE_UNIT_TO_KG,
+  decodeBarcodeFormatLocal
+} from '../lib/barcodeDecode';
 
 /** The billing terminal (SOW Module 3) — barcode scanner is a keyboard wedge, so keystrokes are captured globally rather than requiring the search box to hold focus. */
-export default function POSTerminal({ tenant, showToast, settings: appSettings, onSaleCompleted, isFullscreen }) {
+export default function POSTerminal({ tenant, showToast, settings: appSettings, onSaleCompleted, isFullscreen, scaleInPlan = true }) {
   // Trust App.jsx's fullscreen state rather than a second listener here that can desync from it.
   const isFs = Boolean(isFullscreen);
 
@@ -726,6 +729,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchDropdownOpen, setSearchDropdownOpen] = useState(false);
+  const [searchHighlight, setSearchHighlight] = useState(0);
   const [sortBy, setSortBy] = useState('default');
   const [recentBilledIds, setRecentBilledIds] = useState([]);
   const [cart, setCart] = useState([]);
@@ -744,11 +748,72 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
     }
   };
 
-  const [weightModal, setWeightModal] = useState(null);
-  const [weightUnit, setWeightUnit] = useState('kg');
-  const [weightInput, setWeightInput] = useState('1');
-  const [scaleReading, setScaleReading] = useState(false);
-  const [liveWeight, setLiveWeight] = useState(0);
+  // Device on/off switches (Settings → Hardware). A missing `enabled` means ON — older saved settings
+  // predate the field, and reading it as off is what made the scanner look "off by default".
+  const hw = settings?.hardware || {};
+  const scannerOn = hw.barcodeScanner?.enabled !== false;
+  const receiptPrinterOn = hw.posPrinter?.enabled !== false;
+  const drawerCfg = hw.cashDrawer;
+  const drawerOn = drawerCfg?.enabled !== false && ['serial', 'network', 'windows-share'].includes(drawerCfg?.connectionType);
+  const scaleCfg = hw.weighingScale;
+  const scaleOn = scaleInPlan && scaleCfg?.enabled !== false;
+  const isWedgeScale = scaleCfg?.connectionType === 'keyboard-wedge';
+  // Only a connected USB/serial or network scale can be read; with none set up the weight is typed
+  // (the old 'simulated' mode handed out random weights). A keyboard-wedge scale types into the box itself.
+  const canReadScale = scaleOn && (scaleCfg?.connectionType === 'serial' || scaleCfg?.connectionType === 'network');
+  // The live reading streams into the weight box and the settled weight fills itself in.
+  const autoReadScale = canReadScale;
+  // Always-on feed for the header display: shows the weight only while the scale is really connected.
+  const liveScale = useLiveScale(canReadScale, `${scaleCfg?.connectionType}|${scaleCfg?.comPort}|${scaleCfg?.baudRate}|${scaleCfg?.host}|${scaleCfg?.port}`);
+  const scaleFeed = describeFeed(liveScale);
+  const scaleConnected = scaleFeed.connected;
+  // Latest raw feed for addToCart, which can bill a settled weight straight off the pan without the popup.
+  const liveScaleRef = useRef(liveScale);
+  liveScaleRef.current = liveScale;
+  const lastScanAtRef = useRef(0); // when the last scan was accepted (scan cool-down)
+  const weighingRef = useRef(false); // a product is waiting for the pan to settle
+  // Remember when the pan has been emptied, so the next item of the same weight isn't mistaken for the last one.
+  useEffect(() => {
+    if (liveScale.state === 'live' && Number(liveScale.weight) <= 0) panClearedRef.current = true;
+  }, [liveScale]);
+  // The header shows only the last settled weight — it holds steady while the pan is still moving.
+  const [settledWeight, setSettledWeight] = useState(null); // { weight, unit }
+  useEffect(() => {
+    if (liveScale.state === 'live' && liveScale.stable) setSettledWeight({ weight: liveScale.weight, unit: liveScale.unit });
+  }, [liveScale]);
+  // Header value: the smoothed live weight (middle of the latest readings) so it follows the pan within
+  // about a second and can never sit on an old weight; falls back to the last settled one.
+  const headerWeight = liveScale.state === 'live' ? (liveScale.display ?? settledWeight?.weight ?? null) : null;
+  // "Connected" is shown for a moment when the scale comes online, then the weight; a dropped scale
+  // says "Disconnected" and forgets the old weight so a stale one is never shown as if it were live.
+  const [justConnected, setJustConnected] = useState(false);
+  const wasLiveRef = useRef(false);
+  useEffect(() => {
+    const isLive = liveScale.state === 'live';
+    let timer;
+    if (isLive && !wasLiveRef.current) {
+      setJustConnected(true);
+      timer = setTimeout(() => setJustConnected(false), 1500);
+    } else if (!isLive) {
+      setJustConnected(false);
+      setSettledWeight(null);
+    }
+    wasLiveRef.current = isLive;
+    return () => clearTimeout(timer);
+  }, [liveScale.state]);
+  // A keyboard scanner can't be seen until it scans; its first burst marks it connected on this PC.
+  const [scannerSeen, setScannerSeen] = useState(() => {
+    try {
+      return localStorage.getItem('pos_scanner_seen') === '1';
+    } catch {
+      return false;
+    }
+  });
+  // Once the cashier types or picks a preset, the live reading stops overwriting their entry.
+  // A scanned plain barcode of a weighed item is billed straight from the scale once it settles, with
+  // no Enter. `lastScaleAdd` guards the one trap in that: the previous item still sitting on the pan.
+  const lastScaleAddRef = useRef(null); // { kg } of the last auto-billed weight
+  const panClearedRef = useRef(true); // pan has read empty since that auto-bill
   const [batchPickerTarget, setBatchPickerTarget] = useState(null); // { product, qty, pricing }
   const [serialPickerTarget, setSerialPickerTarget] = useState(null); // { product, pricing }
   const [selectedSerialIds, setSelectedSerialIds] = useState([]);
@@ -1052,13 +1117,15 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   /* ------------------------- adding items ------------------------- */
 
   const commitAddToCart = useCallback(
-    (product, qty, pricing, batchId, serialId) => {
+    (product, qty, pricing, batchId, serialId, unitName) => {
       const batch = batchId ? (product.batches || []).find((b) => b.id === batchId) : null;
       const serial = serialId ? (product.serials || []).find((s) => s.id === serialId) : null;
       // A batch can override the product's normal price (e.g. clearance lot) — unit conversions build from that.
       const basePrice = batch && batch.sellPrice != null ? Number(batch.sellPrice) : pricing.price;
       const options = getProductUnitOptions({ ...product, price: basePrice });
-      const defaultOpt = options[0] || { unit: product.unit || 'pcs', factor: 1, price: basePrice };
+      // A scanned unit barcode (bag/box/minor unit) bills in that unit; anything else uses the product's default.
+      const wanted = unitName ? options.find((o) => String(o.unit).toLowerCase() === String(unitName).toLowerCase()) : null;
+      const defaultOpt = wanted || options[0] || { unit: product.unit || 'pcs', factor: 1, price: basePrice };
       const effectiveQty = serialId ? 1 : qty; // a serial is one physical unit, so it's always qty 1
 
       // Toast fires after setCart returns, not inside the updater, to avoid a cross-component setState during render.
@@ -1109,7 +1176,10 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
   );
 
   const addToCart = useCallback(
-    (product, qty = 1) => {
+    // opts.weightKnown: qty is a real weight (e.g. from a scale label) — bill it, even when it is exactly 1.
+    // opts.fromScan: a scanned plain barcode — the weight box bills the scale reading by itself.
+    // opts.unit: a scanned unit barcode (bag/box/minor unit) — bill in that unit.
+    (product, qty = 1, opts = {}) => {
       if (session?.status !== 'open') {
         setShowSession(true);
         showToast('Cash Counter is closed. Please open drawer to start billing.', 'error');
@@ -1118,16 +1188,68 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
       const cust = customers.find((c) => c.id === customerId);
       const pricing = resolveProductPricing(product, cust, priceSheets, priceSheetId);
-      const options = getProductUnitOptions({ ...product, price: pricing.price });
-      const isScaleWeighed = Boolean(product.requiresWeight);
+      // A scale-weighed item, or — while the scale is connected — any product sold by weight (kg/g/lb…),
+      // even if it isn't flagged "requires weight": selecting it reads the scale instead of adding 1 kg.
+      // A scanned bag/box/minor-unit barcode names its own unit, so that one is never weighed.
+      const soldByWeight = Boolean(SCALE_UNIT_TO_KG[String(product.unit || '').toLowerCase()]);
+      const isScaleWeighed = Boolean(product.requiresWeight) || (canReadScale && scaleConnected && soldByWeight && !opts.unit);
 
-      if (isScaleWeighed && qty === 1) {
-        setWeightModal({ ...product, price: pricing.price });
-        const hasGrams = options.some((o) => o.unit === 'g');
-        const defaultUnit = hasGrams ? 'g' : options[0]?.unit || product.unit || 'pcs';
-        setWeightUnit(defaultUnit);
-        setWeightInput(defaultUnit === 'g' ? '500' : '1');
-        return;
+      // Weighed items never open a popup: the scale's settled weight is billed straight away.
+      if (isScaleWeighed && !opts.weightKnown && qty === 1) {
+        const priced = { ...product, price: pricing.price };
+
+        // Bills the weight the scale has settled on: kg from 1 kg up, grams below. Returns
+        // 'billed', 'unsettled' (moving / no reading) or 'empty' (nothing on the pan).
+        const billSettled = () => {
+          const live = liveScaleRef.current;
+          if (!(canReadScale && live.state === 'live' && live.stable)) return 'unsettled';
+          const kg = readingToKg(live);
+          if (kg <= 0) return 'empty';
+          const fill = scaleFillFor(kg, priced, autoWeightUnit(kg, priced));
+          if (!fill) return 'empty';
+          lastScaleAddRef.current = { kg };
+          panClearedRef.current = false;
+          addWeighedLine(priced, Number(fill.value), fill.unit);
+          if (opts.fromScan) playScanSound('add');
+          return 'billed';
+        };
+
+        if (canReadScale && scaleConnected) {
+          const first = billSettled();
+          if (first === 'billed') return;
+
+          // Something is on the pan but still moving (just placed): wait for it to settle instead of
+          // guessing a quantity — never fall through to the default 1 kg.
+          const live = liveScaleRef.current;
+          const onPanKg = live.state === 'live' && live.display != null ? readingToKg({ weight: live.display, unit: live.unit }) : 0;
+          if (first === 'unsettled' && onPanKg > 0.03) {
+            if (weighingRef.current) return;
+            weighingRef.current = true;
+            showToast(`Weighing ${product.name}… hold the item steady.`);
+            let tries = 0;
+            const timer = setInterval(() => {
+              tries += 1;
+              if (billSettled() === 'billed') {
+                clearInterval(timer);
+                weighingRef.current = false;
+              } else if (tries >= 40) {
+                clearInterval(timer);
+                weighingRef.current = false;
+                showToast('The weight is not steady — hold the item still and select it again.', 'error');
+              }
+            }, 100);
+            return;
+          }
+
+          // Nothing on the pan: a must-weigh item needs the item on the scale; anything merely sold by
+          // kg/g is added normally.
+          if (product.requiresWeight) {
+            showToast(`Place ${product.name} on the scale, then select it.`, 'error');
+            return;
+          }
+        } else if (product.requiresWeight) {
+          showToast('Scale not connected — added 1; use + / − in the cart to change it.');
+        }
       }
 
       // Serial-tracked: cashier always confirms which unit, since the serial/IMEI is customer-facing (receipt, warranty).
@@ -1156,13 +1278,13 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
             return;
           }
         }
-        commitAddToCart(product, qty, pricing, only?.id || null);
+        commitAddToCart(product, qty, pricing, only?.id || null, undefined, opts.unit);
         return;
       }
 
-      commitAddToCart(product, qty, pricing, null);
+      commitAddToCart(product, qty, pricing, null, undefined, opts.unit);
     },
-    [customerId, customers, priceSheets, priceSheetId, showToast, session, commitAddToCart]
+    [customerId, customers, priceSheets, priceSheetId, showToast, session, commitAddToCart, autoReadScale, canReadScale, scaleConnected]
   );
 
   const confirmBatchPick = useCallback(
@@ -1206,17 +1328,14 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         return;
       }
 
-      const decodedLocal = decodeEmbeddedBarcodeLocal(settings, trimmed, products);
-      if (decodedLocal) {
-        addToCart(decodedLocal.product, decodedLocal.quantity);
-        playScanSound('add');
-        const qtyLabel = decodedLocal.product.requiresWeight
-          ? `${decodedLocal.quantity.toFixed(3)} kg`
-          : `${decodedLocal.quantity} pcs`;
-        showToast(`${decodedLocal.product.name} — ${qtyLabel} added from label.`);
-        return;
-      }
+      // Cool-down: a scan within a second of the last accepted one is ignored, so a double read or a
+      // scanner held on the label can't bill the same item twice.
+      const now = Date.now();
+      if (now - lastScanAtRef.current < SCAN_COOLDOWN_MS) return;
+      lastScanAtRef.current = now;
 
+      // An exact match always wins first — a plain, already-known barcode/SKU should never be
+      // misread as a weight-embedded code just because it happens to be the right length.
       const local = products.find(
         (p) =>
           p.barcode === trimmed ||
@@ -1224,15 +1343,44 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
           (p.barcodes || []).includes(trimmed)
       );
       if (local) {
-        addToCart(local, 1);
+        addToCart(local, 1, { fromScan: true });
         playScanSound('add');
         showToast(`Scanned ${local.name}`);
         return;
       }
 
+      // A unit barcode (bag/box/case or the minor unit) — same product, billed in that unit.
+      const byUnit = findByUnitBarcode(products, trimmed);
+      if (byUnit) {
+        addToCart(byUnit.product, 1, { fromScan: true, unit: byUnit.unit });
+        playScanSound('add');
+        showToast(`Scanned ${byUnit.product.name} (${byUnit.unit})`);
+        return;
+      }
+
+      const decodedLocal = decodeBarcodeFormatLocal(settings, trimmed, products);
+      if (decodedLocal) {
+        addToCart(decodedLocal.product, decodedLocal.quantity, { weightKnown: true });
+        playScanSound('add');
+        const qtyLabel = decodedLocal.product.requiresWeight
+          ? `${decodedLocal.quantity.toFixed(3)} ${decodedLocal.product.unit || 'kg'}`
+          : `${decodedLocal.quantity} pcs`;
+        showToast(`${decodedLocal.product.name} — ${qtyLabel} added from label.`);
+        return;
+      }
+
+      // The fetch and the cart-add are deliberately NOT in the same try/catch: a bug while adding an
+      // already-identified product must never be mistaken for "code not recognized" and silently
+      // redirected into a doomed plain-barcode lookup — that swallowed the real error and always
+      // surfaced a misleading "No product matches" toast instead of the actual failure.
+      let decoded = null;
       try {
-        const decoded = await api.get(`/hardware/decode-barcode/${encodeURIComponent(trimmed)}`);
-        addToCart(decoded.product, decoded.quantity || 1);
+        decoded = await api.get(`/hardware/decode-barcode/${encodeURIComponent(trimmed)}`);
+      } catch {
+        decoded = null;
+      }
+      if (decoded) {
+        addToCart(decoded.product, decoded.quantity || 1, decoded.embedded ? { weightKnown: true } : { fromScan: true });
         playScanSound('add');
         showToast(
           decoded.embedded
@@ -1240,13 +1388,11 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
             : `Scanned ${decoded.product.name}`
         );
         return;
-      } catch {
-        /* fall through to product lookup */
       }
 
       try {
         const found = await api.get(`/products/lookup/${encodeURIComponent(trimmed)}`);
-        addToCart(found, 1);
+        addToCart(found, 1, { fromScan: true });
         playScanSound('add');
         showToast(`Scanned ${found.name}`);
       } catch {
@@ -1257,16 +1403,26 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
     [products, addToCart, showToast, settings, session]
   );
 
+  const openDrawerManually = async () => {
+    try {
+      const res = await api.post('/hardware/cash-drawer/open');
+      showToast(res.message || 'Drawer opened.');
+    } catch (err) {
+      showToast(api.message(err, 'Could not open the cash drawer.'), 'error');
+    }
+  };
+
   // Global keyboard-wedge capture: a scanner types fast and ends with Enter.
   useEffect(() => {
     const onKeyDown = (e) => {
-      if (showCheckout || weightModal || showSession) return;
+      if (showCheckout || showSession) return;
 
       const tag = document.activeElement?.tagName;
       const typingInField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
 
       if (e.key === 'Enter') {
-        if (scanBuffer.current.length >= 6) {
+        // 4, not more: Settings → Barcode Generation can issue codes as short as 4 digits.
+        if (scanBuffer.current.length >= 4) {
           resolveScan(scanBuffer.current);
           scanBuffer.current = '';
           e.preventDefault();
@@ -1282,7 +1438,10 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
       if (typingInField) return;
 
-      if (/^[0-9]$/.test(e.key)) {
+      // Alphanumeric, not just digits — a weight-embedded barcode (e.g. "10001W0002375") carries a
+      // letter flag in the middle, which a digits-only buffer would silently drop, corrupting every
+      // weight-embedded scan. No other single-character global shortcut is bound here, so this is safe.
+      if (/^[0-9a-zA-Z]$/.test(e.key)) {
         scanBuffer.current += e.key;
         clearTimeout(scanTimer.current);
         scanTimer.current = setTimeout(() => {
@@ -1293,48 +1452,138 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [resolveScan, showCheckout, weightModal, showSession]);
+  }, [resolveScan, showCheckout, showSession]);
 
-  const readScale = async () => {
-    setScaleReading(true);
-    try {
-      const res = await api.get('/hardware/weight');
-      const grams = Number(res.weight) || 0;
-      setLiveWeight(grams);
-
-      if (weightUnit === 'g' || weightUnit === 'gm' || weightUnit === 'grams') {
-        setWeightInput(String(grams));
-      } else {
-        setWeightInput((grams / 1000).toFixed(3));
+  // Spot the scanner by its scans anywhere on this screen: 6+ keys faster than a person types (under
+  // ~35ms apart), then Enter. Listens in the capture phase, so it never changes what a key does. A
+  // scanner that is used while switched off is plainly connected, so it is switched back on — older
+  // Settings saved "off" for shops that never chose it.
+  useEffect(() => {
+    if (scannerSeen && scannerOn) return undefined;
+    let times = [];
+    const onKey = (e) => {
+      const now = performance.now();
+      if (e.key === 'Enter') {
+        const gaps = times.slice(1).map((t, i) => t - times[i]);
+        if (times.length >= 6 && gaps.every((g) => g < 35) && now - times[times.length - 1] < 80) {
+          setScannerSeen(true);
+          try {
+            localStorage.setItem('pos_scanner_seen', '1');
+          } catch {
+            /* the badge just won't persist */
+          }
+          if (!scannerOn) {
+            api
+              .put('/hardware/barcodeScanner', { enabled: true })
+              .then((res) => {
+                setSettings((prev) => ({ ...prev, hardware: { ...(prev?.hardware || {}), barcodeScanner: res.data } }));
+                showToast('Barcode scanner detected — switched on.');
+              })
+              .catch(() => {});
+          }
+        }
+        times = [];
+        return;
       }
+      if (e.key.length !== 1) return;
+      if (times.length && now - times[times.length - 1] > 100) times = [];
+      times.push(now);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scannerSeen, scannerOn]);
 
-      showToast(`Scale reading: ${grams} g (${(grams / 1000).toFixed(3)} kg)${res.simulated ? ' (simulated)' : ''}`);
-    } catch (err) {
-      showToast(api.message(err, 'Scale did not respond.'), 'error');
-    } finally {
-      setScaleReading(false);
+  // Plug-and-play scale: while the scale is switched on but not set up, look for one on this PC's COM
+  // ports when Billing opens and whenever the window regains focus (e.g. after plugging it in).
+  // Also when the saved USB/serial scale can't be reached (e.g. it was moved to another COM port or
+  // swapped for a cable): look for it again and re-point the setting instead of staying "Disconnected".
+  const scaleUnreachable = scaleCfg?.connectionType === 'serial' && (liveScale.state === 'error' || liveScale.state === 'waiting');
+  const scaleNeedsDetect =
+    scaleOn && !isWedgeScale && ((scaleCfg?.connectionType !== 'serial' && scaleCfg?.connectionType !== 'network') || scaleUnreachable);
+  useEffect(() => {
+    if (!scaleNeedsDetect) return undefined;
+    let cancelled = false;
+    let lastRun = 0;
+    const detect = async () => {
+      if (Date.now() - lastRun < 4000) return;
+      lastRun = Date.now();
+      try {
+        const res = await api.post('/hardware/weight/detect', {});
+        if (cancelled || !res?.data?.applied) return;
+        setSettings((prev) => ({ ...prev, hardware: { ...(prev?.hardware || {}), weighingScale: res.data.scale } }));
+        showToast(res.message || 'Weighing scale detected and switched on.');
+      } catch {
+        /* no scale found / not reachable — weights are typed until one is plugged in */
+      }
+    };
+    detect();
+    window.addEventListener('focus', detect);
+    // Plugging the scale in shouldn't need a click or a refocus — check again every few seconds (the server caches per set of ports, so this is cheap).
+    const poll = setInterval(detect, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(poll);
+      window.removeEventListener('focus', detect);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scaleNeedsDetect]);
+
+  /**
+   * Converts a scale reading (in kg) to the weight box's unit. A count unit (pcs/box) selected in the
+   * box is swapped for the product's weight unit. Returns null when the product has no weight unit.
+   */
+  const scaleFillFor = (kg, product, unit) => {
+    let target = unit;
+    if (!SCALE_UNIT_TO_KG[String(target).toLowerCase()]) {
+      const massOpt = getProductUnitOptions(product).find((o) => SCALE_UNIT_TO_KG[o.unit.toLowerCase()]);
+      if (!massOpt) return null;
+      target = massOpt.unit;
     }
+    return { unit: target, value: String(Math.round((kg / SCALE_UNIT_TO_KG[target.toLowerCase()]) * 1000) / 1000) };
   };
 
-  const confirmWeight = () => {
-    const value = parseFloat(weightInput) || 0;
-    if (value <= 0) {
-      showToast('Enter a quantity / weight greater than zero.', 'error');
-      return;
-    }
-    const product = weightModal;
+  /** Unit a scale weight is billed in: kg from 1 kg up, grams below it (when the product has that unit). */
+  const autoWeightUnit = (kg, product) => {
+    const opts = getProductUnitOptions(product);
+    const find = (u) => opts.find((o) => o.unit.toLowerCase() === u)?.unit;
+    const anyMass = opts.find((o) => SCALE_UNIT_TO_KG[o.unit.toLowerCase()])?.unit;
+    return kg >= 1 ? find('kg') || anyMass || opts[0]?.unit : find('g') || find('kg') || anyMass || opts[0]?.unit;
+  };
+
+  const readingToKg = (reading) => {
+    const toKg = SCALE_UNIT_TO_KG[String(reading.unit || 'kg').toLowerCase()] || 1;
+    return Math.round((Number(reading.weight) || 0) * toKg * 1000) / 1000;
+  };
+
+  /** Adds `value` of `unit` of a weighed product to the bill. */
+  function addWeighedLine(product, value, unit) {
     const options = getProductUnitOptions(product);
-    const selectedOpt = options.find((o) => o.unit.toLowerCase() === weightUnit.toLowerCase()) || options[0];
+    const selectedOpt = options.find((o) => o.unit.toLowerCase() === String(unit).toLowerCase()) || options[0];
     const unitPrice = selectedOpt.price;
     const unitFactor = selectedOpt.factor || 1;
     const lineTotal = roundToDecimals(value * unitPrice);
 
+    const optFor = (u) => options.find((o) => o.unit.toLowerCase() === String(u).toLowerCase());
+    const selectedKgFactor = SCALE_UNIT_TO_KG[selectedOpt.unit.toLowerCase()];
     setCart((prev) => {
-      const idx = prev.findIndex((i) => i.id === product.id && i.unit === selectedOpt.unit);
+      // A weighed product keeps ONE line whatever unit it is in: weighings add up, and the line reads in
+      // kg from 1 kg up and in grams below (600 g + 700 g becomes 1.3 kg, not 1300 g).
+      const idx = prev.findIndex((i) =>
+        i.id === product.id && (selectedKgFactor ? Boolean(SCALE_UNIT_TO_KG[String(i.unit).toLowerCase()]) : i.unit === selectedOpt.unit)
+      );
       if (idx >= 0) {
         const next = [...prev];
-        const qty = Math.round((next[idx].qty + value) * 1000) / 1000;
-        next[idx] = { ...next[idx], qty, total: roundToDecimals(qty * next[idx].price) };
+        const item = next[idx];
+        if (selectedKgFactor) {
+          const totalKg = Math.round((item.qty * SCALE_UNIT_TO_KG[String(item.unit).toLowerCase()] + value * selectedKgFactor) * 1000) / 1000;
+          const target = optFor(autoWeightUnit(totalKg, product)) || selectedOpt;
+          const qty = Math.round((totalKg / SCALE_UNIT_TO_KG[target.unit.toLowerCase()]) * 1000) / 1000;
+          next[idx] = { ...item, qty, saleUnit: target.unit, unit: target.unit, unitFactor: target.factor || 1, price: target.price, total: roundToDecimals(qty * target.price) };
+          return next;
+        }
+        const qty = Math.round((item.qty + value) * 1000) / 1000;
+        next[idx] = { ...item, qty, total: roundToDecimals(qty * item.price) };
         return next;
       }
       return [
@@ -1351,11 +1600,10 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
       ];
     });
 
-    setWeightModal(null);
     showToast(`${value} ${selectedOpt.unit} of ${product.name} added (${bMoney(lineTotal)}).`);
-  };
+  }
 
-  const switchCartItemUnit = (cartItemId, fromUnit, batchId, targetUnit) => {
+  const switchCartItemUnit =(cartItemId, fromUnit, batchId, targetUnit) => {
     setCart((prev) =>
       prev.map((item) => {
         if (!(item.id === cartItemId && item.unit === fromUnit && (item.batchId || null) === (batchId || null))) return item;
@@ -1714,7 +1962,19 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
       load();
       onSaleCompleted?.();
 
-      if (settings?.billing?.printAfterCheckout) setTimeout(() => window.print(), 400);
+      // Receipt printer switched off in Settings → Hardware: no automatic print (Print stays on the receipt).
+      if (settings?.billing?.printAfterCheckout && receiptPrinterOn) setTimeout(() => window.print(), 400);
+
+      const cashDrawerCfg = settings?.hardware?.cashDrawer;
+      const involvedCash =
+        actualPaymentMode === 'Cash' ||
+        (isPartial && partialPaymentMethod === 'Cash') ||
+        (isMultiPay && splitEntries.some((e) => e.method === 'Cash' && Number(e.amount) > 0));
+      if (drawerOn && (!cashDrawerCfg.openOnCashOnly || involvedCash)) {
+        api.post('/hardware/cash-drawer/open').catch(() => {
+          showToast('Sale saved, but the cash drawer did not open — check Settings → Hardware.', 'error');
+        });
+      }
     } catch (err) {
       showToast(api.message(err, 'Checkout failed.'), 'error');
     } finally {
@@ -1764,13 +2024,17 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
     }
 
     if (needle) {
+      // Only fields a cashier actually reads/types: name, SKU, and this product's own current
+      // barcode. Deliberately NOT the internal `p.id` (an opaque system timestamp-based key) or the
+      // legacy `p.barcodes` alternates array — both are long digit strings that can contain a short
+      // typed number anywhere inside them by pure coincidence, surfacing a totally unrelated product.
       list = list.filter(
         (p) =>
           p.name.toLowerCase().includes(needle) ||
           (p.regionalName || p.printName || '').toLowerCase().includes(needle) ||
           (p.sku && p.sku.toLowerCase().includes(needle)) ||
-          p.id.toLowerCase().includes(needle) ||
-          (p.barcodes || [p.barcode]).some((b) => String(b).includes(needle))
+          (p.barcode && String(p.barcode).includes(needle)) ||
+          getUnitBarcodes(p).some((u) => u.code.includes(needle))
       );
     }
 
@@ -1795,6 +2059,11 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
     return list;
   }, [products, selectedCategory, deferredSearchQuery, recentBilledProducts, sortBy]);
+
+  // Keyboard highlight in the search dropdown always starts back at the top result whenever what's typed changes.
+  useEffect(() => {
+    setSearchHighlight(0);
+  }, [searchQuery]);
 
   const currentCustomer = useMemo(() => customers.find((c) => c.id === customerId) || null, [customers, customerId]);
 
@@ -1866,7 +2135,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
               className="h-8 w-8 rounded-xl object-contain shadow-xs shrink-0"
             />
           )}
-          <div className="relative min-w-[220px] flex-1" ref={searchBoxRef}>
+          <div className="relative min-w-[300px] flex-1" ref={searchBoxRef}>
             <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[color:var(--text-muted)]" />
             <input
               ref={searchRef}
@@ -1876,9 +2145,40 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && filtered.length >= 1) {
-                  addToCart(filtered[0], 1);
-                  playScanSound('add');
+                const visibleCount = Math.min(filtered.length, 8);
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  if (!visibleCount) return;
+                  setSearchDropdownOpen(true);
+                  setSearchHighlight((i) => (i + 1) % visibleCount);
+                  return;
+                }
+                if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  if (!visibleCount) return;
+                  setSearchDropdownOpen(true);
+                  setSearchHighlight((i) => (i - 1 + visibleCount) % visibleCount);
+                  return;
+                }
+                if (e.key === 'Enter') {
+                  const typed = e.currentTarget.value.trim();
+                  if (!typed) return;
+                  e.preventDefault();
+                  // A scanner types the whole code and presses Enter within a few ms, while `filtered`
+                  // follows a deferred copy of the query — so an exact barcode/SKU or weight label is
+                  // resolved from the live text, and the highlighted (default: first) result is only
+                  // used once `filtered` has caught up.
+                  const lower = typed.toLowerCase();
+                  const isCode =
+                    products.some(
+                      (p) => p.barcode === typed || (p.sku && p.sku.toLowerCase() === lower) || (p.barcodes || []).includes(typed)
+                    ) || Boolean(findByUnitBarcode(products, typed)) || Boolean(decodeBarcodeFormatLocal(settings, typed, products));
+                  if (!isCode && deferredSearchQuery.trim() === typed && filtered.length >= 1) {
+                    addToCart(filtered[searchHighlight] || filtered[0], 1);
+                    playScanSound('add');
+                  } else {
+                    resolveScan(typed);
+                  }
                   setSearchQuery('');
                   setSearchDropdownOpen(false);
                 } else if (e.key === 'Escape') {
@@ -1897,7 +2197,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
             {/* Search with Dropdown selection */}
             {(searchQuery.trim().length > 0 || searchDropdownOpen) && (
-              <div className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-2xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] p-2 shadow-2xl backdrop-blur-md max-h-72 overflow-y-auto">
+              <div className="absolute left-0 top-full mt-1.5 z-50 w-[28rem] max-w-[92vw] rounded-2xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] p-2 shadow-2xl backdrop-blur-md max-h-96 overflow-y-auto">
                 <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[color:var(--text-muted)] flex justify-between items-center">
                   <span>Matching Items ({filtered.length})</span>
                   <span className="text-[9px] lowercase">press Enter or click</span>
@@ -1905,7 +2205,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                 {filtered.length === 0 ? (
                   <div className="p-3 text-center text-xs text-[color:var(--text-muted)]">No matching products found</div>
                 ) : (
-                  filtered.slice(0, 8).map((p) => {
+                  filtered.slice(0, 8).map((p, idx) => {
                     const stockInfo = getProductRemainingStock(p, cart, products);
                     const cust = customers.find((c) => c.id === customerId);
                     const pricing = resolveProductPricing(p, cust, priceSheets, priceSheetId);
@@ -1913,20 +2213,24 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                     const autoVisual = getProductAutoVisual(p.name);
                     const prodCat = categories.find((c) => (p.categoryIds || [p.categoryId]).includes(c.id)) || { name: p.categoryId || 'General' };
                     const catTheme = getCategoryTheme(prodCat);
+                    const isHighlighted = idx === searchHighlight;
                     return (
                       <div
                         key={p.id}
+                        onMouseEnter={() => setSearchHighlight(idx)}
                         onClick={() => {
                           addToCart(p, 1);
                           playScanSound('add');
                           setSearchQuery('');
                           setSearchDropdownOpen(false);
                         }}
-                        className="flex items-center justify-between p-2 rounded-xl hover:bg-[color:var(--bg-subtle)] cursor-pointer text-xs transition-colors group"
+                        className={`flex items-center justify-between p-2.5 rounded-xl cursor-pointer text-xs transition-colors group ${
+                          isHighlighted ? 'bg-indigo-50 dark:bg-indigo-950/40 ring-1 ring-inset ring-indigo-300 dark:ring-indigo-700' : 'hover:bg-[color:var(--bg-subtle)]'
+                        }`}
                       >
                         <div className="flex items-center gap-2.5 min-w-0 pr-2">
                           {showBillingImages && (
-                            <div className="h-8 w-8 rounded-lg overflow-hidden border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] shrink-0 flex items-center justify-center">
+                            <div className="h-9 w-9 rounded-lg overflow-hidden border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] shrink-0 flex items-center justify-center">
                               {imgUrl ? (
                                 <img
                                   src={imgUrl}
@@ -1949,8 +2253,8 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                             </div>
                           )}
                           <div className="min-w-0">
-                            <div className="flex items-center gap-1.5 min-w-0">
-                              <div className="font-bold text-[color:var(--text-primary)] group-hover:text-indigo-600 dark:group-hover:text-indigo-400 truncate">
+                            <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                              <div className="font-bold text-[color:var(--text-primary)] group-hover:text-indigo-600 dark:group-hover:text-indigo-400">
                                 {p.name}
                               </div>
                               <span className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[8.5px] font-extrabold ${catTheme.badge} shrink-0`}>
@@ -1958,7 +2262,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                                 {prodCat.name}
                               </span>
                             </div>
-                            <div className="text-[10px] text-[color:var(--text-muted)] flex items-center gap-2 mt-0.5">
+                            <div className="text-[10px] text-[color:var(--text-muted)] flex items-center gap-x-2 gap-y-1 flex-wrap mt-1">
                               {p.sku && <span className="font-mono font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/50 border border-indigo-200 dark:border-indigo-800/60 px-1.5 py-0.2 rounded">SKU: {p.sku}</span>}
                               {p.barcode && <span className="font-mono bg-[color:var(--bg-subtle)] px-1.5 py-0.2 rounded">{p.barcode}</span>}
                               <span>{p.unit || 'pcs'}</span>
@@ -1973,7 +2277,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                             </div>
                           </div>
                         </div>
-                        <div className="text-right shrink-0">
+                        <div className="text-right shrink-0 pl-2">
                           <Money value={pricing.price} fractionDigits={decimalPlaces} className="font-bold text-[13px]" />
                           <span className="block text-[10px] font-bold text-indigo-600 dark:text-indigo-400">
                             + Add
@@ -2001,10 +2305,33 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
             <option value="stock">📦 Stock Level</option>
           </select>
 
-          <Badge tone={settings?.hardware?.barcodeScanner?.enabled !== false ? 'success' : 'neutral'}>
-            <Barcode className="h-3 w-3" />
-            {settings?.hardware?.barcodeScanner?.enabled !== false ? 'Scanner Armed' : 'Scanner Off'}
-          </Badge>
+          <span
+            title={
+              !scannerOn
+                ? 'Barcode scanner is switched off in Settings → Hardware.'
+                : scannerSeen
+                  ? 'Barcode scanner is connected and working.'
+                  : 'No scan seen yet on this PC — scan any barcode and this changes to Connected.'
+            }
+          >
+            <Badge tone={!scannerOn ? 'neutral' : scannerSeen ? 'success' : 'warning'}>
+              <Barcode className="h-3 w-3" />
+              {!scannerOn ? 'Scanner Off' : scannerSeen ? 'Scanner Connected' : 'Scanner Not Connected'}
+            </Badge>
+          </span>
+
+          {drawerOn && (
+            <button
+              type="button"
+              onClick={openDrawerManually}
+              className="flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-2 text-[11.5px] font-bold transition-colors"
+              style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
+              title="Open the cash drawer without a sale"
+            >
+              <Unlock className="h-3.5 w-3.5" />
+              Open Drawer
+            </button>
+          )}
 
           {customerDisplayEnabled && (
             <button
@@ -2020,19 +2347,22 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
           )}
 
           {/* Live weight display */}
-          {settings?.hardware?.weighingScale?.enabled !== false && (
-            <button
-              type="button"
-              onClick={readScale}
-              title="Read the weighing scale"
-              className="flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-2 text-[11.5px] font-bold transition-colors"
+          {canReadScale && (
+            <div
+              title={scaleFeed.connected ? 'Weight from the scale' : `Scale not connected${scaleFeed.sub ? ` — ${scaleFeed.sub}` : ''}`}
+              className="flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-2 text-[11.5px] font-bold"
               style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}
             >
-              <Scale className={`h-3.5 w-3.5 ${scaleReading ? 'animate-pulse text-amber-500' : 'text-[color:var(--accent)]'}`} />
-              <span className="tabular text-[color:var(--text-primary)]">
-                {scaleReading ? '— — —' : `${Number(liveWeight || 0).toFixed(3)} kg`}
+              <span className={`h-2 w-2 shrink-0 rounded-full ${scaleFeed.connected ? 'bg-emerald-500' : 'bg-slate-400'}`} />
+              <Scale className="h-3.5 w-3.5 text-[color:var(--accent)]" />
+              <span className={`tabular ${scaleFeed.connected ? (justConnected ? 'text-emerald-600' : 'text-[color:var(--text-primary)]') : 'text-rose-600'}`}>
+                {!scaleFeed.connected
+                  ? liveScale.state === 'connecting' ? 'Connecting…' : 'Disconnected'
+                  : justConnected
+                    ? 'Connected'
+                    : headerWeight != null ? `${Number(headerWeight).toFixed(3)} ${liveScale.unit || settledWeight?.unit || 'kg'}` : '— kg'}
               </span>
-            </button>
+            </div>
           )}
 
           {settings?.pos?.enableTables && (
@@ -2040,10 +2370,6 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
               {tableId ? tables.find((t) => t.id === tableId)?.name : 'Table'}
             </Button>
           )}
-
-          <Button icon={Receipt} onClick={() => setShowRecent(true)}>
-            Reprint
-          </Button>
 
           <Button
             icon={sessionOpen ? Unlock : Lock}
@@ -2735,128 +3061,6 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
       {/* ----------------------------- Modals ----------------------------- */}
 
-      <Modal
-        open={Boolean(weightModal)}
-        onClose={() => setWeightModal(null)}
-        title={weightModal ? `Quantity & Weight — ${weightModal.name}` : ''}
-        subtitle={weightModal ? `Base Price: ${bMoney(weightModal.price)} per ${weightModal.unit}` : ''}
-        icon={Scale}
-        size="sm"
-        footer={
-          <>
-            <Button onClick={() => setWeightModal(null)}>Cancel</Button>
-            <Button variant="primary" onClick={confirmWeight}>
-              Add to Bill
-            </Button>
-          </>
-        }
-      >
-        {weightModal && (() => {
-          const options = getProductUnitOptions(weightModal);
-          const currentOpt = options.find((o) => o.unit.toLowerCase() === weightUnit.toLowerCase()) || options[0];
-          const val = parseFloat(weightInput) || 0;
-          const lineAmount = Math.round(val * currentOpt.price * 100) / 100;
-          const stockInfo = getProductRemainingStock(weightModal, cart, products);
-
-          // Calculate remaining after this proposed sale
-          const baseQtyToAdd = val * (currentOpt.factor || 1);
-          const remainingAfter = Math.max(0, Math.round((stockInfo.remaining - baseQtyToAdd) * 1000) / 1000);
-
-          const subOpt = options.find(o => o.isSub);
-          let remainingAfterText = `${remainingAfter} ${weightModal.unit}`;
-          if (subOpt && subOpt.subFactor && remainingAfter > 0) {
-            remainingAfterText = `${remainingAfter} ${weightModal.unit} (${Math.round(remainingAfter * subOpt.subFactor * 100) / 100} ${subOpt.unit})`;
-          }
-
-          const handleUnitSwitch = (newUnit) => {
-            const newOpt = options.find((o) => o.unit.toLowerCase() === newUnit.toLowerCase()) || options[0];
-            const currentBase = (parseFloat(weightInput) || 0) * (currentOpt.factor || 1);
-            const convertedVal = newOpt.factor > 0 ? Math.round((currentBase / newOpt.factor) * 1000) / 1000 : weightInput;
-            setWeightUnit(newOpt.unit);
-            setWeightInput(String(convertedVal || (newOpt.unit === 'g' ? '500' : '1')));
-          };
-
-          return (
-            <div className="space-y-3">
-              {/* Unit selection tabs */}
-              {options.length > 1 && (
-                <div className="flex items-center gap-1.5 p-1 rounded-xl bg-[color:var(--bg-subtle)] border border-[color:var(--border-subtle)]">
-                  {options.map((opt) => (
-                    <button
-                      key={opt.unit}
-                      type="button"
-                      onClick={() => handleUnitSwitch(opt.unit)}
-                      className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                        weightUnit.toLowerCase() === opt.unit.toLowerCase()
-                          ? 'bg-indigo-600 text-white shadow-sm'
-                          : 'text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]'
-                      }`}
-                    >
-                      {opt.unit === 'g' ? 'Grams (g)' : opt.unit === 'kg' ? 'Kilograms (kg)' : opt.unit}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              <Button icon={Scale} onClick={readScale} loading={scaleReading} className="w-full" variant="outline">
-                Read from weighing scale
-              </Button>
-
-              <Field label={`Enter Quantity (${weightUnit})`}>
-                <Input
-                  type="number"
-                  step="any"
-                  value={weightInput}
-                  onChange={(e) => setWeightInput(e.target.value)}
-                  className="tabular text-center text-[24px] font-bold"
-                  autoFocus
-                />
-              </Field>
-
-              {/* Quick presets */}
-              <div className="flex flex-wrap gap-1.5">
-                {(weightUnit === 'g' || weightUnit === 'gm' || weightUnit === 'grams'
-                  ? [100, 250, 500, 750, 1000, 2000]
-                  : weightUnit === 'kg'
-                  ? [0.25, 0.5, 1, 2, 5]
-                  : [1, 2, 5, 10, 12, 24]
-                ).map((preset) => (
-                  <button
-                    key={preset}
-                    type="button"
-                    onClick={() => setWeightInput(String(preset))}
-                    className="px-2.5 py-1 rounded-lg border border-[color:var(--border-subtle)] bg-[color:var(--surface)] text-[11px] font-bold text-[color:var(--text-secondary)] hover:border-indigo-500 hover:text-indigo-600 transition-all"
-                  >
-                    {preset} {weightUnit}
-                  </button>
-                ))}
-              </div>
-
-              {/* Calculation & Remaining Stock summary */}
-              <div className="space-y-2 rounded-xl p-3 bg-[color:var(--bg-subtle)] border border-[color:var(--border-subtle)] text-xs">
-                <div className="flex items-center justify-between">
-                  <span className="text-[color:var(--text-secondary)] font-medium">Unit Rate:</span>
-                  <span className="font-bold text-[color:var(--text-primary)]">
-                    {bMoney(currentOpt.price)} / {weightUnit}
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <span className="text-[color:var(--text-secondary)] font-medium">Line Amount:</span>
-                  <Money value={lineAmount} fractionDigits={decimalPlaces} className="text-[17px] font-bold text-emerald-600 dark:text-emerald-400" />
-                </div>
-
-                <div className="pt-2 border-t border-[color:var(--border-subtle)] flex items-center justify-between text-[11px]">
-                  <span className="text-[color:var(--text-muted)] font-medium">Stock after this sale:</span>
-                  <span className="font-bold text-indigo-600 dark:text-indigo-400">
-                    {remainingAfterText}
-                  </span>
-                </div>
-              </div>
-            </div>
-          );
-        })()}
-      </Modal>
 
       {batchPickerTarget && (
         <Modal
@@ -3373,6 +3577,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         receipt={receipt}
         settings={settings}
         tenant={tenant}
+        products={products}
         onClose={() => setReceipt(null)}
         showToast={showToast}
         onUpdated={(updated) => setReceipt(updated)}
@@ -3464,7 +3669,7 @@ function Row({ label, value, tone, decimalPlaces = 2 }) {
 
 /* ------------------------------- Receipt ------------------------------- */
 
-function ReceiptModal({ receipt, settings, tenant, onClose, showToast, onUpdated }) {
+function ReceiptModal({ receipt, settings, tenant, products = [], onClose, showToast, onUpdated }) {
   // Every hook must run unconditionally on every render (the null-receipt early return sits after them all) — otherwise React's hook-count mismatch made a newly-selected template silently "stick" on the old one.
   const company = receipt?.company || settings?.company || { name: tenant?.name || 'Selsolve Store' };
   const billing = receipt?.billing || settings?.billing || {};

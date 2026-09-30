@@ -1,10 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import QRCode from 'qrcode';
-import {
-  Building2, User, Phone, Mail, MapPin, FileText, CheckCircle2,
-  AlertCircle, Truck, Package, QrCode, CreditCard, ShieldCheck
-} from 'lucide-react';
-import { money, fmtDate, fmtDateTime, resolveAssetUrl } from '../lib/api';
+import { CreditCard } from 'lucide-react';
+import { fmtDate, resolveAssetUrl } from '../lib/api';
 import { renderCustomDocumentHtml } from '../lib/exporters';
 
 export const DEFAULT_INVOICE_SECTIONS = [
