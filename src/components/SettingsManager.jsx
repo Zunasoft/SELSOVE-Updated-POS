@@ -38,6 +38,7 @@ import {
 
 import api, { API_BASE } from '../lib/api';
 import useLiveScale, { describeFeed } from '../lib/useLiveScale';
+import { useDragReorder, DragHandle, moveItem } from '../lib/dragReorder';
 import {
   Panel, SectionHeader, Button, Modal, Field, Input, Select, Textarea,
   Badge, Money, Spinner, EmptyState, StatTile, DataTable, cx
@@ -3366,6 +3367,9 @@ function BarcodeFormatTab({ barcodeFormat, saveSection, showToast }) {
     });
   };
 
+  // Same reorder as the arrows, by dragging a field's grip to where it should sit in the printed barcode.
+  const drag = useDragReorder((from, to) => setFields((prev) => moveItem(prev, from, to)));
+
   const save = async () => {
     setSaving(true);
     try {
@@ -3404,12 +3408,12 @@ function BarcodeFormatTab({ barcodeFormat, saveSection, showToast }) {
               <th className="px-3 py-2">Field</th>
               <th className="px-3 py-2 w-24">Length</th>
               <th className="px-3 py-2">Additional Info</th>
-              <th className="px-3 py-2 w-16 text-right">Order</th>
+              <th className="px-3 py-2 w-24 text-right">Order</th>
             </tr>
           </thead>
           <tbody>
             {fields.map((f, idx) => (
-              <tr key={f.type} className="border-t border-[color:var(--border-subtle)]">
+              <tr key={f.type} {...drag.rowProps(idx)} className={`border-t border-[color:var(--border-subtle)] ${drag.rowClass(idx, { table: true })}`}>
                 <td className="px-3 py-2 font-semibold">
                   <div className="flex items-center gap-2">
                     {f.type === 'sku' && (
@@ -3500,6 +3504,7 @@ function BarcodeFormatTab({ barcodeFormat, saveSection, showToast }) {
                 </td>
                 <td className="px-3 py-2">
                   <div className="flex items-center justify-end gap-1">
+                    <DragHandle {...drag.handleProps(idx)} />
                     <button
                       type="button"
                       disabled={idx === 0}

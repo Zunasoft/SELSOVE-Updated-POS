@@ -80,6 +80,9 @@ export default function BarcodePrinterModal({ product, products, companyName, on
     : [];
   const selectedBatch = sellableBatches.find((b) => b.id === selectedBatchId) || null;
   const labelPrice = selectedBatch?.sellPrice != null ? selectedBatch.sellPrice : previewProduct?.price;
+  // A batch carries the MRP printed on its own lot; without one the product's MRP is used.
+  const batchMrp = (b) => (b?.mrp != null && b.mrp !== '' ? b.mrp : null);
+  const labelMrp = batchMrp(selectedBatch) ?? previewProduct?.mrp;
 
   // Same variable-width, centered bar layout the on-screen BarcodeSVG preview uses, so print output matches it.
   const barsForCode = (code) => {
@@ -112,6 +115,7 @@ export default function BarcodePrinterModal({ product, products, companyName, on
       .map((p) => {
         const pCode = codeSource === 'sku' && p.sku ? p.sku : (p.id === previewProduct?.id ? activeBarcode : (p.barcode || p.sku || '000000'));
         const pPrice = !multi && selectedBatch?.sellPrice != null ? selectedBatch.sellPrice : p.price;
+        const pMrp = (!multi && batchMrp(selectedBatch)) || p.mrp;
         const { rects, viewWidth, offsetX } = barsForCode(pCode);
         return Array.from({ length: Number(quantity) || 1 })
           .map(
@@ -129,7 +133,7 @@ export default function BarcodePrinterModal({ product, products, companyName, on
           ${showSkuLine && codeSource !== 'sku' && p.sku ? `<div class="sku-row">SKU: ${p.sku}</div>` : ''}
           ${!multi && showBatchInfo && selectedBatch ? `<div class="batch-row">Batch: ${selectedBatch.batchNo}${selectedBatch.expiryDate ? ` · Exp: ${String(selectedBatch.expiryDate).slice(0, 10)}` : ''}</div>` : ''}
           <div class="price-row">
-            ${showMrp && p.mrp ? `<span class="mrp">MRP: ₹${p.mrp}</span>` : ''}
+            ${showMrp && pMrp ? `<span class="mrp">MRP: ₹${pMrp}</span>` : ''}
             ${showPrice ? `<span class="sale-price">OUR PRICE: ₹${pPrice}</span>` : ''}
           </div>
         </div>
@@ -329,7 +333,7 @@ export default function BarcodePrinterModal({ product, products, companyName, on
             </div>
           )}
           <div className="flex justify-between w-full text-[10px] font-bold pt-1 border-t border-slate-200">
-            {showMrp && previewProduct.mrp && <span className="line-through text-slate-400">MRP: ₹{previewProduct.mrp}</span>}
+            {showMrp && labelMrp && <span className="line-through text-slate-400">MRP: ₹{labelMrp}</span>}
             {showPrice && <span className="text-emerald-700">PRICE: ₹{labelPrice}</span>}
           </div>
         </div>

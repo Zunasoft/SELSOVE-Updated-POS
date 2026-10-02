@@ -647,6 +647,9 @@ export function resolveProductPricing(product, customer, priceSheets = [], overr
   if (!product) return { price: 0, discountPercent: 0, ruleSource: null };
 
   let basePrice = Number(product.price || 0);
+  // Starting point for every bill is the Global Sheet's price; another sheet only changes the products it prices itself.
+  const globalSheetPrice = priceSheets.find((s) => s.isLocal && s.isActive)?.pricingMap?.[product.id];
+  if (globalSheetPrice !== undefined && globalSheetPrice !== '' && Number.isFinite(Number(globalSheetPrice))) basePrice = Number(globalSheetPrice);
   let discountPercent = 0;
   let ruleSource = null;
 
@@ -665,23 +668,28 @@ export function resolveProductPricing(product, customer, priceSheets = [], overr
   // 2. Manually-picked bill sheet > Customer's assigned Price Sheet > Customer Group Price Sheet
   const targetSheetId = overrideSheetId || customer?.priceSheetId;
   const targetGroup = overrideSheetId ? null : customer?.group;
-  const activeSheet = priceSheets.find(
-    (s) => s.isActive && (s.id === targetSheetId || (targetGroup && String(s.customerType || '').toLowerCase() === String(targetGroup).toLowerCase()))
+  const chosenSheet = priceSheets.find(
+    (s) => s.isActive && (s.id === targetSheetId || (targetGroup && !s.isLocal && String(s.customerType || '').toLowerCase() === String(targetGroup).toLowerCase()))
   );
+  // No sheet picked for this bill and none on the customer: the Global Sheet is the default price list.
+  const defaultSheet = chosenSheet ? null : priceSheets.find((s) => s.isLocal && s.isActive);
+  const activeSheet = chosenSheet || defaultSheet;
 
   if (activeSheet) {
-    if (activeSheet.pricingMap && activeSheet.pricingMap[product.id] !== undefined) {
+    if (activeSheet.pricingMap && activeSheet.pricingMap[product.id] !== undefined && activeSheet.pricingMap[product.id] !== '') {
       basePrice = Number(activeSheet.pricingMap[product.id]);
       ruleSource = `Price Sheet (${activeSheet.name})`;
     }
     if (activeSheet.discountMap && activeSheet.discountMap[product.id] !== undefined) {
       discountPercent = Number(activeSheet.discountMap[product.id]);
       ruleSource = ruleSource || `Price Sheet (${activeSheet.name})`;
-    } else if (Number(activeSheet.defaultDiscountPercent) > 0) {
+    } else if (!defaultSheet && Number(activeSheet.defaultDiscountPercent) > 0) {
       discountPercent = Number(activeSheet.defaultDiscountPercent);
       ruleSource = ruleSource || `Price Sheet (${activeSheet.name})`;
     }
   }
+
+  if (defaultSheet) ruleSource = null; // the default list isn't flagged as a rule on every line
 
   // 3. Customer default discount
   if (discountPercent === 0 && Number(customer?.discountPercent) > 0) {
@@ -1188,11 +1196,8 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
       const cust = customers.find((c) => c.id === customerId);
       const pricing = resolveProductPricing(product, cust, priceSheets, priceSheetId);
-      // A scale-weighed item, or — while the scale is connected — any product sold by weight (kg/g/lb…),
-      // even if it isn't flagged "requires weight": selecting it reads the scale instead of adding 1 kg.
-      // A scanned bag/box/minor-unit barcode names its own unit, so that one is never weighed.
-      const soldByWeight = Boolean(SCALE_UNIT_TO_KG[String(product.unit || '').toLowerCase()]);
-      const isScaleWeighed = Boolean(product.requiresWeight) || (canReadScale && scaleConnected && soldByWeight && !opts.unit);
+      // Only products ticked "Weight Scale Item" read the scale; every other product is billed in its own unit.
+      const isScaleWeighed = Boolean(product.requiresWeight);
 
       // Weighed items never open a popup: the scale's settled weight is billed straight away.
       if (isScaleWeighed && !opts.weightKnown && qty === 1) {
@@ -2702,7 +2707,9 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                   ? 'Active price sheet for this bill.'
                   : customer?.priceSheetId
                     ? `Linked to ${customer.name}'s profile.`
-                    : 'Select a custom sheet or leave default.'
+                    : priceSheets.some((s) => s.isLocal && s.isActive)
+                      ? 'Using the Global Sheet. Pick another to override it for this bill.'
+                      : 'Select a custom sheet or leave default.'
               }
               className="min-w-0"
             >
@@ -2711,7 +2718,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                 onChange={(e) => setPriceSheetId(e.target.value)}
                 className="w-full text-xs"
               >
-                <option value="">Select Price Sheet</option>
+                <option value="">{priceSheets.some((s) => s.isLocal && s.isActive) ? 'Default — Global Sheet' : 'Select Price Sheet'}</option>
                 {priceSheets.filter((s) => s.isActive).map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.name}{s.customerType ? ` · ${s.customerType}` : ''}
@@ -3108,6 +3115,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                     <div className="text-[10.5px] text-[color:var(--text-muted)]/80 mt-0.5 flex items-center gap-2">
                       {b.createdAt && <span>Incoming: {String(b.createdAt).slice(0, 10)}</span>}
                       {b.mfgDate && <span>Mfg: {String(b.mfgDate).slice(0, 10)}</span>}
+                      {b.mrp != null && b.mrp !== '' && <span>MRP: {bMoney(b.mrp)}</span>}
                     </div>
                   </div>
                   <ArrowRight className="h-4 w-4 text-[color:var(--text-muted)] shrink-0" />

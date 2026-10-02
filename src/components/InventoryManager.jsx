@@ -29,11 +29,14 @@ import {
   Check,
   Search,
   ChevronLeft,
+  ChevronDown,
+  ChevronRight,
   ArrowRight,
   X as XIcon
 } from 'lucide-react';
 
 import api, { money, API_BASE, fmtDateTime } from '../lib/api';
+import { useDragReorder, DragHandle, moveItem } from '../lib/dragReorder';
 import {
   Panel,
   SectionHeader,
@@ -628,6 +631,7 @@ const blankProduct = (categories, defaultTaxRate = 5) => ({
   customSubUnitMrpAuto: true,
   customSubUnitBarcode: '',
   altUnits: [],
+  requiresWeight: false,
   trackBatches: false,
   batches: [],
   nearExpiryDays: '',
@@ -1145,6 +1149,7 @@ export function ProductFormModal({
             .filter((u) => u && u.unit && String(u.unit).toLowerCase() !== String(subName).toLowerCase())
             .map((u) => ({ ...u, priceAuto: !u.price, mrpAuto: !u.mrp }))
         : [],
+      requiresWeight: Boolean(product.requiresWeight),
       trackBatches: Boolean(product.trackBatches),
       batches: Array.isArray(product.batches) ? product.batches.map((b) => ({ ...b })) : [],
       nearExpiryDays: product.nearExpiryDays ?? '',
@@ -1511,6 +1516,7 @@ export function ProductFormModal({
           qty: '',
           costPrice: f.purchasePrice || '',
           sellPrice: '',
+          mrp: f.mrp || '',
           warehouseId: defaultWh
         }
       ];
@@ -2606,6 +2612,21 @@ export function ProductFormModal({
                   </Field>
                 </div>
 
+                <div className="pt-2 border-t border-[color:var(--border-subtle)]">
+                  <label className="flex items-center gap-2 text-xs font-bold cursor-pointer text-indigo-600 dark:text-indigo-400">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(form.requiresWeight)}
+                      onChange={(e) => setForm({ ...form, requiresWeight: e.target.checked })}
+                      className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+                    />
+                    Weight Scale Item
+                  </label>
+                  <p className="text-[10px] text-[color:var(--text-muted)] mt-1 pl-6">
+                    Ticked: billing reads the weight from the scale. Unticked: it is billed in its unit as usual.
+                  </p>
+                </div>
+
                 {(batchTrackingEnabled || form.trackBatches) ? (
                   <div className="pt-2 border-t border-[color:var(--border-subtle)]">
                     <label
@@ -2787,6 +2808,16 @@ export function ProductFormModal({
                           value={row.sellPrice ?? ''}
                           onChange={(e) => updateBatchRow(idx, { sellPrice: e.target.value })}
                           placeholder={form.price ? `Auto ₹${form.price}` : 'Sell ₹'}
+                          className="text-xs"
+                        />
+                      </Field>
+                      <Field label="MRP (₹)" hint="Blank = product's MRP" className="w-28">
+                        <Input
+                          type="number"
+                          step="any"
+                          value={row.mrp ?? ''}
+                          onChange={(e) => updateBatchRow(idx, { mrp: e.target.value })}
+                          placeholder={form.mrp ? `Auto ₹${form.mrp}` : 'MRP ₹'}
                           className="text-xs"
                         />
                       </Field>
@@ -5680,11 +5711,194 @@ function SerialsTab({ products }) {
 
 /* ------------------------------- Price Sheets Tab (Story 18 & Story 13) ------------------------------- */
 
+/** Margin as a % of cost — the same basis the product form uses when it turns a margin into a price. */
+const marginPct = (cost, price) => {
+  const c = Number(cost) || 0;
+  const p = Number(price);
+  return c > 0 && Number.isFinite(p) ? Math.round(((p - c) / c) * 10000) / 100 : null;
+};
+// Typed values are strings; the sheet stores numbers, and a blank must not become a zero price.
+const numericMap = (map) =>
+  Object.fromEntries(Object.entries(map || {}).filter(([, v]) => v !== '' && v != null && Number.isFinite(Number(v))).map(([k, v]) => [k, Number(v)]));
+const priceFromMargin = (cost, pct) => Math.round((Number(cost) || 0) * (1 + (Number(pct) || 0) / 100) * 100) / 100;
+
+/** The Global Price Matrix grid (purchase price, selling price, MRP, margin and per-product batches). The Global Sheet editor uses the same grid. */
+const MATRIX_PAGE = 150;
+
+function PriceMatrixTable({ rows, onUpdate, batchesById, showAllBatches }) {
+  const [openBatchIds, setOpenBatchIds] = useState(() => new Set());
+  // Thousands of products × several inputs each is what makes a big catalogue crawl, so rows are drawn a page at a time.
+  const [limit, setLimit] = useState(MATRIX_PAGE);
+  const visibleRows = rows.length > limit ? rows.slice(0, limit) : rows;
+  // What's being typed in a Margin box, so a half-typed "12." isn't rewritten from the price it produced.
+  const [marginDraft, setMarginDraft] = useState({});
+  const toggleBatches = (id) =>
+    setOpenBatchIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  return (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs text-left">
+                  <thead className="bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-primary)] uppercase border-b border-[color:var(--border-subtle)]">
+                    <tr>
+                      <th className="py-2.5 px-3">Product Name</th>
+                      <th className="py-2.5 px-3">Category</th>
+                      <th className="py-2.5 px-3 text-right">Purchase Price (₹)</th>
+                      <th className="py-2.5 px-3 text-right">Selling Price (₹)</th>
+                      <th className="py-2.5 px-3 text-right">MRP (₹)</th>
+                      <th className="py-2.5 px-3 text-right">Margin (%)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                    {visibleRows.map((r) => {
+                      const isService = String(r.productType).toLowerCase() === 'service';
+                      const batches = batchesById.get(r.id) || [];
+                      const batchesOpen = batches.length > 0 && (showAllBatches || openBatchIds.has(r.id));
+                      return (
+                        <React.Fragment key={r.id}>
+                        <tr>
+                          <td className="py-2 px-3">
+                            <div className="font-bold text-[color:var(--text-primary)] flex items-center gap-1.5">
+                              {r.name}
+                              {batches.length > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => toggleBatches(r.id)}
+                                  className="inline-flex items-center gap-0.5 rounded-md border border-[color:var(--border-subtle)] px-1.5 py-0.5 text-[10px] font-bold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/40"
+                                  title="Show or hide this product's batches"
+                                >
+                                  {batchesOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                                  {batches.length} batch{batches.length === 1 ? '' : 'es'}
+                                </button>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1.5 font-normal text-[10.5px] text-[color:var(--text-muted)]">
+                              {r.sku && <span className="font-mono font-semibold text-indigo-600 dark:text-indigo-400">SKU: {r.sku}</span>}
+                              {r.barcode && <span className="font-mono">· {r.barcode}</span>}
+                            </div>
+                          </td>
+                          <td className="py-2 px-3 font-medium text-[color:var(--text-primary)]">{r.category} {isService && <Badge tone="info" className="ml-1">Service</Badge>}</td>
+                          {isService ? (
+                            <td colSpan={4} className="py-2 px-3">
+                              <div className="flex items-center justify-end gap-3 bg-[color:var(--bg-subtle)]/30 rounded-lg p-1.5 border border-[color:var(--border-subtle)] mr-2">
+                                <span className="text-sm uppercase font-bold text-[color:var(--text-primary)] tracking-wider">Service Price:</span>
+                                <Input type="number" step="0.01" value={r.price} onChange={(e) => onUpdate(r.id, 'price', e.target.value)} className="w-32 text-right font-bold bg-white dark:bg-black" />
+                              </div>
+                            </td>
+                          ) : (
+                            <>
+                              <td className="py-2 px-3 text-right">
+                                <Input type="number" step="0.01" value={r.purchasePrice} onChange={(e) => onUpdate(r.id, 'purchasePrice', e.target.value)} className="w-24 text-right ml-auto" />
+                              </td>
+                              <td className="py-2 px-3 text-right">
+                                <Input type="number" step="0.01" value={r.price} onChange={(e) => onUpdate(r.id, 'price', e.target.value)} className="w-24 text-right font-bold ml-auto" />
+                              </td>
+                              <td className="py-2 px-3 text-right">
+                                <Input type="number" step="0.01" value={r.mrp} onChange={(e) => onUpdate(r.id, 'mrp', e.target.value)} className="w-24 text-right ml-auto" />
+                              </td>
+                              <td className="py-2 px-3 text-right">
+                                <Input
+                                  type="number"
+                                  step="0.01"
+                                  disabled={!(Number(r.purchasePrice) > 0)}
+                                  title={Number(r.purchasePrice) > 0 ? 'Type a margin to set the selling price from the purchase price' : 'Set a purchase price first'}
+                                  value={marginDraft[r.id] ?? marginPct(r.purchasePrice, r.price) ?? ''}
+                                  onChange={(e) => {
+                                    const v = e.target.value;
+                                    setMarginDraft((prev) => ({ ...prev, [r.id]: v }));
+                                    if (v !== '') onUpdate(r.id, 'price', priceFromMargin(r.purchasePrice, v));
+                                  }}
+                                  onBlur={() => setMarginDraft((prev) => { const n = { ...prev }; delete n[r.id]; return n; })}
+                                  className="w-20 text-right ml-auto"
+                                />
+                              </td>
+                            </>
+                          )}
+                        </tr>
+                        {batchesOpen && (
+                          <tr className="bg-[color:var(--bg-subtle)]/40">
+                            <td colSpan={6} className="py-2 px-3">
+                              <table className="w-full text-[11px] text-left">
+                                <thead className="text-[10px] uppercase tracking-wider font-bold text-[color:var(--text-secondary)]">
+                                  <tr>
+                                    <th className="py-1 pr-3">Batch No</th>
+                                    <th className="py-1 pr-3 text-right">Qty</th>
+                                    <th className="py-1 pr-3">Mfg</th>
+                                    <th className="py-1 pr-3">Expiry</th>
+                                    <th className="py-1 pr-3 text-right">Cost (₹)</th>
+                                    <th className="py-1 pr-3 text-right">Selling (₹)</th>
+                                    <th className="py-1 pr-3 text-right">MRP (₹)</th>
+                                    <th className="py-1 text-right">Margin (%)</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                                  {batches.map((b) => {
+                                    const sell = b.sellPrice != null && b.sellPrice !== '' ? Number(b.sellPrice) : Number(r.price) || 0;
+                                    const bm = marginPct(b.costPrice, sell);
+                                    return (
+                                      <tr key={b.id || b.batchNo}>
+                                        <td className="py-1 pr-3 font-mono font-semibold">{b.batchNo || '—'}</td>
+                                        <td className="py-1 pr-3 text-right font-mono">{b.qty} {r.unit}</td>
+                                        <td className="py-1 pr-3">{b.mfgDate ? String(b.mfgDate).slice(0, 10) : '—'}</td>
+                                        <td className="py-1 pr-3">{b.expiryDate ? String(b.expiryDate).slice(0, 10) : '—'}</td>
+                                        <td className="py-1 pr-3 text-right font-mono">{money(b.costPrice || 0)}</td>
+                                        <td className="py-1 pr-3 text-right font-mono font-bold">
+                                          {b.sellPrice != null && b.sellPrice !== '' ? money(b.sellPrice) : <span className="text-[color:var(--text-muted)]">Auto · {money(sell)}</span>}
+                                        </td>
+                                        <td
+                                          className={`py-1 pr-3 text-right font-mono ${b.mrp != null && b.mrp !== '' ? 'font-bold' : 'text-[color:var(--text-muted)]'}`}
+                                          title={b.mrp != null && b.mrp !== '' ? 'MRP of this batch' : "No MRP on this batch — showing the product's MRP"}
+                                        >
+                                          {Number(b.mrp != null && b.mrp !== '' ? b.mrp : r.mrp) ? money(b.mrp != null && b.mrp !== '' ? b.mrp : r.mrp) : '—'}
+                                        </td>
+                                        <td className="py-1 text-right font-mono">{bm !== null ? `${bm}%` : '—'}</td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </td>
+                          </tr>
+                        )}
+                        </React.Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                {rows.length > visibleRows.length && (
+                  <div className="flex items-center justify-center gap-3 border-t border-[color:var(--border-subtle)] p-3 text-xs">
+                    <span className="text-[color:var(--text-secondary)] font-semibold">
+                      Showing {visibleRows.length} of {rows.length} products
+                    </span>
+                    <Button size="xs" variant="outline" onClick={() => setLimit((n) => n + MATRIX_PAGE)}>
+                      Show {Math.min(MATRIX_PAGE, rows.length - visibleRows.length)} more
+                    </Button>
+                    <Button size="xs" variant="outline" onClick={() => setLimit(rows.length)}>Show all</Button>
+                  </div>
+                )}
+              </div>
+  );
+}
+
 function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
   const [subTab, setSubTab] = useState('matrix');
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
-
+  // Show every product's batches under it in the Global Price Matrix / Global Sheet.
+  const [showAllBatches, setShowAllBatches] = useState(false);
+  // What's being typed in a Margin box, so a half-typed "12." isn't rewritten from the price it produced.
+  const [marginDraft, setMarginDraft] = useState({});
+  const batchesById = useMemo(() => {
+    const map = new Map();
+    (products || []).forEach((p) => {
+      if (Array.isArray(p.batches)) map.set(p.id, p.batches.filter((b) => Number(b.qty) > 0));
+    });
+    return map;
+  }, [products]);
   // Search & Filter State
   const [matrixQuery, setMatrixQuery] = useState('');
   const [matrixCategory, setMatrixCategory] = useState('all');
@@ -5702,6 +5916,11 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
   const [sheetDiscount, setSheetDiscount] = useState(0);
   const [pricingMap, setPricingMap] = useState({});
   const [discountMap, setDiscountMap] = useState({});
+  // The Global Sheet also keeps its own cost and MRP per product.
+  const [costMap, setCostMap] = useState({});
+  const [mrpMap, setMrpMap] = useState({});
+  // Margin and discount are separate entries: editing one never moves the other — only typing the price itself refreshes both.
+  const [marginMap, setMarginMap] = useState({});
 
   const fetchPriceSheets = () => {
     api.get('/price-sheets').then((res) => setPriceSheets(Array.isArray(res) ? res : res?.data || [])).catch(() => {});
@@ -5781,6 +6000,39 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
     );
   }, [rows, manageQuery]);
 
+  // Global Sheet: the Global Matrix rows with this sheet's own cost / selling price / MRP laid over them.
+  const localMatrixRows = useMemo(
+    () =>
+      manageSheet?.isLocal
+        ? filteredManageRows.map((r) => ({
+            ...r,
+            purchasePrice: costMap[r.id] ?? r.purchasePrice,
+            price: pricingMap[r.id] ?? r.price,
+            mrp: mrpMap[r.id] ?? r.mrp
+          }))
+        : [],
+    [manageSheet, filteredManageRows, costMap, pricingMap, mrpMap]
+  );
+  const updateLocalCell = (id, field, value) => {
+    const setter = field === 'purchasePrice' ? setCostMap : field === 'mrp' ? setMrpMap : setPricingMap;
+    setter((prev) => ({ ...prev, [id]: value }));
+  };
+
+  // Drag a sheet's grip to put it anywhere in the list. The saved order is what every price sheet list uses —
+  // billing, the purchase screen and the customer forms. Off while searching, since a filtered list hides the real positions.
+  const reorderSheets = async (from, to) => {
+    const previous = priceSheets;
+    const next = moveItem(priceSheets, from, to);
+    setPriceSheets(next);
+    try {
+      await api.put('/price-sheets/order', { ids: next.map((s) => s.id) });
+    } catch (err) {
+      setPriceSheets(previous);
+      showToast(api.message(err, 'Could not save the new order.'), 'error');
+    }
+  };
+  const sheetDrag = useDragReorder(reorderSheets, { disabled: Boolean(sheetQuery.trim()) });
+
   // Price Sheet CRUD Methods
   const openAddSheet = () => {
     setEditingSheet(null);
@@ -5848,6 +6100,9 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
     setSheetDiscount(s.defaultDiscountPercent || 0);
     setPricingMap({ ...(s.pricingMap || {}) });
     setDiscountMap({ ...(s.discountMap || {}) });
+    setCostMap({ ...(s.costMap || {}) });
+    setMrpMap({ ...(s.mrpMap || {}) });
+    setMarginMap({ ...(s.marginMap || {}) });
     setManageQuery('');
   };
 
@@ -5856,12 +6111,15 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
     try {
       await api.put(`/price-sheets/${manageSheet.id}`, {
         defaultDiscountPercent: Number(sheetDiscount) || 0,
-        pricingMap,
-        discountMap
+        pricingMap: manageSheet.isLocal ? numericMap(pricingMap) : pricingMap,
+        discountMap,
+        marginMap: numericMap(marginMap),
+        ...(manageSheet.isLocal ? { costMap: numericMap(costMap), mrpMap: numericMap(mrpMap) } : {})
       });
-      showToast('Custom pricing & discounts updated.');
+      showToast(manageSheet.isLocal ? 'Global sheet saved — product prices updated.' : 'Custom pricing & discounts updated.');
       setManageSheet(null);
       fetchPriceSheets();
+      if (manageSheet.isLocal) onRefresh();
     } catch (err) {
       showToast(api.message(err, 'Failed to save pricing.'), 'error');
     } finally {
@@ -5909,6 +6167,15 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
                   ))}
                 </Select>
               )}
+              <label className="flex items-center gap-2 text-xs font-bold cursor-pointer text-indigo-600 dark:text-indigo-400">
+                <input
+                  type="checkbox"
+                  checked={showAllBatches}
+                  onChange={(e) => setShowAllBatches(e.target.checked)}
+                  className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+                />
+                Show batches
+              </label>
               <Button icon={Save} onClick={saveGlobalPrices} disabled={loading}>{loading ? 'Saving...' : 'Save All Price Changes'}</Button>
             </div>
           </div>
@@ -5926,56 +6193,7 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
                 />
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs text-left">
-                  <thead className="bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-primary)] uppercase border-b border-[color:var(--border-subtle)]">
-                    <tr>
-                      <th className="py-2.5 px-3">Product Name</th>
-                      <th className="py-2.5 px-3">Category</th>
-                      <th className="py-2.5 px-3 text-right">Purchase Price (₹)</th>
-                      <th className="py-2.5 px-3 text-right">Selling Price (₹)</th>
-                      <th className="py-2.5 px-3 text-right">MRP (₹)</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[color:var(--border-subtle)]">
-                    {filteredMatrixRows.map((r) => {
-                      const isService = String(r.productType).toLowerCase() === 'service';
-                      return (
-                        <tr key={r.id}>
-                          <td className="py-2 px-3">
-                            <div className="font-bold text-[color:var(--text-primary)]">{r.name}</div>
-                            <div className="flex items-center gap-1.5 font-normal text-[10.5px] text-[color:var(--text-muted)]">
-                              {r.sku && <span className="font-mono font-semibold text-indigo-600 dark:text-indigo-400">SKU: {r.sku}</span>}
-                              {r.barcode && <span className="font-mono">· {r.barcode}</span>}
-                            </div>
-                          </td>
-                          <td className="py-2 px-3 font-medium text-[color:var(--text-primary)]">{r.category} {isService && <Badge tone="info" className="ml-1">Service</Badge>}</td>
-                          {isService ? (
-                            <td colSpan={3} className="py-2 px-3">
-                              <div className="flex items-center justify-end gap-3 bg-[color:var(--bg-subtle)]/30 rounded-lg p-1.5 border border-[color:var(--border-subtle)] mr-2">
-                                <span className="text-sm uppercase font-bold text-[color:var(--text-primary)] tracking-wider">Service Price:</span>
-                                <Input type="number" step="0.01" value={r.price} onChange={(e) => updatePrice(r.id, 'price', e.target.value)} className="w-32 text-right font-bold bg-white dark:bg-black" />
-                              </div>
-                            </td>
-                          ) : (
-                            <>
-                              <td className="py-2 px-3 text-right">
-                                <Input type="number" step="0.01" value={r.purchasePrice} onChange={(e) => updatePrice(r.id, 'purchasePrice', e.target.value)} className="w-24 text-right ml-auto" />
-                              </td>
-                              <td className="py-2 px-3 text-right">
-                                <Input type="number" step="0.01" value={r.price} onChange={(e) => updatePrice(r.id, 'price', e.target.value)} className="w-24 text-right font-bold ml-auto" />
-                              </td>
-                              <td className="py-2 px-3 text-right">
-                                <Input type="number" step="0.01" value={r.mrp} onChange={(e) => updatePrice(r.id, 'mrp', e.target.value)} className="w-24 text-right ml-auto" />
-                              </td>
-                            </>
-                          )}
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+              <PriceMatrixTable rows={filteredMatrixRows} onUpdate={updatePrice} batchesById={batchesById} showAllBatches={showAllBatches} />
             )}
           </Panel>
         </>
@@ -6000,13 +6218,19 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {filteredPriceSheets.map((s) => (
-              <div key={s.id} className="p-4 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] flex flex-col gap-3">
+            {filteredPriceSheets.map((s, sheetIdx) => (
+              <div
+                key={s.id}
+                {...sheetDrag.rowProps(sheetIdx)}
+                className={`p-4 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)] flex flex-col gap-3 ${sheetDrag.rowClass(sheetIdx)}`}
+              >
                 <div className="flex items-start justify-between">
                   <div>
                     <div className="font-bold text-sm text-[color:var(--text-primary)] flex flex-wrap items-center gap-1.5">
+                      <DragHandle disabled={Boolean(sheetQuery.trim())} {...sheetDrag.handleProps(sheetIdx)} />
                       {s.name}
                       <Badge tone={s.isActive ? 'success' : 'neutral'}>{s.isActive ? 'Active' : 'Inactive'}</Badge>
+                      {s.isLocal && <Badge tone="info">Full price list</Badge>}
                       {(s.defaultDiscountPercent || 0) > 0 && (
                         <Badge tone="accent">{s.defaultDiscountPercent}% Discount</Badge>
                       )}
@@ -6017,17 +6241,23 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
                     <button onClick={() => toggleSheetActive(s)} className="p-1 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-primary)]">
                       {s.isActive ? <XCircle className="h-4 w-4" /> : <CheckCircle className="h-4 w-4" />}
                     </button>
-                    <button onClick={() => openEditSheet(s)} className="p-1 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-primary)] hover:text-indigo-600">
-                      <Edit3 className="h-4 w-4" />
-                    </button>
-                    <button onClick={() => deleteSheet(s.id)} className="p-1 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-primary)] hover:text-red-600">
-                      <Trash2 className="h-4 w-4" />
-                    </button>
+                    {!s.isLocal && (
+                      <>
+                        <button onClick={() => openEditSheet(s)} className="p-1 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-primary)] hover:text-indigo-600">
+                          <Edit3 className="h-4 w-4" />
+                        </button>
+                        <button onClick={() => deleteSheet(s.id)} className="p-1 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-primary)] hover:text-red-600">
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
                 <div className="mt-auto pt-3 border-t border-[color:var(--border-subtle)] flex justify-between items-center text-xs">
                   <span className="font-bold text-[color:var(--text-primary)]">
-                    {Object.keys(s.pricingMap || {}).length + Object.keys(s.discountMap || {}).length} custom overrides
+                    {s.isLocal
+                      ? `${Object.keys(s.pricingMap || {}).length} products priced`
+                      : `${Object.keys(s.pricingMap || {}).length + Object.keys(s.discountMap || {}).length} custom overrides`}
                   </span>
                   <Button size="sm" variant="secondary" onClick={() => openManagePricing(s)}>Manage Pricing</Button>
                 </div>
@@ -6096,6 +6326,12 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
           onClose={() => setManageSheet(null)}
         >
           <div className="space-y-4 flex-1 flex flex-col min-h-0 w-full">
+            {manageSheet.isLocal ? (
+              <div className="p-3 rounded-xl bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800 text-xs shrink-0">
+                <div className="font-bold text-indigo-700 dark:text-indigo-400">Global Sheet — editable copy of the Global Price Matrix</div>
+                <div className="text-[11px] text-indigo-900 dark:text-indigo-200 font-medium">Its own purchase price, selling price and MRP for every product. Changes here never touch the Global Matrix.</div>
+              </div>
+            ) : (
             <div className="p-3 rounded-xl bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs shrink-0">
               <div>
                 <div className="font-bold text-indigo-700 dark:text-indigo-400">Sheet-Level Discount (%)</div>
@@ -6115,6 +6351,7 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
                 <span className="font-bold text-indigo-600">%</span>
               </div>
             </div>
+            )}
 
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 shrink-0">
               <SearchInput
@@ -6123,13 +6360,26 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
                 placeholder="Search products by name, barcode, category..."
                 className="w-full sm:w-80"
               />
+              {manageSheet.isLocal && (
+                <label className="flex items-center gap-2 text-xs font-bold cursor-pointer text-indigo-600 dark:text-indigo-400">
+                  <input
+                    type="checkbox"
+                    checked={showAllBatches}
+                    onChange={(e) => setShowAllBatches(e.target.checked)}
+                    className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+                  />
+                  Show batches
+                </label>
+              )}
               <span className="text-xs text-[color:var(--text-secondary)] font-semibold shrink-0">
                 Showing {filteredManageRows.length} of {rows.length} products
               </span>
             </div>
 
             <div className="flex-1 min-h-0 overflow-auto rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--surface,#ffffff)]">
-              {filteredManageRows.length === 0 ? (
+              {manageSheet.isLocal && filteredManageRows.length > 0 ? (
+                <PriceMatrixTable rows={localMatrixRows} onUpdate={updateLocalCell} batchesById={batchesById} showAllBatches={showAllBatches} />
+              ) : filteredManageRows.length === 0 ? (
                 <div className="p-8">
                   <EmptyState
                     icon={Search}
@@ -6142,9 +6392,11 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
                   <thead className="bg-slate-100 dark:bg-slate-800 text-[color:var(--text-primary)] font-bold uppercase sticky top-0 z-10 border-b border-[color:var(--border-subtle)] shadow-sm">
                     <tr>
                       <th className="py-2.5 px-3 bg-slate-100 dark:bg-slate-800">Product Name</th>
+                      <th className="py-2.5 px-3 text-right bg-slate-100 dark:bg-slate-800">Cost (₹)</th>
                       <th className="py-2.5 px-3 text-right bg-slate-100 dark:bg-slate-800">Standard Price</th>
                       <th className="py-2.5 px-3 text-right bg-slate-100 dark:bg-slate-800">Custom Discount (%)</th>
                       <th className="py-2.5 px-3 text-right bg-slate-100 dark:bg-slate-800">Custom Price (₹)</th>
+                      <th className="py-2.5 px-3 text-right bg-slate-100 dark:bg-slate-800">Margin (%)</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[color:var(--border-subtle)] bg-[color:var(--surface,#ffffff)]">
@@ -6177,6 +6429,10 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
                             </div>
                           </td>
 
+                          <td className="py-2 px-3 text-right text-[color:var(--text-secondary)] font-mono">
+                            {isService ? '—' : money(Number(p.purchasePrice) || 0)}
+                          </td>
+
                           <td className="py-2 px-3 text-right text-[color:var(--text-primary)] font-bold font-mono">
                             {money(stdPrice)}
                           </td>
@@ -6192,9 +6448,13 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
                                 if (val === '' || val === null) {
                                   setDiscountMap(prev => { const n = { ...prev }; delete n[p.id]; return n; });
                                   setPricingMap(prev => { const n = { ...prev }; delete n[p.id]; return n; });
+                                  setMarginMap(prev => { const n = { ...prev }; delete n[p.id]; return n; });
                                 } else {
                                   const pct = Number(val) || 0;
                                   const calcPrice = stdPrice > 0 ? Number((stdPrice * (1 - pct / 100)).toFixed(2)) : 0;
+                                  // Hold the margin as it was before this edit, so it doesn't follow the new price.
+                                  const shownMargin = marginMap[p.id] ?? marginPct(Number(p.purchasePrice) || 0, hasCustomPrice ? Number(pricingMap[p.id]) : calcDefaultPrice);
+                                  if (shownMargin !== null && shownMargin !== undefined) setMarginMap(prev => (prev[p.id] !== undefined ? prev : { ...prev, [p.id]: shownMargin }));
                                   setDiscountMap(prev => ({ ...prev, [p.id]: val }));
                                   setPricingMap(prev => ({ ...prev, [p.id]: calcPrice }));
                                 }
@@ -6211,6 +6471,8 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
                               value={pricingMap[p.id] !== undefined ? pricingMap[p.id] : ''}
                               onChange={(e) => {
                                 const val = e.target.value;
+                                // Editing the price itself is the one edit that refreshes both discount and margin.
+                                setMarginMap(prev => { const n = { ...prev }; delete n[p.id]; return n; });
                                 if (val === '' || val === null) {
                                   setPricingMap(prev => { const n = { ...prev }; delete n[p.id]; return n; });
                                   setDiscountMap(prev => { const n = { ...prev }; delete n[p.id]; return n; });
@@ -6223,6 +6485,36 @@ function PricesheetTab({ products, categories = [], showToast, onRefresh }) {
                               }}
                               className="w-28 text-right font-bold ml-auto"
                             />
+                          </td>
+
+                          <td className="py-2 px-3 text-right">
+                            {(() => {
+                              const cost = Number(p.purchasePrice) || 0;
+                              const effective = hasCustomPrice ? Number(pricingMap[p.id]) : calcDefaultPrice;
+                              return (
+                                <Input
+                                  type="number"
+                                  step="0.01"
+                                  disabled={isService || cost <= 0}
+                                  title={cost > 0 ? 'Type a margin to set this sheet\'s price from the cost' : 'No purchase price to take a margin on'}
+                                  value={marginDraft[`m_${p.id}`] ?? marginMap[p.id] ?? marginPct(cost, effective) ?? ''}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setMarginDraft((prev) => ({ ...prev, [`m_${p.id}`]: val }));
+                                    if (val === '') {
+                                      setPricingMap((prev) => { const n = { ...prev }; delete n[p.id]; return n; });
+                                      setMarginMap((prev) => { const n = { ...prev }; delete n[p.id]; return n; });
+                                      return;
+                                    }
+                                    // The price follows the margin; the discount column is left exactly as it is.
+                                    setMarginMap((prev) => ({ ...prev, [p.id]: Number(val) || 0 }));
+                                    setPricingMap((prev) => ({ ...prev, [p.id]: priceFromMargin(cost, val) }));
+                                  }}
+                                  onBlur={() => setMarginDraft((prev) => { const n = { ...prev }; delete n[`m_${p.id}`]; return n; })}
+                                  className="w-20 text-right ml-auto"
+                                />
+                              );
+                            })()}
                           </td>
                         </tr>
                       );

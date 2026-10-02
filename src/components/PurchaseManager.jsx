@@ -1334,6 +1334,227 @@ const addDaysISO = (dateStr, days) => {
   return d.toISOString().slice(0, 10);
 };
 
+/** What a price sheet charges for a product today: its own override, else the standard price less the sheet's default discount. */
+const sheetCurrentPrice = (sheet, product) => {
+  const override = sheet?.pricingMap?.[product.id];
+  if (override !== undefined && override !== '') return Number(override) || 0;
+  const std = Number(product.price) || 0;
+  return r2Local(std * (1 - (Number(sheet?.defaultDiscountPercent) || 0) / 100));
+};
+
+/** The Global Sheet's own cost / MRP for a product (the Global Matrix values until the sheet has been edited). */
+const sheetCost = (sheet, product) => {
+  const own = sheet?.costMap?.[product.id];
+  return own !== undefined && own !== '' ? Number(own) || 0 : Number(product.purchasePrice) || 0;
+};
+const sheetMrp = (sheet, product) => {
+  const own = sheet?.mrpMap?.[product.id];
+  return own !== undefined && own !== '' ? Number(own) || 0 : Number(product.mrp) || 0;
+};
+
+/**
+ * Sheet price that keeps the product's margin when this purchase changes its cost. Null (price stays as it is) for
+ * batch-tracked products — each batch carries its own price — and when there's no usable old/new cost to compare.
+ */
+const sheetAutoPrice = (sheet, product, line) => {
+  if (!product || product.trackBatches) return null;
+  const oldCost = sheet?.isLocal ? sheetCost(sheet, product) : Number(product.purchasePrice) || 0;
+  const newCost = Number(line?.rate) || 0;
+  if (oldCost <= 0 || newCost <= 0 || Math.abs(newCost - oldCost) < 0.005) return null;
+  // The line is quoted in another unit than the product's own, so its rate isn't comparable to the stored cost.
+  if (line.unit && product.unit && line.unit !== product.unit) return null;
+  const current = sheetCurrentPrice(sheet, product);
+  return current > 0 ? r2Local((current * newCost) / oldCost) : null;
+};
+
+/** Edit one price sheet from inside a purchase: purchased items by default, every product on request. */
+function PriceSheetPanel({ sheets, sheetId, onSheetChange, products, items, edits, onEdit, extra, onExtraEdit, showAll, onShowAll, editedSheetIds }) {
+  const [query, setQuery] = useState('');
+  // "Show all item prices" can mean thousands of rows; they are drawn a page at a time.
+  const [limit, setLimit] = useState(100);
+  // What's being typed in a Margin box, so a half-typed "12." isn't rewritten from the price it produced.
+  const [marginDraft, setMarginDraft] = useState({});
+  const sheet = sheets.find((s) => s.id === sheetId);
+
+  const rows = useMemo(() => {
+    if (!sheet) return [];
+    const lineFor = new Map();
+    items.forEach((l) => {
+      if (l.productId && !lineFor.has(l.productId)) lineFor.set(l.productId, l);
+    });
+    const q = query.trim().toLowerCase();
+    const source = showAll ? products : products.filter((p) => lineFor.has(p.id));
+    return source
+      .filter((p) => !q || `${p.name} ${p.barcode || ''} ${p.sku || ''}`.toLowerCase().includes(q))
+      .map((p) => {
+        const line = lineFor.get(p.id);
+        const current = sheetCurrentPrice(sheet, p);
+        const auto = line ? sheetAutoPrice(sheet, p, line) : null;
+        return { product: p, line, current, auto };
+      });
+  }, [sheet, products, items, showAll, query]);
+
+  return (
+    <div className="p-3.5 rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/40 space-y-2.5">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+        <div>
+          <span className="text-[11px] font-extrabold uppercase tracking-wider text-[color:var(--text-secondary)]">
+            Update Price Sheet
+          </span>
+          <p className="text-[10.5px] text-[color:var(--text-muted)] mt-0.5">
+            Saved with this purchase. Switch sheets to edit more than one. Non-batch items keep their margin when the cost changes; batch items keep their price.
+          </p>
+        </div>
+        <Select value={sheetId} onChange={(e) => onSheetChange(e.target.value)} className="sm:w-64">
+          <option value="">No price sheet</option>
+          {sheets.filter((s) => s.isActive !== false).map((s) => (
+            <option key={s.id} value={s.id}>{s.name}{editedSheetIds.has(s.id) ? ' ✓ edited' : ''}</option>
+          ))}
+        </Select>
+      </div>
+
+      {sheet && (
+        <>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <label className="flex items-center gap-2 text-xs font-bold cursor-pointer text-indigo-600 dark:text-indigo-400">
+              <input
+                type="checkbox"
+                checked={showAll}
+                onChange={(e) => onShowAll(e.target.checked)}
+                className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+              />
+              Show all item prices
+            </label>
+            {showAll && (
+              <SearchInput value={query} onChange={setQuery} placeholder="Search products..." className="w-full sm:w-64" />
+            )}
+          </div>
+
+          <div className="max-h-72 overflow-auto rounded-xl border border-[color:var(--border)] bg-[color:var(--bg-surface)]">
+            {rows.length === 0 ? (
+              <div className="p-4 text-center text-xs text-[color:var(--text-muted)]">
+                {showAll ? 'No products match.' : 'Add products to the purchase to edit their prices here, or tick "Show all item prices".'}
+              </div>
+            ) : (
+              <table className="w-full text-xs text-left">
+                <thead className="sticky top-0 bg-[color:var(--bg-subtle)] text-[10.5px] uppercase tracking-wider font-bold text-[color:var(--text-secondary)]">
+                  <tr>
+                    <th className="py-2 px-3">Product</th>
+                    <th className="py-2 px-3 text-right">{sheet.isLocal ? 'Cost (₹)' : 'Cost'}</th>
+                    {!sheet.isLocal && <th className="py-2 px-3 text-right">Standard</th>}
+                    <th className="py-2 px-3 text-right w-36">{sheet.isLocal ? 'Selling price (₹)' : `${sheet.name} price (₹)`}</th>
+                    {sheet.isLocal && <th className="py-2 px-3 text-right w-28">MRP (₹)</th>}
+                    <th className="py-2 px-3 text-right w-24">Margin (%)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                  {rows.slice(0, limit).map(({ product: p, line, current, auto }) => {
+                    const manual = edits[p.id];
+                    const hasManual = manual !== undefined && manual !== '';
+                    const newCost = line ? Number(line.rate) || 0 : null;
+                    return (
+                      <tr key={p.id}>
+                        <td className="py-2 px-3 font-bold text-[color:var(--text-primary)]">
+                          {p.name}
+                          {p.trackBatches && line && <Badge tone="neutral" className="ml-1.5">Batch · price kept</Badge>}
+                        </td>
+                        {sheet.isLocal ? (
+                          <td className="py-2 px-3 text-right">
+                            <Input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              value={extra[p.id]?.cost ?? (newCost !== null && newCost > 0 ? newCost : sheetCost(sheet, p))}
+                              onChange={(e) => onExtraEdit(p.id, 'cost', e.target.value)}
+                              className="w-24 text-right ml-auto"
+                            />
+                            {newCost !== null && newCost > 0 && extra[p.id]?.cost === undefined && newCost !== sheetCost(sheet, p) && (
+                              <div className="text-[10px] text-emerald-600 mt-0.5">Purchase rate · was {money(sheetCost(sheet, p))}</div>
+                            )}
+                          </td>
+                        ) : (
+                          <td className="py-2 px-3 text-right font-mono">
+                            {newCost !== null && newCost !== Number(p.purchasePrice) ? (
+                              <span>{money(p.purchasePrice || 0)} → <b>{money(newCost)}</b></span>
+                            ) : (
+                              money(p.purchasePrice || 0)
+                            )}
+                          </td>
+                        )}
+                        {!sheet.isLocal && <td className="py-2 px-3 text-right font-mono">{money(p.price || 0)}</td>}
+                        <td className="py-2 px-3 text-right">
+                          <Input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={hasManual ? manual : auto !== null ? auto : ''}
+                            placeholder={current.toFixed(2)}
+                            onChange={(e) => onEdit(p.id, e.target.value)}
+                            className="w-28 text-right font-bold ml-auto"
+                          />
+                          {!hasManual && auto !== null && (
+                            <div className="text-[10px] text-emerald-600 mt-0.5">Auto · was {money(current)}</div>
+                          )}
+                        </td>
+                        {sheet.isLocal && (
+                          <td className="py-2 px-3 text-right">
+                            <Input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              value={extra[p.id]?.mrp ?? sheetMrp(sheet, p)}
+                              onChange={(e) => onExtraEdit(p.id, 'mrp', e.target.value)}
+                              className="w-24 text-right ml-auto"
+                            />
+                          </td>
+                        )}
+                        <td className="py-2 px-3 text-right">
+                          {(() => {
+                            // Margin is taken on the cost this purchase pays; a product not in the purchase uses its stored cost.
+                            const typedCost = extra[p.id]?.cost;
+                            const cost = sheet.isLocal
+                              ? Number(typedCost !== undefined && typedCost !== '' ? typedCost : newCost !== null && newCost > 0 ? newCost : sheetCost(sheet, p)) || 0
+                              : newCost !== null && newCost > 0 ? newCost : Number(p.purchasePrice) || 0;
+                            const shown = hasManual ? Number(manual) : auto !== null ? auto : current;
+                            const margin = cost > 0 && Number.isFinite(shown) ? r2Local(((shown - cost) / cost) * 100) : '';
+                            return (
+                              <Input
+                                type="number"
+                                step="0.01"
+                                disabled={cost <= 0}
+                                title={cost > 0 ? 'Type a margin to set this sheet price from the cost' : 'No cost to take a margin on'}
+                                value={marginDraft[p.id] ?? margin}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  setMarginDraft((prev) => ({ ...prev, [p.id]: v }));
+                                  onEdit(p.id, v === '' ? '' : String(r2Local(cost * (1 + (Number(v) || 0) / 100))));
+                                }}
+                                onBlur={() => setMarginDraft((prev) => { const n = { ...prev }; delete n[p.id]; return n; })}
+                                className="w-20 text-right ml-auto"
+                              />
+                            );
+                          })()}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+          {rows.length > limit && (
+            <div className="flex items-center justify-center gap-3 text-xs">
+              <span className="text-[color:var(--text-secondary)] font-semibold">Showing {limit} of {rows.length} products</span>
+              <Button size="xs" variant="outline" onClick={() => setLimit((n) => n + 100)}>Show 100 more</Button>
+              <Button size="xs" variant="outline" onClick={() => setLimit(rows.length)}>Show all</Button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 /** Product Cell Display & Trigger Component for Purchase Invoices */
 function ProductItemCell({ row, index, products = [], onSelectProduct, onOpenNewProduct, onUpdateName, onSwitchToCustom, onSwitchToCatalog }) {
   if (row.isCustom) {
@@ -1363,16 +1584,11 @@ function ProductItemCell({ row, index, products = [], onSelectProduct, onOpenNew
     <Select
       value={row.productId || ''}
       onChange={(e) => {
-        const val = e.target.value;
-        if (val === '__new__') return onOpenNewProduct(index);
-        if (val === '__custom__') return onSwitchToCustom(index);
-        const prod = products.find((p) => p.id === val);
+        const prod = products.find((p) => p.id === e.target.value);
         if (prod) onSelectProduct(index, prod);
       }}
     >
       <option value="">— Select Product —</option>
-      <option value="__new__">+ Create New Product…</option>
-      <option value="__custom__">+ Custom Item / Description…</option>
       {products.map((p) => (
         <option key={p.id} value={p.id}>
           {p.name}{p.sku ? ` (SKU: ${p.sku})` : ''}
@@ -1454,6 +1670,76 @@ function NewPurchaseModal({
   // Line items & Landed costs
   const [items, setItems] = useState([blankLine()]);
   const [charges, setCharges] = useState([]);
+
+  // Price sheets edited from this purchase. Each sheet keeps its own typed edits, so switching the dropdown to
+  // another sheet never loses the first one — every visited sheet is saved with the purchase.
+  const [priceSheets, setPriceSheets] = useState([]);
+  const [sheetId, setSheetId] = useState('');
+  const [sheetEdits, setSheetEdits] = useState({}); // { [sheetId]: { [productId]: typed price } }
+  const [visitedSheetIds, setVisitedSheetIds] = useState([]);
+  const [showAllSheetItems, setShowAllSheetItems] = useState(false);
+  const [sheetExtra, setSheetExtra] = useState({}); // Global Sheet only: { [sheetId]: { [productId]: { cost, mrp } } }
+
+  const sheetUpdates = useMemo(() => {
+    const byId = new Map(products.map((p) => [p.id, p]));
+    const lineFor = new Map();
+    items.forEach((l) => {
+      if (l.productId && !lineFor.has(l.productId)) lineFor.set(l.productId, l);
+    });
+    return visitedSheetIds
+      .map((id) => {
+        const sheet = priceSheets.find((s) => s.id === id);
+        if (!sheet) return null;
+        const edits = sheetEdits[id] || {};
+        const extra = sheetExtra[id] || {};
+        const prices = {};
+        const costs = {};
+        const mrps = {};
+        new Set([...lineFor.keys(), ...Object.keys(edits), ...Object.keys(extra)]).forEach((pid) => {
+          const product = byId.get(pid);
+          if (!product) return;
+          if (sheet.isLocal) {
+            // The purchase itself already sets each product's cost (landed charges included), so cost and MRP are only
+            // sent when typed over by hand.
+            const typedCost = extra[pid]?.cost;
+            if (typedCost !== undefined && typedCost !== '' && Math.abs(Number(typedCost) - sheetCost(sheet, product)) >= 0.005) costs[pid] = r2Local(Number(typedCost));
+            const typedMrp = extra[pid]?.mrp;
+            if (typedMrp !== undefined && typedMrp !== '' && Math.abs(Number(typedMrp) - sheetMrp(sheet, product)) >= 0.005) mrps[pid] = r2Local(Number(typedMrp));
+          }
+          const typed = edits[pid];
+          const value = typed !== undefined && typed !== '' ? Number(typed) : sheetAutoPrice(sheet, product, lineFor.get(pid));
+          if (value === null || !Number.isFinite(value) || value < 0) return;
+          // Only real changes go to the sheet — an untouched price would otherwise become a needless override.
+          if (Math.abs(value - sheetCurrentPrice(sheet, product)) < 0.005) return;
+          prices[pid] = r2Local(value);
+        });
+        return Object.keys(prices).length || Object.keys(costs).length || Object.keys(mrps).length
+          ? { sheetId: id, prices, ...(sheet.isLocal ? { costs, mrps } : {}) }
+          : null;
+      })
+      .filter(Boolean);
+  }, [visitedSheetIds, priceSheets, sheetEdits, sheetExtra, items, products]);
+  const editedSheetIds = useMemo(() => new Set(sheetUpdates.map((u) => u.sheetId)), [sheetUpdates]);
+
+  useEffect(() => {
+    if (open) {
+      setSheetId('');
+      setSheetEdits({});
+      setSheetExtra({});
+      setVisitedSheetIds([]);
+      setShowAllSheetItems(false);
+      // Ignore the answer if the window was closed (or reopened) before it arrived.
+      let current = true;
+      api
+        .get('/price-sheets')
+        .then((res) => current && setPriceSheets(Array.isArray(res) ? res : res?.data || []))
+        .catch(() => current && setPriceSheets([]));
+      return () => {
+        current = false;
+      };
+    }
+    return undefined;
+  }, [open]);
 
   useEffect(() => {
     if (open) {
@@ -1611,6 +1897,7 @@ function NewPurchaseModal({
         taxRate,
         discount,
         total,
+        sellPriceManual: false,
         isCustom: !prod.id,
         // Only applies when the product itself is batch-tracked — the backend silently discards batch/expiry data otherwise.
         trackBatches: Boolean(prod.trackBatches),
@@ -1622,7 +1909,8 @@ function NewPurchaseModal({
             qty,
             mfgDate: '',
             expiryDate: '',
-            sellPrice: prod.price ?? ''
+            sellPrice: prod.price ?? '',
+            mrp: prod.mrp ?? ''
           }
         ],
         batchNo: '',
@@ -1658,6 +1946,22 @@ function NewPurchaseModal({
       const updated = { ...next[index], [field]: cleanValue };
       const qty = Number(updated.qty) || 0;
       updated.total = computeLineTotal({ qty: updated.qty, rate: updated.rate, taxRate: updated.taxRate, discount: updated.discount });
+
+      // Cost changed on a plain (non-batch) product: its selling price follows, keeping the same margin, until the
+      // price is typed by hand. Saving the purchase writes this price to the product. Batch products price per batch.
+      if (field === 'rate' && !updated.sellPriceManual && !updated.trackBatches && !updated.showBatch) {
+        const prod = products.find((p) => p.id === updated.productId);
+        const oldCost = Number(prod?.purchasePrice) || 0;
+        const oldPrice = Number(prod?.price) || 0;
+        const newCost = Number(cleanValue) || 0;
+        // A line in another unit than the product's own isn't comparable to the stored cost.
+        if (prod && oldCost > 0 && oldPrice > 0 && newCost > 0 && (!updated.unit || updated.unit === prod.unit)) {
+          updated.sellPrice = r2Local((oldPrice * newCost) / oldCost);
+          if (Array.isArray(updated.batches) && updated.batches.length === 1) {
+            updated.batches = [{ ...updated.batches[0], sellPrice: updated.sellPrice }];
+          }
+        }
+      }
 
       if (field === 'qty' && Array.isArray(updated.batches) && updated.batches.length === 1) {
         updated.batches = [{ ...updated.batches[0], qty }];
@@ -1698,7 +2002,8 @@ function NewPurchaseModal({
         qty: remaining > 0 ? remaining : 1,
         mfgDate: '',
         expiryDate: '',
-        sellPrice: curItem.sellPrice || ''
+        sellPrice: curItem.sellPrice || '',
+        mrp: curItem.batches?.[0]?.mrp ?? ''
       };
 
       const updatedBatches = [...curBatches, newBatch];
@@ -2017,9 +2322,11 @@ function NewPurchaseModal({
                   qty: Number(b.qty) || 0,
                   mfgDate: b.mfgDate || null,
                   expiryDate: b.expiryDate || null,
-                  sellPrice: b.sellPrice !== undefined && b.sellPrice !== '' ? b.sellPrice : l.sellPrice
+                  sellPrice: b.sellPrice !== undefined && b.sellPrice !== '' ? b.sellPrice : l.sellPrice,
+                  mrp: b.mrp !== undefined && b.mrp !== '' ? Number(b.mrp) : undefined
                 }))
               : undefined,
+            mrp: hasBatch && batches[0]?.mrp !== undefined && batches[0]?.mrp !== '' ? Number(batches[0].mrp) : undefined,
             batchNo: batches[0]?.batchNo || (hasBatch ? l.batchNo || '' : undefined),
             mfgDate: batches[0]?.mfgDate || (hasBatch ? l.mfgDate || '' : undefined),
             expiryDate: batches[0]?.expiryDate || (hasBatch ? l.expiryDate || '' : undefined),
@@ -2031,7 +2338,8 @@ function NewPurchaseModal({
         }),
         additionalCharges: charges
           .filter((c) => Number(c.amount) > 0)
-          .map((c) => ({ label: c.label || 'Other', amount: Number(c.amount) }))
+          .map((c) => ({ label: c.label || 'Other', amount: Number(c.amount) })),
+        priceSheetUpdates: sheetUpdates
       };
 
       const res = await api.post('/purchases', payload);
@@ -2670,6 +2978,7 @@ function NewPurchaseModal({
                                 value={item.sellPrice}
                                 onChange={(e) => {
                                   const val = e.target.value;
+                                  handleItemChange(idx, 'sellPriceManual', true);
                                   handleItemChange(idx, 'sellPrice', val);
                                   if (Array.isArray(item.batches) && item.batches.length === 1) {
                                     updateBatchInLine(idx, 0, 'sellPrice', val);
@@ -2802,6 +3111,17 @@ function NewPurchaseModal({
                                         />
                                       </Field>
 
+                                      <Field label="MRP (₹)" hint="Printed on this lot" className="w-28">
+                                        <Input
+                                          type="number"
+                                          step="any"
+                                          value={batch.mrp ?? ''}
+                                          onChange={(e) => updateBatchInLine(idx, bIdx, 'mrp', e.target.value)}
+                                          placeholder="MRP"
+                                          className="text-xs font-mono"
+                                        />
+                                      </Field>
+
                                       {(item.batches || []).length > 1 && (
                                         <button
                                           type="button"
@@ -2898,6 +3218,38 @@ function NewPurchaseModal({
               </table>
             </div>
           </div>
+
+          {priceSheets.length > 0 && (
+            <PriceSheetPanel
+              sheets={priceSheets}
+              sheetId={sheetId}
+              onSheetChange={(id) => {
+                setSheetId(id);
+                if (id) setVisitedSheetIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
+              }}
+              products={products}
+              items={items}
+              edits={sheetEdits[sheetId] || {}}
+              extra={sheetExtra[sheetId] || {}}
+              onExtraEdit={(pid, field, value) =>
+                setSheetExtra((prev) => ({
+                  ...prev,
+                  [sheetId]: { ...(prev[sheetId] || {}), [pid]: { ...((prev[sheetId] || {})[pid] || {}), [field]: value } }
+                }))
+              }
+              onEdit={(pid, value) =>
+                setSheetEdits((prev) => {
+                  const mine = { ...(prev[sheetId] || {}) };
+                  if (value === '') delete mine[pid];
+                  else mine[pid] = value;
+                  return { ...prev, [sheetId]: mine };
+                })
+              }
+              showAll={showAllSheetItems}
+              onShowAll={setShowAllSheetItems}
+              editedSheetIds={editedSheetIds}
+            />
+          )}
 
           {/* Additional Landed Cost Charges */}
           <div className="p-3.5 rounded-2xl border border-[color:var(--border)] bg-[color:var(--bg-subtle)]/40 space-y-2">

@@ -26,6 +26,7 @@ import {
 } from 'lucide-react';
 import { Modal, Button, Field, Input, Select, Textarea, Badge, cx } from '../lib/ui';
 import api from '../lib/api';
+import { useDragReorder, DragHandle, moveItem } from '../lib/dragReorder';
 import {
   ThermalReceiptView, THERMAL_THEMES, DEFAULT_THERMAL_SECTIONS, SAMPLE_RECEIPT_DATA,
   BILLING_THERMAL_THEME_IDS
@@ -179,6 +180,12 @@ export function VisualTemplateBuilderModal({
     sections[targetIndex] = temp;
     setConfig((prev) => ({ ...prev, sections }));
   };
+
+  // Drag a section's grip to move it anywhere in one go (the arrows still step it one place).
+  const sectionDrag = useDragReorder((from, to) => {
+    const sections = currentConfig.sections || (isThermal ? DEFAULT_THERMAL_SECTIONS : DEFAULT_INVOICE_SECTIONS);
+    setConfig((prev) => ({ ...prev, sections: moveItem(sections, from, to) }));
+  });
 
   const handleToggleSection = (index) => {
     const sections = [...(currentConfig.sections || (isThermal ? DEFAULT_THERMAL_SECTIONS : DEFAULT_INVOICE_SECTIONS))];
@@ -860,14 +867,17 @@ export function VisualTemplateBuilderModal({
                       return (
                         <div
                           key={sec.id}
+                          {...sectionDrag.rowProps(idx)}
                           className={cx(
                             'rounded-2xl border p-3 flex items-center justify-between transition-all gap-3',
                             isEnabled
                               ? 'border-[color:var(--border)] bg-[color:var(--bg-surface)] shadow-xs'
-                              : 'border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] opacity-60'
+                              : 'border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] opacity-60',
+                            sectionDrag.rowClass(idx)
                           )}
                         >
                           <div className="flex items-center gap-2.5">
+                            <DragHandle {...sectionDrag.handleProps(idx)} />
                             <span className="font-mono text-xs font-bold text-[color:var(--text-muted)] w-5">
                               {idx + 1}.
                             </span>
