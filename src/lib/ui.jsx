@@ -779,6 +779,77 @@ export function Modal({
   );
 }
 
+const DRAWER_WIDTH = {
+  sm: 'w-[92vw] sm:w-[360px]',
+  md: 'w-[92vw] sm:w-[440px]',
+  lg: 'w-[92vw] sm:w-[560px]'
+};
+
+/** A right-edge slide-in panel for quick add/edit forms — the Zoho-style alternative to a centered Modal: the record list stays visible and in place behind it instead of being fully obscured. */
+export function Drawer({ open, onClose, title, subtitle, icon: Icon, size = 'md', className = '', footer, children }) {
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (e) => e.key === 'Escape' && onClose?.();
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 z-50 flex justify-end bg-slate-950/70 backdrop-blur-md"
+          onMouseDown={(e) => e.target === e.currentTarget && onClose?.()}
+        >
+          <motion.div
+            initial={{ x: '100%' }}
+            animate={{ x: 0 }}
+            exit={{ x: '100%' }}
+            transition={{ type: 'tween', duration: 0.22, ease: 'easeOut' }}
+            className={cx('surface-raised h-full shadow-2xl flex flex-col', DRAWER_WIDTH[size] || DRAWER_WIDTH.md, className)}
+            style={{ background: 'var(--surface-raised, #ffffff)' }}
+          >
+            <div
+              className="flex items-start justify-between gap-3 px-5 py-4 shrink-0"
+              style={{ borderBottom: '1px solid var(--border)' }}
+            >
+              <div className="min-w-0 flex-1">
+                <h3 className="flex items-center gap-2 text-sm font-bold text-[color:var(--text-primary)]">
+                  {Icon && <Icon className="h-4 w-4 text-[color:var(--accent)]" />}
+                  {title}
+                </h3>
+                {subtitle && <p className="mt-0.5 text-[11px] text-[color:var(--text-secondary)]">{subtitle}</p>}
+              </div>
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-lg p-1.5 text-[color:var(--text-muted)] transition-colors hover:bg-[color:var(--bg-subtle)] hover:text-rose-600"
+                title="Close (Esc)"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="px-5 py-4 flex-1 min-h-0 overflow-y-auto">{children}</div>
+
+            {footer && (
+              <div
+                className="flex items-center justify-end gap-2 px-5 py-3.5 shrink-0"
+                style={{ borderTop: '1px solid var(--border)', background: 'var(--bg-subtle)' }}
+              >
+                {footer}
+              </div>
+            )}
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
 /* ------------------------------- Lightweight charts (inline SVG — no chart library needed) ------------------------------- */
 
 /** Grouped income/expense bars for the accounts dashboard. */

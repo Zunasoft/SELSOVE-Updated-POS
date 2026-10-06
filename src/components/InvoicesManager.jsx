@@ -2393,13 +2393,16 @@ function NewInvoiceModal({
                     <th className="py-2.5 px-3 w-20">Unit</th>
                     <th className="py-2.5 px-3 w-28 text-right">Rate (₹)</th>
                     <th className="py-2.5 px-3 w-20 text-right">GST %</th>
+                    <th className="py-2.5 px-3 w-28">Barcode</th>
                     <th className="py-2.5 px-3 w-24 text-right">Disc (₹)</th>
                     <th className="py-2.5 px-3 w-28 text-right">Total (₹)</th>
                     <th className="py-2.5 px-3 w-10 text-center"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[color:var(--border-subtle)]">
-                  {items.map((item, idx) => (
+                  {items.map((item, idx) => {
+                    const product = products.find((pr) => pr.id === item.productId);
+                    return (
                     <tr key={idx} className="hover:bg-[color:var(--bg-subtle)]/50">
                       <td className="py-2 px-3 text-center text-slate-400 font-mono text-[11px]">{idx + 1}</td>
 
@@ -2472,6 +2475,15 @@ function NewInvoiceModal({
 
                       <td className="py-2 px-3">
                         <Input
+                          value={product?.barcode || ''}
+                          readOnly
+                          placeholder="—"
+                          className="text-xs font-mono bg-[color:var(--bg-subtle)] cursor-default"
+                        />
+                      </td>
+
+                      <td className="py-2 px-3">
+                        <Input
                           type="number"
                           step="any"
                           value={item.discount}
@@ -2495,7 +2507,8 @@ function NewInvoiceModal({
                         </button>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -2623,7 +2636,6 @@ function NewInvoiceModal({
         products={products}
         batchTrackingEnabled={batchTrackingEnabled}
         storeNearExpiryDays={storeNearExpiryDays}
-        hideBatches={true}
         showToast={showToast}
         onClose={() => setNewProductLineIndex(null)}
         onSaved={(newProduct) => {
@@ -3229,7 +3241,6 @@ function QuotationEditorModal({
         products={products}
         batchTrackingEnabled={batchTrackingEnabled}
         storeNearExpiryDays={storeNearExpiryDays}
-        hideBatches={true}
         showToast={showToast}
         onClose={() => setNewProductLineIndex(null)}
         onSaved={(newProduct) => {

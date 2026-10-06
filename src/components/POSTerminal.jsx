@@ -643,10 +643,14 @@ export function playScanSound(type = 'add') {
   } catch (_) {}
 }
 
-export function resolveProductPricing(product, customer, priceSheets = [], overrideSheetId = null) {
+// `batchSellPrice` is the selected batch's own price override (if any) — it replaces product.price
+// as the starting point so a price sheet's discount% still lands on top of the batch's own price
+// instead of being discarded for it, while an explicit sheet/customer override (a flat price someone
+// set on purpose) still wins outright, same as it always has for non-batched products.
+export function resolveProductPricing(product, customer, priceSheets = [], overrideSheetId = null, batchSellPrice = null) {
   if (!product) return { price: 0, discountPercent: 0, ruleSource: null };
 
-  let basePrice = Number(product.price || 0);
+  let basePrice = batchSellPrice != null ? Number(batchSellPrice) : Number(product.price || 0);
   // Starting point for every bill is the Global Sheet's price; another sheet only changes the products it prices itself.
   const globalSheetPrice = priceSheets.find((s) => s.isLocal && s.isActive)?.pricingMap?.[product.id];
   if (globalSheetPrice !== undefined && globalSheetPrice !== '' && Number.isFinite(Number(globalSheetPrice))) basePrice = Number(globalSheetPrice);
@@ -1128,8 +1132,15 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
     (product, qty, pricing, batchId, serialId, unitName) => {
       const batch = batchId ? (product.batches || []).find((b) => b.id === batchId) : null;
       const serial = serialId ? (product.serials || []).find((s) => s.id === serialId) : null;
+      // `pricing` was resolved before the batch was known (against product.price), so a batch with its
+      // own sellPrice override needs pricing re-resolved against THAT price — otherwise the selected
+      // price sheet's discount gets thrown away the moment a batch is involved.
+      const cust = customers.find((c) => c.id === customerId);
+      const effectivePricing = batch && batch.sellPrice != null
+        ? resolveProductPricing(product, cust, priceSheets, priceSheetId, batch.sellPrice)
+        : pricing;
       // A batch can override the product's normal price (e.g. clearance lot) — unit conversions build from that.
-      const basePrice = batch && batch.sellPrice != null ? Number(batch.sellPrice) : pricing.price;
+      const basePrice = effectivePricing.price;
       const options = getProductUnitOptions({ ...product, price: basePrice });
       // A scanned unit barcode (bag/box/minor unit) bills in that unit; anything else uses the product's default.
       const wanted = unitName ? options.find((o) => String(o.unit).toLowerCase() === String(unitName).toLowerCase()) : null;
@@ -1169,8 +1180,8 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
             price: defaultOpt.price,
             total: roundToDecimals(effectiveQty * defaultOpt.price),
             taxRate: product.taxRate || 0,
-            pricingRule: pricing.ruleSource,
-            itemDiscountPercent: pricing.discountPercent,
+            pricingRule: effectivePricing.ruleSource,
+            itemDiscountPercent: effectivePricing.discountPercent,
             batchId: batchId || undefined,
             batchNo: batch ? batch.batchNo : undefined,
             serialId: serialId || undefined,
@@ -1180,7 +1191,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
       });
       showToast(toastMsg);
     },
-    [showToast]
+    [showToast, customers, customerId, priceSheets, priceSheetId]
   );
 
   const addToCart = useCallback(
@@ -1321,24 +1332,12 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
     [serialPickerTarget, commitAddToCart]
   );
 
-  // Weight-embedded and standard barcode scanner handling
-  const resolveScan = useCallback(
-    async (code) => {
-      const trimmed = code.trim();
-      if (!trimmed) return;
-
-      if (session?.status !== 'open') {
-        setShowSession(true);
-        showToast('Cash Counter is closed. Please open drawer to start billing.', 'error');
-        return;
-      }
-
-      // Cool-down: a scan within a second of the last accepted one is ignored, so a double read or a
-      // scanner held on the label can't bill the same item twice.
-      const now = Date.now();
-      if (now - lastScanAtRef.current < SCAN_COOLDOWN_MS) return;
-      lastScanAtRef.current = now;
-
+  // Weight-embedded and standard barcode scanner handling.
+  // `resolveOneCode` resolves exactly one already-trimmed, non-empty code — no session/cooldown
+  // checks of its own, so it can be reused for a single scan AND for each piece of a multi-code
+  // scan (see `resolveScan` below) without re-running those checks per item.
+  const resolveOneCode = useCallback(
+    async (trimmed) => {
       // An exact match always wins first — a plain, already-known barcode/SKU should never be
       // misread as a weight-embedded code just because it happens to be the right length.
       const local = products.find(
@@ -1351,7 +1350,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         addToCart(local, 1, { fromScan: true });
         playScanSound('add');
         showToast(`Scanned ${local.name}`);
-        return;
+        return true;
       }
 
       // A unit barcode (bag/box/case or the minor unit) — same product, billed in that unit.
@@ -1360,7 +1359,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         addToCart(byUnit.product, 1, { fromScan: true, unit: byUnit.unit });
         playScanSound('add');
         showToast(`Scanned ${byUnit.product.name} (${byUnit.unit})`);
-        return;
+        return true;
       }
 
       const decodedLocal = decodeBarcodeFormatLocal(settings, trimmed, products);
@@ -1371,7 +1370,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
           ? `${decodedLocal.quantity.toFixed(3)} ${decodedLocal.product.unit || 'kg'}`
           : `${decodedLocal.quantity} pcs`;
         showToast(`${decodedLocal.product.name} — ${qtyLabel} added from label.`);
-        return;
+        return true;
       }
 
       // The fetch and the cart-add are deliberately NOT in the same try/catch: a bug while adding an
@@ -1392,7 +1391,7 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
             ? `${decoded.product.name} — ${Number(decoded.quantity).toFixed(3)} ${decoded.product.unit} from label.`
             : `Scanned ${decoded.product.name}`
         );
-        return;
+        return true;
       }
 
       try {
@@ -1400,12 +1399,56 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
         addToCart(found, 1, { fromScan: true });
         playScanSound('add');
         showToast(`Scanned ${found.name}`);
+        return true;
       } catch {
         playScanSound('error');
         showToast(`No product matches barcode ${trimmed}`, 'error');
+        return false;
       }
     },
-    [products, addToCart, showToast, settings, session]
+    [products, addToCart, showToast, settings]
+  );
+
+  const resolveScan = useCallback(
+    async (code) => {
+      const trimmed = code.trim();
+      if (!trimmed) return;
+
+      if (session?.status !== 'open') {
+        setShowSession(true);
+        showToast('Cash Counter is closed. Please open drawer to start billing.', 'error');
+        return;
+      }
+
+      // Cool-down: a scan within a second of the last accepted one is ignored, so a double read or a
+      // scanner held on the label can't bill the same item twice. Applied once for the whole burst
+      // below, not per code, so a multi-code scan isn't throttled against itself.
+      const now = Date.now();
+      if (now - lastScanAtRef.current < SCAN_COOLDOWN_MS) return;
+      lastScanAtRef.current = now;
+
+      // Some 2D imagers/scales read several labels in one pass and emit them concatenated in a
+      // single burst, separated by "#" (e.g. "W10009800345#w100056700987#w10043200987"). Split on
+      // that and resolve each code in turn, rather than feeding the whole concatenated string to a
+      // single-code decoder, where it would just fail to match anything.
+      const codes = trimmed
+        .split('#')
+        .map((c) => c.trim())
+        .filter(Boolean);
+
+      if (codes.length <= 1) {
+        await resolveOneCode(trimmed);
+        return;
+      }
+
+      let okCount = 0;
+      for (const c of codes) {
+        // eslint-disable-next-line no-await-in-loop -- codes in one burst are resolved in scan order, deliberately sequential.
+        if (await resolveOneCode(c)) okCount += 1;
+      }
+      if (okCount > 1) showToast(`Batch scan: ${okCount} of ${codes.length} items added.`);
+    },
+    [resolveOneCode, showToast, session]
   );
 
   const openDrawerManually = async () => {
@@ -1445,8 +1488,10 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
 
       // Alphanumeric, not just digits — a weight-embedded barcode (e.g. "10001W0002375") carries a
       // letter flag in the middle, which a digits-only buffer would silently drop, corrupting every
-      // weight-embedded scan. No other single-character global shortcut is bound here, so this is safe.
-      if (/^[0-9a-zA-Z]$/.test(e.key)) {
+      // weight-embedded scan. "#" is also captured: some scanners emit several labels in one burst
+      // separated by it (see resolveScan), and dropping it would fuse those codes into one unreadable
+      // string. No other single-character global shortcut is bound here, so this is safe.
+      if (/^[0-9a-zA-Z#]$/.test(e.key)) {
         scanBuffer.current += e.key;
         clearTimeout(scanTimer.current);
         scanTimer.current = setTimeout(() => {
@@ -3081,6 +3126,17 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
           <div className="space-y-2">
             {getSellableBatches(batchPickerTarget.product).map((b, idx) => {
               const isExpired = b.expiryDate && new Date(b.expiryDate) < new Date();
+              // Same re-resolution as commitAddToCart — shows the price sheet/discount-adjusted price for
+              // this batch, not its raw sellPrice, so what the cashier sees here matches what gets billed.
+              const batchDisplayPrice = b.sellPrice != null
+                ? resolveProductPricing(
+                    batchPickerTarget.product,
+                    customers.find((c) => c.id === customerId),
+                    priceSheets,
+                    priceSheetId,
+                    b.sellPrice
+                  ).price
+                : null;
               return (
                 <button
                   key={b.id}
@@ -3098,9 +3154,9 @@ export default function POSTerminal({ tenant, showToast, settings: appSettings, 
                       {idx === 0 && (
                         <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded-full bg-indigo-600 text-white">Suggested</span>
                       )}
-                      {b.sellPrice != null && (
+                      {batchDisplayPrice != null && (
                         <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600">
-                          {bMoney(b.sellPrice)}/{batchPickerTarget.product.unit}
+                          {bMoney(batchDisplayPrice)}/{batchPickerTarget.product.unit}
                         </span>
                       )}
                     </div>

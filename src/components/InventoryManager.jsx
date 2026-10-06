@@ -32,7 +32,9 @@ import {
   ChevronDown,
   ChevronRight,
   ArrowRight,
-  X as XIcon
+  X as XIcon,
+  QrCode,
+  Lock
 } from 'lucide-react';
 
 import api, { money, API_BASE, fmtDateTime } from '../lib/api';
@@ -43,6 +45,7 @@ import {
   StatTile,
   Button,
   Modal,
+  Drawer,
   Field,
   Input,
   Select,
@@ -219,6 +222,7 @@ export default function InventoryManager({ products, categories, onRefresh, show
       {tab === 'batches' && (
         <BatchesTab
           products={products}
+          warehouses={warehouses}
           showToast={showToast}
           onRefresh={refreshAll}
           storeNearExpiryDays={posSettings.nearExpiryDays}
@@ -603,6 +607,16 @@ const blankProduct = (categories, defaultTaxRate = 5) => ({
   // other part of the form (Generate/Scan/duplicate-check) reads and writes.
   barcodeList: [{ _key: genRowKey(), code: '', type: 'primary' }],
   sku: '',
+  // PLU No — the Product ID segment a weight/QR label embeds (`embeddedId` everywhere else in the
+  // code). Unit (W/P) is `weightFlag` — a free-text field now (not locked to "W"/"P"), so it can
+  // hold whatever value the user's labeling machine expects; it's exported as typed. Left blank,
+  // the weight-barcode SCAN decoder elsewhere still falls back to inferring it from the product's
+  // Unit (see expectedFlag in lib/barcodeDecode.js) — that fallback is unrelated to this form/export.
+  embeddedId: '',
+  weightFlag: '',
+  // P Code — a separate, free-text product code for QR generation. Not the SKU field above, and
+  // not read by the weight-barcode decoder; it's just stored and exported as-is.
+  pCode: '',
   hsn: '',
   unit: 'pcs',
   price: '',
@@ -1010,8 +1024,7 @@ export function ProductFormModal({
   settings,
   onClose,
   onSaved,
-  onCategoryCreated,
-  hideBatches = false
+  onCategoryCreated
 }) {
   // Scan buttons only make sense if the shop has actually set up a scanner in Settings > Hardware —
   // there's no way for a browser to detect a real USB/Bluetooth scanner directly (it just emulates
@@ -1024,9 +1037,6 @@ export function ProductFormModal({
   const [saving, setSaving] = useState(false);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [findingPhoto, setFindingPhoto] = useState(false);
-  const [writeOffTarget, setWriteOffTarget] = useState(null);
-  const [writeOffForm, setWriteOffForm] = useState({ qty: '', reason: 'Expired' });
-  const [writingOff, setWritingOff] = useState(false);
   const [generatingBarcode, setGeneratingBarcode] = useState(false);
   const [scanningBarcode, setScanningBarcode] = useState(false);
   const [barcodeWarning, setBarcodeWarning] = useState(null);
@@ -1493,105 +1503,6 @@ export function ProductFormModal({
 
   
 
-  const addBatchRow = () => {
-    setForm((f) => {
-      const existing = f.batches || [];
-      let maxNum = 0;
-      existing.forEach((b) => {
-        const num = parseInt(b.batchNo, 10);
-        if (!isNaN(num) && String(num) === String(b.batchNo).trim() && num > maxNum) {
-          maxNum = num;
-        }
-      });
-      const nextBatchNo = maxNum > 0 ? String(maxNum + 1) : String(existing.length + 1);
-      const defaultWh = f.primaryWarehouse || (warehouses || []).find((w) => w.isDefault)?.id || warehouses?.[0]?.id || 'wh_main';
-
-      const newBatches = [
-        ...existing,
-        {
-          id: `new_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
-          batchNo: nextBatchNo,
-          mfgDate: '',
-          expiryDate: '',
-          qty: '',
-          costPrice: f.purchasePrice || '',
-          sellPrice: '',
-          mrp: f.mrp || '',
-          warehouseId: defaultWh
-        }
-      ];
-
-      const whMap = {};
-      newBatches.forEach((b) => {
-        const whId = b.warehouseId || defaultWh;
-        whMap[whId] = (whMap[whId] || 0) + (Number(b.qty) || 0);
-      });
-      const stock = newBatches.reduce((sum, b) => sum + (Number(b.qty) || 0), 0);
-
-      return {
-        ...f,
-        batches: newBatches,
-        warehouses: whMap,
-        stock: Math.round(stock * 10000) / 10000
-      };
-    });
-  };
-
-  const updateBatchRow = (index, patch) => {
-    setForm((f) => {
-      const batches = [...(f.batches || [])];
-      batches[index] = { ...batches[index], ...patch };
-      const defaultWh = f.primaryWarehouse || (warehouses || []).find((w) => w.isDefault)?.id || warehouses?.[0]?.id || 'wh_main';
-      const whMap = {};
-      batches.forEach((b) => {
-        const whId = b.warehouseId || defaultWh;
-        whMap[whId] = (whMap[whId] || 0) + (Number(b.qty) || 0);
-      });
-      const stock = batches.reduce((sum, b) => sum + (Number(b.qty) || 0), 0);
-      return { ...f, batches, warehouses: whMap, stock: Math.round(stock * 10000) / 10000 };
-    });
-  };
-
-  const removeBatchRow = (index) => {
-    setForm((f) => {
-      const batches = (f.batches || []).filter((_, i) => i !== index);
-      const defaultWh = f.primaryWarehouse || (warehouses || []).find((w) => w.isDefault)?.id || warehouses?.[0]?.id || 'wh_main';
-      const whMap = {};
-      batches.forEach((b) => {
-        const whId = b.warehouseId || defaultWh;
-        whMap[whId] = (whMap[whId] || 0) + (Number(b.qty) || 0);
-      });
-      const stock = batches.reduce((sum, b) => sum + (Number(b.qty) || 0), 0);
-      return { ...f, batches, warehouses: whMap, stock: Math.round(stock * 10000) / 10000 };
-    });
-  };
-
-  const submitWriteOff = async (e) => {
-    e?.preventDefault();
-    if (!writeOffTarget) return;
-    const qty = Number(writeOffForm.qty);
-    if (!(qty > 0)) {
-      showToast('Enter a quantity to write off.', 'error');
-      return;
-    }
-    setWritingOff(true);
-    try {
-      await api.post('/inventory/batches/writeoff', {
-        productId: writeOffTarget.product.id,
-        batchId: writeOffTarget.batch.id,
-        quantity: qty,
-        reason: writeOffForm.reason
-      });
-      showToast(`Wrote off ${qty} ${writeOffTarget.product.unit} from batch ${writeOffTarget.batch.batchNo}.`);
-      setWriteOffTarget(null);
-      onSaved?.();
-    } catch (err) {
-      showToast(api.message(err, 'Failed to write off batch.'), 'error');
-    } finally {
-      setWritingOff(false);
-    }
-  };
-
   const handleImageUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1648,21 +1559,6 @@ export function ProductFormModal({
     if (!Array.isArray(form.categoryIds) || form.categoryIds.length === 0) {
       showToast('Select at least one category.', 'error');
       return;
-    }
-
-    if (form.trackBatches) {
-      const seen = new Set();
-      const dupe = (form.batches || []).find((b) => {
-        const key = String(b.batchNo || '').trim().toLowerCase();
-        if (!key) return false;
-        if (seen.has(key)) return true;
-        seen.add(key);
-        return false;
-      });
-      if (dupe) {
-        showToast(`Batch number "${dupe.batchNo}" is used more than once — batch numbers must be unique for this product.`, 'error');
-        return;
-      }
     }
 
     const isComposite = form.productType === 'composite';
@@ -1759,7 +1655,10 @@ export function ProductFormModal({
       altUnits,
       comboItems: isCombo ? validComboItems : [],
       recipeItems: isComposite ? validIngredients : [],
-      recipeNotes: isComposite ? form.recipeNotes || '' : ''
+      recipeNotes: isComposite ? form.recipeNotes || '' : '',
+      // Batches are no longer created/edited from the product form — Inventory → Batch Tracking → Batch Edit
+      // owns that now. Omitting the key lets the backend keep the product's existing batches untouched.
+      batches: undefined
     };
 
     if (isComposite && !form.useCustomPricing) {
@@ -2406,6 +2305,50 @@ export function ProductFormModal({
               </div>
             </div>
 
+            {/* QR Code label fields — PLU No, P Code, and Unit (W/P). P Code here is its own
+                free-text field, separate from the SKU Code field in the Barcode section above. */}
+            <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
+              <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">QR Code Fields</h4>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <Field label="PLU No" hint="The Product ID a weight/QR label embeds for this item.">
+                  <div className="relative">
+                    <Input
+                      inputMode="numeric"
+                      value={form.embeddedId || ''}
+                      onChange={(e) => setForm({ ...form, embeddedId: e.target.value.replace(/\D/g, '') })}
+                      placeholder="e.g. 10001"
+                      className="font-mono text-xs font-bold pl-8"
+                    />
+                    <QrCode className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                  </div>
+                </Field>
+
+                <Field label="P Code" hint="Separate from SKU Code — used for QR generation only.">
+                  <div className="relative">
+                    <Input
+                      value={form.pCode || ''}
+                      onChange={(e) => setForm({ ...form, pCode: e.target.value })}
+                      placeholder="e.g. PC-1001"
+                      className="font-mono text-xs font-bold pl-8"
+                    />
+                    <Tag className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                  </div>
+                </Field>
+
+                <Field label="Unit (W/P)" hint="Whatever your machine expects for this — a letter, a number, anything. Exported exactly as typed.">
+                  <div className="relative">
+                    <Input
+                      value={form.weightFlag || ''}
+                      onChange={(e) => setForm({ ...form, weightFlag: e.target.value })}
+                      placeholder="e.g. W, P, 0, 1…"
+                      className="font-mono text-xs font-bold pl-8"
+                    />
+                    <Boxes className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                  </div>
+                </Field>
+              </div>
+            </div>
+
             {form.productType === 'service' ? (
               <div className="p-3 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
                 <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">Service Pricing</h4>
@@ -2611,23 +2554,33 @@ export function ProductFormModal({
                     />
                   </Field>
                 </div>
+              </div>
+            )}
 
-                <div className="pt-2 border-t border-[color:var(--border-subtle)]">
-                  <label className="flex items-center gap-2 text-xs font-bold cursor-pointer text-indigo-600 dark:text-indigo-400">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(form.requiresWeight)}
-                      onChange={(e) => setForm({ ...form, requiresWeight: e.target.checked })}
-                      className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
-                    />
-                    Weight Scale Item
-                  </label>
-                  <p className="text-[10px] text-[color:var(--text-muted)] mt-1 pl-6">
-                    Ticked: billing reads the weight from the scale. Unticked: it is billed in its unit as usual.
-                  </p>
-                </div>
+            {/* Product Options — Weight Scale Item, Enable Batch, Enable Serial, Warranty-Enabled
+                Product, all as uniform full-width rows in one list. */}
+            {form.productType !== 'composite' && form.productType !== 'combo' && (
+              <div className="p-3.5 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
+                <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider">Product Options</h4>
 
-                {(batchTrackingEnabled || form.trackBatches) ? (
+                {form.productType !== 'service' && (
+                  <div className="pt-2 border-t border-[color:var(--border-subtle)]">
+                    <label className="flex items-center gap-2 text-xs font-bold cursor-pointer text-indigo-600 dark:text-indigo-400">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(form.requiresWeight)}
+                        onChange={(e) => setForm({ ...form, requiresWeight: e.target.checked })}
+                        className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+                      />
+                      Weight Scale Item
+                    </label>
+                    <p className="text-[10px] text-[color:var(--text-muted)] mt-1 pl-6">
+                      Ticked: billing reads the weight from the scale. Unticked: it is billed in its unit as usual.
+                    </p>
+                  </div>
+                )}
+
+                {form.productType !== 'service' && ((batchTrackingEnabled || form.trackBatches) ? (
                   <div className="pt-2 border-t border-[color:var(--border-subtle)]">
                     <label
                       className={`flex items-center gap-2 text-xs font-bold ${
@@ -2657,9 +2610,9 @@ export function ProductFormModal({
                   <div className="text-[10px] text-[color:var(--text-muted)] pt-2 border-t border-[color:var(--border-subtle)]">
                     Batch tracking is off for this store. Enable it under Settings → Billing & Tax → Inventory to use it here.
                   </div>
-                )}
+                ))}
 
-                {(serialTrackingEnabled || form.trackSerials) ? (
+                {form.productType !== 'service' && ((serialTrackingEnabled || form.trackSerials) ? (
                   <div className="pt-2 border-t border-[color:var(--border-subtle)]">
                     <label className="flex items-center gap-2 text-xs font-bold cursor-pointer text-indigo-600 dark:text-indigo-400">
                       <input
@@ -2679,7 +2632,45 @@ export function ProductFormModal({
                   <div className="text-[10px] text-[color:var(--text-muted)] pt-2 border-t border-[color:var(--border-subtle)]">
                     Serial number tracking is off for this store. Enable it under Settings → Billing & Tax → Inventory to use it here.
                   </div>
-                )}
+                ))}
+
+                <div className="pt-2 border-t border-[color:var(--border-subtle)]">
+                  <label className="flex items-center gap-2 text-xs font-bold cursor-pointer text-indigo-600 dark:text-indigo-400">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(form.hasWarranty)}
+                      onChange={(e) => setForm({ ...form, hasWarranty: e.target.checked })}
+                      className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+                    />
+                    Warranty-Enabled Product
+                  </label>
+                  {form.hasWarranty && (
+                    <div className="grid grid-cols-2 gap-3 pl-6 mt-2">
+                      <Field label="Warranty Period">
+                        <Input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={form.warrantyDurationValue}
+                          onChange={(e) => setForm({ ...form, warrantyDurationValue: e.target.value.replace(/\D/g, '') })}
+                        />
+                      </Field>
+                      <Field label="Unit">
+                        <Select
+                          value={form.warrantyDurationUnit}
+                          onChange={(e) => setForm({ ...form, warrantyDurationUnit: e.target.value })}
+                        >
+                          <option value="days">Day(s)</option>
+                          <option value="months">Month(s)</option>
+                          <option value="years">Year(s)</option>
+                        </Select>
+                      </Field>
+                      <p className="col-span-2 text-[10px] text-[color:var(--text-muted)] -mt-1">
+                        The warranty period starts counting from the day a unit is actually billed to a customer, not from today.
+                      </p>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 
@@ -2687,187 +2678,49 @@ export function ProductFormModal({
               <SerialNumberSection form={form} setForm={setForm} />
             )}
 
-            {form.productType !== 'composite' && form.productType !== 'combo' && (
-              <div className="p-3.5 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-3">
-                <label className="flex items-center gap-2 text-xs font-bold cursor-pointer text-indigo-600 dark:text-indigo-400">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(form.hasWarranty)}
-                    onChange={(e) => setForm({ ...form, hasWarranty: e.target.checked })}
-                    className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
-                  />
-                  Warranty-Enabled Product
-                </label>
-                {form.hasWarranty && (
-                  <div className="grid grid-cols-2 gap-3 pl-6">
-                    <Field label="Warranty Period">
-                      <Input
-                        type="number"
-                        min="1"
-                        step="1"
-                        value={form.warrantyDurationValue}
-                        onChange={(e) => setForm({ ...form, warrantyDurationValue: e.target.value.replace(/\D/g, '') })}
-                      />
-                    </Field>
-                    <Field label="Unit">
-                      <Select
-                        value={form.warrantyDurationUnit}
-                        onChange={(e) => setForm({ ...form, warrantyDurationUnit: e.target.value })}
-                      >
-                        <option value="days">Day(s)</option>
-                        <option value="months">Month(s)</option>
-                        <option value="years">Year(s)</option>
-                      </Select>
-                    </Field>
-                    <p className="col-span-2 text-[10px] text-[color:var(--text-muted)] -mt-1">
-                      The warranty period starts counting from the day a unit is actually billed to a customer, not from today.
-                    </p>
+            {form.trackBatches && form.productType !== 'service' && form.productType !== 'composite' && form.productType !== 'combo' && (
+              <div className="p-3.5 rounded-xl border border-[color:var(--border-subtle)] bg-[color:var(--bg-subtle)] space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider flex items-center gap-2">
+                    <History className="h-3.5 w-3.5" />
+                    Batches ({(form.batches || []).length}) — View Only
+                  </h4>
+                </div>
+                {(form.batches || []).length === 0 ? (
+                  <p className="text-[11px] text-[color:var(--text-muted)]">
+                    No batches yet. Stock received via Purchase will land here automatically, or add opening stock from Batch Edit once this product is saved.
+                  </p>
+                ) : (
+                  <div className="overflow-x-auto -mx-1">
+                    <table className="w-full text-[11px] text-left">
+                      <thead className="text-[color:var(--text-muted)] uppercase">
+                        <tr>
+                          <th className="py-1.5 px-1.5">Batch No.</th>
+                          <th className="py-1.5 px-1.5">Mfg Date</th>
+                          <th className="py-1.5 px-1.5">Expiry Date</th>
+                          <th className="py-1.5 px-1.5 text-right">Qty</th>
+                          <th className="py-1.5 px-1.5">Source</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                        {(form.batches || []).map((b, idx) => (
+                          <tr key={b.id || idx}>
+                            <td className="py-1.5 px-1.5 font-mono font-bold text-[color:var(--text-primary)]">{b.batchNo || '—'}</td>
+                            <td className="py-1.5 px-1.5 text-[color:var(--text-muted)]">{b.mfgDate ? String(b.mfgDate).slice(0, 10) : '—'}</td>
+                            <td className="py-1.5 px-1.5 text-[color:var(--text-muted)]">{b.expiryDate ? String(b.expiryDate).slice(0, 10) : '—'}</td>
+                            <td className="py-1.5 px-1.5 text-right font-mono">{b.qty ?? 0} {form.unit}</td>
+                            <td className="py-1.5 px-1.5">
+                              <Badge tone={BATCH_SOURCE_TONE[b.source] || 'neutral'}>{BATCH_SOURCE_LABEL[b.source] || 'Manual'}</Badge>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 )}
-              </div>
-            )}
-
-            {!hideBatches && form.trackBatches && form.productType !== 'service' && form.productType !== 'composite' && form.productType !== 'combo' && (
-              <div className="p-3.5 rounded-xl border border-amber-200 dark:border-amber-800/80 bg-amber-50/40 dark:bg-amber-950/20 space-y-3">
-                <div>
-                  <h4 className="text-xs font-bold text-[color:var(--text-primary)] uppercase tracking-wider flex items-center gap-2">
-                    <History className="h-4 w-4 text-amber-600 dark:text-amber-400" />
-                    Batches
-                  </h4>
-                  <p className="text-[11px] text-[color:var(--text-muted)] mt-0.5">
-                    New batches are normally added automatically when you receive a Purchase for this product. Add one here for opening stock or a manual correction.
-                  </p>
-                </div>
-
-                <Field
-                  label="Near-Expiry Alert Window (days)"
-                  hint="Overrides the store default for this product only — e.g. eggs need a much shorter warning than rice. Leave blank to use the store default."
-                >
-                  <Input
-                    type="number"
-                    min="1"
-                    value={form.nearExpiryDays}
-                    onChange={(e) => setForm({ ...form, nearExpiryDays: e.target.value })}
-                    placeholder="Store default"
-                    className="max-w-[160px]"
-                  />
-                </Field>
-
-                <div className="space-y-2">
-                  {(form.batches || []).map((row, idx) => (
-                    <div key={row.id || idx} className="flex flex-wrap items-end gap-2 p-2.5 rounded-lg border border-[color:var(--border-subtle)] bg-[color:var(--bg-surface)]">
-                      <Field label="Batch / Lot No." className="w-36">
-                        <Input
-                          value={row.batchNo || ''}
-                          onChange={(e) => updateBatchRow(idx, { batchNo: e.target.value })}
-                          placeholder="Auto if blank"
-                          className="text-xs"
-                        />
-                      </Field>
-                      <Field label="Mfg. Date" className="w-36">
-                        <Input
-                          type="date"
-                          value={row.mfgDate ? String(row.mfgDate).slice(0, 10) : ''}
-                          onChange={(e) => updateBatchRow(idx, { mfgDate: e.target.value })}
-                          className="text-xs"
-                        />
-                      </Field>
-                      <Field label="Expiry Date" className="w-36">
-                        <Input
-                          type="date"
-                          value={row.expiryDate ? String(row.expiryDate).slice(0, 10) : ''}
-                          onChange={(e) => updateBatchRow(idx, { expiryDate: e.target.value })}
-                          className="text-xs"
-                        />
-                      </Field>
-                      <Field label="Qty" className="w-20">
-                        <Input
-                          type="number"
-                          step="any"
-                          min="0"
-                          value={row.qty ?? ''}
-                          onChange={(e) => updateBatchRow(idx, { qty: e.target.value })}
-                          placeholder="Qty"
-                          className="text-xs"
-                        />
-                      </Field>
-                      <Field label="Cost Price (₹)" className="w-24">
-                        <Input
-                          type="number"
-                          step="any"
-                          value={row.costPrice ?? ''}
-                          onChange={(e) => updateBatchRow(idx, { costPrice: e.target.value })}
-                          placeholder="Cost"
-                          className="text-xs"
-                        />
-                      </Field>
-                      <Field label="Selling Price (₹)" hint="Blank = product's price" className="w-32">
-                        <Input
-                          type="number"
-                          step="any"
-                          value={row.sellPrice ?? ''}
-                          onChange={(e) => updateBatchRow(idx, { sellPrice: e.target.value })}
-                          placeholder={form.price ? `Auto ₹${form.price}` : 'Sell ₹'}
-                          className="text-xs"
-                        />
-                      </Field>
-                      <Field label="MRP (₹)" hint="Blank = product's MRP" className="w-28">
-                        <Input
-                          type="number"
-                          step="any"
-                          value={row.mrp ?? ''}
-                          onChange={(e) => updateBatchRow(idx, { mrp: e.target.value })}
-                          placeholder={form.mrp ? `Auto ₹${form.mrp}` : 'MRP ₹'}
-                          className="text-xs"
-                        />
-                      </Field>
-                      {(warehouses || []).length > 0 && (
-                        <Field label="Warehouse" className="w-32">
-                          <Select
-                            value={row.warehouseId || form.primaryWarehouse || warehouses.find((w) => w.isDefault)?.id || warehouses[0]?.id}
-                            onChange={(e) => updateBatchRow(idx, { warehouseId: e.target.value })}
-                            className="text-xs"
-                          >
-                            {warehouses.map((w) => (
-                              <option key={w.id} value={w.id}>{w.name}</option>
-                            ))}
-                          </Select>
-                        </Field>
-                      )}
-                      <div className="flex items-center gap-0.5 ml-auto self-center">
-                        {editing && !String(row.id).startsWith('new_') && Number(row.qty) > 0 && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setWriteOffForm({ qty: '', reason: 'Expired' });
-                              setWriteOffTarget({ product: editing, batch: row });
-                            }}
-                            className="p-1 rounded-lg hover:bg-amber-50 dark:hover:bg-amber-950/40 text-[color:var(--text-muted)] hover:text-amber-600"
-                            title="Write off (expired/damaged)"
-                          >
-                            <AlertTriangle className="h-3.5 w-3.5" />
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => removeBatchRow(idx)}
-                          className="p-1 rounded-lg hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)] hover:text-red-600"
-                          title="Remove row"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-
-                  <Button type="button" size="sm" variant="secondary" icon={Plus} onClick={addBatchRow}>
-                    Add Batch
-                  </Button>
-                </div>
-
-                <div className="text-[11px] font-bold text-amber-700 dark:text-amber-400">
-                  Total across batches: {form.stock || 0} {form.unit}
-                </div>
+                <p className="text-[10px] text-[color:var(--text-muted)]">
+                  To add, edit, or remove a batch, use Inventory → Batch Tracking → Batch Edit.
+                </p>
               </div>
             )}
 
@@ -3086,46 +2939,6 @@ export function ProductFormModal({
             </div>
           </form>
         </Modal>
-
-        {/* Batch Write-Off Modal */}
-        {writeOffTarget && (
-          <Modal
-            open={true}
-            title={`Write Off Batch ${writeOffTarget.batch.batchNo}`}
-            icon={AlertTriangle}
-            onClose={() => setWriteOffTarget(null)}
-          >
-            <form onSubmit={submitWriteOff} className="space-y-4">
-              <p className="text-xs text-[color:var(--text-muted)]">
-                {writeOffTarget.product.name} — {writeOffTarget.batch.qty} {writeOffTarget.product.unit} available in this batch
-                {writeOffTarget.batch.expiryDate ? ` (expires ${String(writeOffTarget.batch.expiryDate).slice(0, 10)})` : ''}.
-              </p>
-              <Field label={`Quantity to Write Off (max ${writeOffTarget.batch.qty})`}>
-                <Input
-                  type="number"
-                  step="any"
-                  min="0"
-                  max={writeOffTarget.batch.qty}
-                  value={writeOffForm.qty}
-                  onChange={(e) => setWriteOffForm({ ...writeOffForm, qty: e.target.value })}
-                  autoFocus
-                />
-              </Field>
-              <Field label="Reason">
-                <Select value={writeOffForm.reason} onChange={(e) => setWriteOffForm({ ...writeOffForm, reason: e.target.value })}>
-                  <option value="Expired">Expired</option>
-                  <option value="Damaged">Damaged</option>
-                  <option value="Quality Issue">Quality Issue</option>
-                  <option value="Other">Other</option>
-                </Select>
-              </Field>
-              <div className="flex justify-end gap-2 pt-3 border-t border-[color:var(--border-subtle)]">
-                <Button type="button" variant="secondary" onClick={() => setWriteOffTarget(null)}>Cancel</Button>
-                <Button icon={AlertTriangle} type="submit" loading={writingOff} disabled={writingOff}>Write Off</Button>
-              </div>
-            </form>
-          </Modal>
-        )}
 
         {/* Category Quick-Create Modal */}
         {showCategoryModal && (
@@ -5068,8 +4881,8 @@ function HistoryTab({ products }) {
 
 /* --------------------- Batch Tracking Tab: every batch across every batch-tracked product, with write-off --------------------- */
 
-function BatchesTab({ products, showToast, onRefresh, storeNearExpiryDays }) {
-  const [view, setView] = useState('stock'); // 'stock' | 'sales'
+function BatchesTab({ products, warehouses, showToast, onRefresh, storeNearExpiryDays }) {
+  const [view, setView] = useState('stock'); // 'stock' | 'sales' | 'edit'
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [productFilter, setProductFilter] = useState(''); // '' = all products, else a product id
@@ -5206,7 +5019,8 @@ function BatchesTab({ products, showToast, onRefresh, storeNearExpiryDays }) {
       <div className="flex items-center gap-1.5 p-1 rounded-xl bg-[color:var(--bg-subtle)] border border-[color:var(--border-subtle)] w-fit">
         {[
           { id: 'stock', label: 'Current Stock' },
-          { id: 'sales', label: 'Sales Report' }
+          { id: 'sales', label: 'Sales Report' },
+          { id: 'edit', label: 'Batch Edit' }
         ].map((v) => (
           <button
             key={v.id}
@@ -5221,11 +5035,13 @@ function BatchesTab({ products, showToast, onRefresh, storeNearExpiryDays }) {
         ))}
       </div>
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
-        <StatTile label="Batches Shown" value={rows.length} icon={AlertTriangle} />
-        <StatTile label="Stock Value (Cost)" value={money(valuation.costValue, { decimals: false })} icon={IndianRupee} />
-        <StatTile label="Stock Value (Retail)" value={money(valuation.retailValue, { decimals: false })} tone="accent" />
-      </div>
+      {view !== 'edit' && (
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
+          <StatTile label="Batches Shown" value={rows.length} icon={AlertTriangle} />
+          <StatTile label="Stock Value (Cost)" value={money(valuation.costValue, { decimals: false })} icon={IndianRupee} />
+          <StatTile label="Stock Value (Retail)" value={money(valuation.retailValue, { decimals: false })} tone="accent" />
+        </div>
+      )}
 
       {view === 'stock' && (
         <>
@@ -5366,6 +5182,16 @@ function BatchesTab({ products, showToast, onRefresh, storeNearExpiryDays }) {
         </Panel>
       )}
 
+      {view === 'edit' && (
+        <BatchEditTab
+          products={products}
+          warehouses={warehouses}
+          showToast={showToast}
+          onRefresh={onRefresh}
+          storeNearExpiryDays={storeNearExpiryDays}
+        />
+      )}
+
       {returnTarget && (
         <Modal
           open={true}
@@ -5440,6 +5266,484 @@ function BatchesTab({ products, showToast, onRefresh, storeNearExpiryDays }) {
               <Button icon={AlertTriangle} type="submit" loading={writingOff} disabled={writingOff}>Write Off</Button>
             </div>
           </form>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* --------------------- Batch Edit: a view inside the Batch Tracking tab (alongside Current Stock / Sales Report) — the one place batches are created or edited. Purchase-sourced batches are read-only here, corrected from the Purchase itself or via Write Off / Return on the Current Stock view instead. --------------------- */
+
+const BATCH_SOURCE_LABEL = {
+  purchase: 'Purchase',
+  manual: 'Manual',
+  opening: 'Opening Stock',
+  restored: 'Restored'
+};
+
+const BATCH_SOURCE_TONE = {
+  purchase: 'info',
+  manual: 'accent',
+  opening: 'neutral',
+  restored: 'warning'
+};
+
+function blankBatchEditForm(product, warehouses) {
+  const defaultWh = product?.primaryWarehouse || (warehouses || []).find((w) => w.isDefault)?.id || warehouses?.[0]?.id || 'wh_main';
+  return {
+    batchNo: '',
+    barcode: '',
+    mfgDate: '',
+    expiryDate: '',
+    qty: '',
+    costPrice: product?.purchasePrice || '',
+    sellPrice: '',
+    mrp: product?.mrp || '',
+    warehouseId: defaultWh
+  };
+}
+
+function BatchEditTab({ products, warehouses, showToast, onRefresh, storeNearExpiryDays }) {
+  const [productId, setProductId] = useState('');
+  const [query, setQuery] = useState('');
+  const [modal, setModal] = useState(null); // { mode: 'add' | 'edit', batch? }
+  const [form, setForm] = useState(() => blankBatchEditForm());
+  const [saving, setSaving] = useState(false);
+  const [generatingBarcode, setGeneratingBarcode] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const batchableProducts = useMemo(
+    () => (products || []).filter((p) => p.trackBatches).sort((a, b) => a.name.localeCompare(b.name)),
+    [products]
+  );
+
+  const filteredProducts = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return batchableProducts;
+    return batchableProducts.filter(
+      (p) => p.name.toLowerCase().includes(needle) || String(p.sku || '').toLowerCase().includes(needle)
+    );
+  }, [batchableProducts, query]);
+
+  // Dropped from the list (tracking turned off, deleted, etc.) while it was selected — fall back to nothing selected rather than showing a stale product.
+  useEffect(() => {
+    if (productId && !batchableProducts.some((p) => p.id === productId)) {
+      setProductId('');
+    }
+  }, [batchableProducts, productId]);
+
+  const product = useMemo(() => batchableProducts.find((p) => p.id === productId) || null, [batchableProducts, productId]);
+
+  const rows = useMemo(() => {
+    if (!product) return [];
+    const today = new Date();
+    const windowDays = resolveNearExpiryDays(product, storeNearExpiryDays);
+    const sorted = [...(product.batches || [])].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    return sorted.map((b) => {
+      let status = 'active';
+      let days = null;
+      if (b.expiryDate) {
+        days = Math.ceil((new Date(b.expiryDate) - today) / 86400000);
+        if (days < 0) status = 'expired';
+        else if (days <= windowDays) status = 'near';
+      }
+      return { batch: b, status, days };
+    });
+  }, [product, storeNearExpiryDays]);
+
+  const warehouseName = (id) => (warehouses || []).find((w) => w.id === id)?.name || id || '—';
+
+  const openAdd = () => {
+    setForm(blankBatchEditForm(product, warehouses));
+    setModal({ mode: 'add' });
+  };
+
+  const openEdit = (batch) => {
+    setForm({
+      batchNo: batch.batchNo || '',
+      barcode: batch.barcode || '',
+      mfgDate: batch.mfgDate ? String(batch.mfgDate).slice(0, 10) : '',
+      expiryDate: batch.expiryDate ? String(batch.expiryDate).slice(0, 10) : '',
+      qty: batch.qty ?? '',
+      costPrice: batch.costPrice ?? '',
+      sellPrice: batch.sellPrice ?? '',
+      mrp: batch.mrp ?? '',
+      warehouseId: batch.warehouseId || product?.primaryWarehouse || (warehouses || []).find((w) => w.isDefault)?.id || warehouses?.[0]?.id || 'wh_main'
+    });
+    setModal({ mode: 'edit', batch });
+  };
+
+  // Reserves the next free batch barcode (its own 2xxxx… band, separate from product barcodes/SKUs) — a preview only, nothing is persisted until the batch itself is saved.
+  const generateBatchBarcode = async () => {
+    setGeneratingBarcode(true);
+    try {
+      const res = await api.post('/inventory/batches/generate-barcode', {});
+      const code = res.data?.barcode || res.barcode;
+      setForm((f) => ({ ...f, barcode: code }));
+    } catch (err) {
+      showToast(api.message(err, 'Could not generate a barcode.'), 'error');
+    } finally {
+      setGeneratingBarcode(false);
+    }
+  };
+
+  const submit = async (e) => {
+    e?.preventDefault();
+    if (!product || !modal) return;
+    if (!(Number(form.qty) >= 0)) {
+      showToast('Enter a valid quantity.', 'error');
+      return;
+    }
+    setSaving(true);
+    const payload = {
+      productId: product.id,
+      batchNo: form.batchNo,
+      barcode: form.barcode,
+      mfgDate: form.mfgDate || null,
+      expiryDate: form.expiryDate || null,
+      qty: form.qty,
+      costPrice: form.costPrice,
+      sellPrice: form.sellPrice,
+      mrp: form.mrp,
+      warehouseId: form.warehouseId
+    };
+    try {
+      if (modal.mode === 'add') {
+        await api.post('/inventory/batches', payload);
+        showToast('Batch created.');
+      } else {
+        await api.put(`/inventory/batches/${modal.batch.id}`, payload);
+        showToast('Batch updated.');
+      }
+      setModal(null);
+      onRefresh();
+    } catch (err) {
+      showToast(api.message(err, 'Failed to save batch.'), 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const submitDelete = async () => {
+    if (!deleteTarget || !product) return;
+    setDeleting(true);
+    try {
+      await api.del(`/inventory/batches/${deleteTarget.id}?productId=${product.id}`);
+      showToast(`Batch ${deleteTarget.batchNo} deleted.`);
+      setDeleteTarget(null);
+      onRefresh();
+    } catch (err) {
+      showToast(api.message(err, 'Failed to delete batch.'), 'error');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[280px_1fr] lg:items-start">
+        {/* Product picker */}
+        <Panel className="lg:sticky lg:top-4">
+          <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-2">
+            <Tag className="h-3.5 w-3.5" />
+            Batch-Tracked Products
+          </h4>
+          <SearchInput value={query} onChange={setQuery} placeholder="Search product..." className="w-full mb-3" />
+          {batchableProducts.length === 0 ? (
+            <EmptyState
+              icon={Tag}
+              title="No batch-tracked products"
+              hint={'Turn on "Enable Batch" for a product first — it\'ll show up here to add or edit its batches.'}
+            />
+          ) : filteredProducts.length === 0 ? (
+            <p className="text-[11px] text-[color:var(--text-muted)] px-1 py-4 text-center">No products match "{query}".</p>
+          ) : (
+            <div className="space-y-1 max-h-[65vh] overflow-y-auto -mr-1 pr-1">
+              {filteredProducts.map((p) => {
+                const count = (p.batches || []).length;
+                const active = p.id === productId;
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => setProductId(p.id)}
+                    className={cx(
+                      'w-full flex items-center justify-between gap-2 rounded-xl px-3 py-2 text-left text-xs font-bold transition-colors',
+                      active ? 'bg-indigo-600 text-white' : 'hover:bg-[color:var(--bg-subtle)] text-[color:var(--text-primary)]'
+                    )}
+                  >
+                    <span className="truncate">{p.name}</span>
+                    <span
+                      className={cx(
+                        'shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-extrabold',
+                        active ? 'bg-white/20 text-white' : 'bg-[color:var(--bg-subtle)] text-[color:var(--text-muted)]'
+                      )}
+                    >
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </Panel>
+
+        {/* Selected product's batches */}
+        <div className="space-y-4 min-w-0">
+          {!product ? (
+            <Panel>
+              <EmptyState
+                icon={Edit3}
+                title="Select a product"
+                hint="Pick a batch-tracked product on the left to create its first batch or edit an existing one."
+              />
+            </Panel>
+          ) : (
+            <>
+              <div className="flex flex-wrap items-center justify-between gap-3 bg-[color:var(--bg-surface)] p-4 rounded-2xl border border-[color:var(--border-subtle)]">
+                <div className="min-w-0">
+                  <div className="text-sm font-extrabold text-[color:var(--text-primary)] truncate">{product.name}</div>
+                  <div className="text-[11px] text-[color:var(--text-muted)] mt-0.5">
+                    Total stock:{' '}
+                    <span className="font-mono font-bold text-[color:var(--text-primary)]">
+                      {product.stock || 0} {product.unit}
+                    </span>{' '}
+                    across {(product.batches || []).length} batch{(product.batches || []).length === 1 ? '' : 'es'}
+                  </div>
+                </div>
+                <Button variant="primary" icon={Plus} onClick={openAdd}>Add Batch</Button>
+              </div>
+
+              <Panel>
+                <h4 className="text-xs font-bold text-[color:var(--text-secondary)] uppercase tracking-wider mb-3 flex items-center gap-2">
+                  <AlertTriangle className="h-3.5 w-3.5" />
+                  Batches ({rows.length})
+                </h4>
+                {rows.length === 0 ? (
+                  <EmptyState
+                    icon={AlertTriangle}
+                    title="No batches yet"
+                    hint="Add the first batch below — for opening stock or a manual correction. Stock received via Purchase will also land here automatically, going forward."
+                    action={<Button variant="primary" icon={Plus} size="sm" onClick={openAdd}>Add Batch</Button>}
+                  />
+                ) : (
+                  <div className="overflow-x-auto max-h-[65vh]">
+                    <table className="w-full text-xs text-left">
+                      <thead className="bg-[color:var(--bg-subtle)] font-bold text-[color:var(--text-muted)] uppercase tracking-wide border-b border-[color:var(--border-subtle)] sticky top-0">
+                        <tr>
+                          <th className="py-2 px-3">Batch No.</th>
+                          <th className="py-2 px-3">Barcode</th>
+                          <th className="py-2 px-3">Mfg Date</th>
+                          <th className="py-2 px-3">Expiry Date</th>
+                          <th className="py-2 px-3 text-right">Qty</th>
+                          <th className="py-2 px-3">Status</th>
+                          <th className="py-2 px-3">Source</th>
+                          <th className="py-2 px-3 text-right">Cost (₹)</th>
+                          <th className="py-2 px-3 text-right">Sell Price (₹)</th>
+                          <th className="py-2 px-3 text-right">MRP (₹)</th>
+                          <th className="py-2 px-3">Warehouse</th>
+                          <th className="py-2 px-3 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[color:var(--border-subtle)]">
+                        {rows.map(({ batch: b, status, days }) => {
+                          const locked = b.source === 'purchase';
+                          return (
+                            <tr key={b.id} className="hover:bg-[color:var(--bg-subtle)]/60">
+                              <td className="py-2 px-3 font-mono font-bold">
+                                {locked ? (
+                                  <span className="text-[color:var(--text-primary)]">{b.batchNo}</span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => openEdit(b)}
+                                    className="text-indigo-600 dark:text-indigo-400 hover:underline underline-offset-2"
+                                    title="Click to edit this batch"
+                                  >
+                                    {b.batchNo}
+                                  </button>
+                                )}
+                              </td>
+                              <td className="py-2 px-3 font-mono text-[color:var(--text-secondary)]">{b.barcode || <span className="text-[color:var(--text-muted)]">—</span>}</td>
+                              <td className="py-2 px-3 text-[color:var(--text-muted)]">{b.mfgDate ? String(b.mfgDate).slice(0, 10) : '—'}</td>
+                              <td className={cx('py-2 px-3', status === 'expired' ? 'font-bold text-rose-600 dark:text-rose-400' : status === 'near' ? 'font-bold text-amber-600 dark:text-amber-400' : 'text-[color:var(--text-muted)]')}>
+                                {b.expiryDate ? String(b.expiryDate).slice(0, 10) : '—'}
+                              </td>
+                              <td className="py-2 px-3 text-right font-mono">{b.qty} {product.unit}</td>
+                              <td className="py-2 px-3">
+                                <Badge tone={status === 'expired' ? 'danger' : status === 'near' ? 'warning' : 'success'}>
+                                  {status === 'expired' ? `Expired ${Math.abs(days)}d ago` : status === 'near' ? `${days}d left` : 'Active'}
+                                </Badge>
+                              </td>
+                              <td className="py-2 px-3">
+                                <Badge tone={BATCH_SOURCE_TONE[b.source] || 'neutral'}>{BATCH_SOURCE_LABEL[b.source] || 'Manual'}</Badge>
+                              </td>
+                              <td className="py-2 px-3 text-right font-mono text-[color:var(--text-secondary)]">{money(b.costPrice)}</td>
+                              <td className="py-2 px-3 text-right font-mono text-[color:var(--text-secondary)]">
+                                {b.sellPrice != null ? money(b.sellPrice) : <span className="text-[color:var(--text-muted)]">Auto</span>}
+                              </td>
+                              <td className="py-2 px-3 text-right font-mono text-[color:var(--text-secondary)]">
+                                {b.mrp != null ? money(b.mrp) : <span className="text-[color:var(--text-muted)]">Auto</span>}
+                              </td>
+                              <td className="py-2 px-3 text-[color:var(--text-muted)]">{warehouseName(b.warehouseId)}</td>
+                              <td className="py-2 px-3 text-right">
+                                {locked ? (
+                                  <span
+                                    title="Created from a Purchase — correct it from that Purchase, or use Write Off / Return to Supplier on the Current Stock view instead."
+                                    className="inline-flex items-center gap-1 text-[color:var(--text-muted)] cursor-not-allowed"
+                                  >
+                                    <Lock className="h-3.5 w-3.5" />
+                                  </span>
+                                ) : (
+                                  <div className="flex items-center justify-end gap-0.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => openEdit(b)}
+                                      className="p-1.5 rounded-lg hover:bg-indigo-50 dark:hover:bg-indigo-950/40 text-[color:var(--text-muted)] hover:text-indigo-600"
+                                      title="Edit batch"
+                                    >
+                                      <Edit3 className="h-3.5 w-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setDeleteTarget(b)}
+                                      className="p-1.5 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950/40 text-[color:var(--text-muted)] hover:text-rose-600"
+                                      title="Delete batch"
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                    </button>
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Panel>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Add / Edit Batch Panel — a right-side drawer (Zoho-style quick-create) rather than a centered modal, so the batch table stays visible behind it */}
+      {modal && product && (
+        <Drawer
+          open={true}
+          title={modal.mode === 'add' ? 'New Batch' : `Edit Batch ${modal.batch.batchNo}`}
+          subtitle={product.name}
+          icon={modal.mode === 'add' ? Plus : Edit3}
+          onClose={() => setModal(null)}
+          footer={
+            <>
+              <Button type="button" variant="secondary" onClick={() => setModal(null)}>Cancel</Button>
+              <Button variant="primary" icon={Save} type="submit" form="batch-edit-form" loading={saving} disabled={saving}>
+                {modal.mode === 'add' ? 'Create Batch' : 'Save Changes'}
+              </Button>
+            </>
+          }
+        >
+          <form id="batch-edit-form" onSubmit={submit} className="space-y-5">
+            <div className="space-y-3">
+              <Field label="Batch / Lot Number" hint="Auto-assigned if left blank">
+                <Input value={form.batchNo} onChange={(e) => setForm({ ...form, batchNo: e.target.value })} placeholder="Auto if blank" autoFocus />
+              </Field>
+              <Field label="Batch Barcode" hint="This lot's own scannable code — separate from the product's barcode">
+                <div className="flex items-center gap-1">
+                  <Input
+                    value={form.barcode}
+                    onChange={(e) => setForm({ ...form, barcode: e.target.value })}
+                    placeholder="Not generated"
+                    className="font-mono"
+                  />
+                  <button
+                    type="button"
+                    disabled={generatingBarcode}
+                    onClick={generateBatchBarcode}
+                    className="shrink-0 p-2 rounded-lg border border-[color:var(--border-subtle)] text-[color:var(--text-muted)] hover:text-indigo-600 hover:bg-[color:var(--bg-subtle)] disabled:opacity-40"
+                    title="Generate a barcode for this batch"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Manufactured Date">
+                  <Input type="date" value={form.mfgDate} onChange={(e) => setForm({ ...form, mfgDate: e.target.value })} />
+                </Field>
+                <Field label="Expiry Date">
+                  <Input type="date" value={form.expiryDate} onChange={(e) => setForm({ ...form, expiryDate: e.target.value })} />
+                </Field>
+              </div>
+              <Field label="Quantity" required>
+                <Input
+                  type="number"
+                  step="any"
+                  min="0"
+                  value={form.qty}
+                  onChange={(e) => setForm({ ...form, qty: e.target.value })}
+                />
+              </Field>
+            </div>
+
+            <div className="space-y-3 pt-4 border-t border-[color:var(--border-subtle)]">
+              <h4 className="text-[11px] font-bold text-[color:var(--text-muted)] uppercase tracking-wider">Pricing (optional)</h4>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Cost Price (₹)">
+                  <Input type="number" step="any" value={form.costPrice} onChange={(e) => setForm({ ...form, costPrice: e.target.value })} />
+                </Field>
+                <Field label="Selling Price (₹)" hint="Blank = product's price">
+                  <Input
+                    type="number"
+                    step="any"
+                    value={form.sellPrice}
+                    onChange={(e) => setForm({ ...form, sellPrice: e.target.value })}
+                    placeholder={product.price ? `Auto ₹${product.price}` : 'Sell ₹'}
+                  />
+                </Field>
+              </div>
+              <Field label="MRP (₹)" hint="Blank = product's MRP">
+                <Input
+                  type="number"
+                  step="any"
+                  value={form.mrp}
+                  onChange={(e) => setForm({ ...form, mrp: e.target.value })}
+                  placeholder={product.mrp ? `Auto ₹${product.mrp}` : 'MRP ₹'}
+                />
+              </Field>
+              {(warehouses || []).length > 0 && (
+                <Field label="Warehouse">
+                  <Select value={form.warehouseId} onChange={(e) => setForm({ ...form, warehouseId: e.target.value })}>
+                    {warehouses.map((w) => (
+                      <option key={w.id} value={w.id}>{w.name}</option>
+                    ))}
+                  </Select>
+                </Field>
+              )}
+            </div>
+          </form>
+        </Drawer>
+      )}
+
+      {/* Delete Confirm Modal */}
+      {deleteTarget && product && (
+        <Modal open={true} title={`Delete Batch ${deleteTarget.batchNo}`} icon={Trash2} onClose={() => setDeleteTarget(null)}>
+          <div className="space-y-4">
+            <p className="text-xs text-[color:var(--text-secondary)] leading-relaxed">
+              This removes batch <strong>{deleteTarget.batchNo}</strong> and its {deleteTarget.qty} {product.unit} of stock entirely —
+              it can't be undone. If the stock is just expired or damaged rather than a mistaken entry, use{' '}
+              <strong>Write Off</strong> on the Current Stock view instead, so there's a record of why.
+            </p>
+            <div className="flex justify-end gap-2 pt-3 border-t border-[color:var(--border-subtle)]">
+              <Button type="button" variant="secondary" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+              <Button variant="danger" icon={Trash2} onClick={submitDelete} loading={deleting} disabled={deleting}>
+                Delete Batch
+              </Button>
+            </div>
+          </div>
         </Modal>
       )}
     </div>
@@ -6814,6 +7118,30 @@ function ImportExportTab({ products, categories, units, showToast, onRefresh }) 
     showToast(`Exported ${filteredExportProducts.length} product(s) to PDF.`);
   };
 
+  // QR Export — ONLY the 5 fields a weight/QR label needs: PLU No (embeddedId),
+  // Product Name, P Code (its own field, separate from SKU), Price, and Unit (W/P) — exported
+  // exactly as typed into those fields, no inference or reformatting on this end.
+  const qrFieldCols = [
+    { key: 'embeddedId', label: 'PLU No' },
+    { key: 'name', label: 'Product Name' },
+    { key: 'pCode', label: 'P Code' },
+    { key: 'price', label: 'Price' },
+    { key: 'weightFlag', label: 'Unit (W/P)' }
+  ];
+
+  // Only products with a PLU No actually filled in go into the QR Export — everything else is
+  // ignored, even if it would otherwise match the category/status filters above.
+  const qrExportRows = filteredExportProducts.filter((p) => String(p.embeddedId || '').trim());
+
+  const handleExportQrFieldsCSV = () => {
+    if (!qrExportRows.length) {
+      showToast('No products have a PLU No filled in — nothing to export.', 'error');
+      return;
+    }
+    exportReport('csv', { title: 'QR Export', columns: qrFieldCols, rows: qrExportRows });
+    showToast(`Exported ${qrExportRows.length} product(s) with a PLU No — PLU No, Product Name, P Code, Price, Unit (W/P) — to CSV.`);
+  };
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       {/* Excel / CSV Import Section */}
@@ -6909,6 +7237,25 @@ function ImportExportTab({ products, categories, units, showToast, onRefresh }) 
               <div className="font-bold text-sm text-[color:var(--text-primary)]">PDF</div>
               <div className="text-xs text-[color:var(--text-secondary)] font-medium">Print-formatted report</div>
             </button>
+          </div>
+
+          {/* QR Export — only PLU No, Product Name, P Code, Price, Unit (W/P); nothing else. */}
+          <div className="p-3 rounded-xl border border-indigo-200 dark:border-indigo-800/80 bg-indigo-50/40 dark:bg-indigo-950/20 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+            <div>
+              <div className="flex items-center gap-1.5">
+                <QrCode className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                <div className="font-bold text-xs text-[color:var(--text-primary)]">QR Export</div>
+              </div>
+              <div className="text-[11px] text-[color:var(--text-secondary)] font-medium mt-0.5">
+                PLU No, Product Name, P Code, Price, Unit (W/P) — nothing else. Only products with a PLU No filled in are included.
+              </div>
+              <div className="text-[11px] text-[color:var(--text-muted)] font-medium mt-0.5">
+                {qrExportRows.length} of {filteredExportProducts.length} product(s) have a PLU No and will be exported.
+              </div>
+            </div>
+            <Button size="sm" variant="secondary" icon={Download} onClick={handleExportQrFieldsCSV}>
+              Export CSV
+            </Button>
           </div>
         </div>
       </Panel>

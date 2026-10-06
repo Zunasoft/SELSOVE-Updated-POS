@@ -169,16 +169,20 @@ export default function PurchaseManager({ tenant, token, showToast }) {
     }
   };
 
-  // api.get() unwraps to the raw array, so period totals are derived here
-  // rather than read from a summary envelope.
+  // api.get() unwraps to the raw array (which still includes VOID rows), so period totals are
+  // derived here rather than read from the backend's own summary envelope. A voided purchase's
+  // paymentStatus/paidAmount is never touched by the void handler, so it must be filtered out here
+  // explicitly — otherwise it keeps counting as outstanding forever, drifting from the ledger-based
+  // payable shown on Parties and the Accounts dashboard (both of which correctly exclude it).
   const summary = useMemo(() => {
-    const count = purchases.length;
-    const total = purchases.reduce((s, p) => s + (p.totalAmount || 0), 0);
-    const unpaid = purchases.reduce(
+    const active = purchases.filter((p) => p.status !== 'VOID');
+    const count = active.length;
+    const total = active.reduce((s, p) => s + (p.totalAmount || 0), 0);
+    const unpaid = active.reduce(
       (s, p) => s + (p.paymentStatus === 'PAID' ? 0 : (p.totalAmount || 0) - (p.paidAmount || 0)),
       0
     );
-    const overdue = purchases.filter((p) => p.isOverdue);
+    const overdue = active.filter((p) => p.isOverdue);
     const overdueAmount = overdue.reduce((s, p) => s + (p.totalAmount || 0) - (p.paidAmount || 0), 0);
     return { count, total, unpaid, overdueCount: overdue.length, overdueAmount };
   }, [purchases]);
@@ -546,7 +550,7 @@ export default function PurchaseManager({ tenant, token, showToast }) {
             }
           ]}
           rows={report.byVendor}
-          rowKey={(v, i) => v.vendor || i}
+          rowKey={(v, i) => v.vendorId || v.vendor || i}
           empty={<EmptyState title="No vendor purchases yet" />}
           footer={['Total', byVendorTotals.invoices, money(byVendorTotals.total), money(byVendorTotals.unpaid)]}
         />
@@ -1457,6 +1461,7 @@ function PriceSheetPanel({ sheets, sheetId, onSheetChange, products, items, edit
                         <td className="py-2 px-3 font-bold text-[color:var(--text-primary)]">
                           {p.name}
                           {p.trackBatches && line && <Badge tone="neutral" className="ml-1.5">Batch · price kept</Badge>}
+                          {p.barcode && <div className="font-mono font-normal text-[10px] text-[color:var(--text-muted)] mt-0.5">{p.barcode}</div>}
                         </td>
                         {sheet.isLocal ? (
                           <td className="py-2 px-3 text-right">
@@ -2777,6 +2782,7 @@ function NewPurchaseModal({
                     <th className="py-2.5 px-3 w-24 text-right">Pur. Rate (₹)</th>
                     <th className="py-2.5 px-3 w-24 text-right text-indigo-600 dark:text-indigo-400">Sell Price (₹)</th>
                     <th className="py-2.5 px-3 w-20 text-right">GST %</th>
+                    <th className="py-2.5 px-3 w-28">Barcode</th>
                     <th className="py-2.5 px-3 w-20 text-right">Disc (₹)</th>
                     <th className="py-2.5 px-3 w-24 text-right">Total (₹)</th>
                     <th className="py-2.5 px-3 w-10 text-center"></th>
@@ -2997,6 +3003,15 @@ function NewPurchaseModal({
                               value={item.taxRate}
                               onChange={(e) => handleItemChange(idx, 'taxRate', e.target.value)}
                               className="text-right text-xs font-mono"
+                            />
+                          </td>
+
+                          <td className="py-2 px-3">
+                            <Input
+                              value={product?.barcode || ''}
+                              readOnly
+                              placeholder="—"
+                              className="text-xs font-mono bg-[color:var(--bg-subtle)] cursor-default"
                             />
                           </td>
 
@@ -3435,7 +3450,6 @@ function NewPurchaseModal({
         products={products}
         batchTrackingEnabled={batchTrackingEnabled}
         storeNearExpiryDays={storeNearExpiryDays}
-        hideBatches={true}
         showToast={showToast}
         onClose={() => setNewProductLineIndex(null)}
         onSaved={(newProduct) => {
@@ -4070,7 +4084,6 @@ function PurchaseOrderModal({
         products={products}
         batchTrackingEnabled={batchTrackingEnabled}
         storeNearExpiryDays={storeNearExpiryDays}
-        hideBatches={true}
         showToast={showToast}
         onClose={() => setNewProductLineIndex(null)}
         onSaved={(createdProduct) => {
